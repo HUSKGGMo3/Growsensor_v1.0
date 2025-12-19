@@ -1330,7 +1330,6 @@ void handleAuth() {
     server.send(401, "text/plain", "invalid");
   }
 }
-
 void handleAuthChange() {
   if (!enforceAuth()) {
     return;
@@ -1341,7 +1340,9 @@ void handleAuthChange() {
     return;
   }
 
-  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newUser = server.hasArg("new_user")
+                     ? server.arg("new_user")
+                     : adminUser;
   String newPass = server.arg("new_pass");
 
   adminUser = newUser;
@@ -1358,6 +1359,20 @@ void handleAuthChange() {
   String json =
       "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
   server.send(200, "application/json", json);
+}
+  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newPass = server.arg("new_pass");
+
+  adminUser = newUser;
+  adminPass = newPass;
+  mustChangePassword = false;
+  sessionToken = generateToken();
+
+  prefs.begin("grow-sensor", false);
+  prefs.putString("user", adminUser);
+  prefs.putString("pass", adminPass);
+  prefs.putBool("must_change", false);
+  prefs.end();
 }
 // end handleAuthChange
 
