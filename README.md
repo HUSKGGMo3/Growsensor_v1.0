@@ -1,72 +1,61 @@
-# Growcontroller v0.1.2 (ESP32)
+# Growsensor – ESP32 Monitoring Node
 
-Firmware für das GrowSensor-Gehäuse (ESP32) mit Captive Portal, geschützter Weboberfläche, Sensor-Manager, VPD-Auswertung pro Pflanzenstadium und 24h-Verlaufsdiagrammen.
+**Current release: v0.2.0 (untested / community preview)**
 
-## Hauptfeatures
-- **Login-Pflicht**: Standard-Creds `Admin` / `admin`, beim ersten Login muss das Passwort geändert werden (danach WLAN-Konfiguration möglich).
-- **Wi-Fi-Wizard**: WLAN-Scan mit Dropdown, optional Static IP, Erfolgsmeldung („Verbunden mit deiner Pflanze“) bzw. Fehler („Falsches Passwort“).
-- **Sensor-Manager**: Sensoren (BH1750, SHT31/SHT41, MLX90614, MH-Z14) ein-/ausschalten, Gesundheitsstatus (aktiv/keine Daten/abgeschaltet bei Stalls >4h).
-- **VPD pro Stadium**: Steckling/Sämling, Vegitativ, Blütephase, Späteblüte – Zielkorridor (kPa) wird angezeigt, Berechnung wird stadienabhängig skaliert.
-- **Live-Dashboard**: Lux → PPFD, CO₂, Umgebungstemp, Feuchte, Leaf-Temp, VPD sowie Ø-Werte der letzten 24h; 24h-Chart (Lux/CO₂/Temp/VPD, 5-min-Raster).
-- **Logs**: Letzte ~6h im UI ansehen oder herunterladen.
-- **Stall-Watchdog**: Bleiben Messwerte >4h unverändert, wird der Sensor deaktiviert und im Sensor-Tab als fehlerhaft markiert.
-- **Persistenz**: WLAN, Static IP, Spektrum, VPD-Stadium, Sensor-Schalter, Login-Daten in NVS.
+Growsensor is an all-in-one ESP32 monitoring node for indoor grows. It solves basic telemetry and visibility: reads multiple sensors, estimates PPFD, computes VPD per growth stage, and shows everything in a web UI with Wi-Fi setup and simple partner/supporter info. It does **not** drive any actuators.
 
-## Hardware-Pins
-| Sensor | Adresse/Interface | ESP32 Pins |
-| --- | --- | --- |
-| BH1750 | I²C `0x23` | SDA `21`, SCL `22` |
-| SHT31/SHT41 | I²C `0x44` | SDA `21`, SCL `22` |
-| MLX90614 | I²C `0x5A` | SDA `21`, SCL `22` |
-| MH-Z14 | UART 9600 | RX `16` (ESP32), TX `17` (ESP32) |
+Growsensor (monitoring) vs. future Growcontroller (control): this project only collects and visualizes data. A separate future Growcontroller project will handle automation and device control once ready.
 
-> Pins können in `src/main.cpp` angepasst werden (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
+## What this project is / is not
+- Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
+- No actuator control yet: no relays or automation are driven by this firmware.
+
+## Current Features (v0.2.0)
+- Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
+- VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
+- Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
+- Authentication with forced password change on first login.
+- Partner / Supporter module stored locally and shown in the UI.
+
+## Planned / Future
+- Growcontroller (automation and device control)
+- Stabilization, long-term testing, and production readiness
+- Additional sensor/driver coverage and usability improvements
+
+## Supported Hardware
+- ESP32 (classic, Arduino framework)
+- Sensors: BH1750 (Lux), SHT31/SHT30 (Temp/Humidity), MLX90614 (Leaf Temp), MH-Z19 series (CO₂).
+- I²C pins and CO₂ UART pins are configurable in `src/main.cpp` (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
+
+## Security & Login
+- Default login: `Admin` / `admin`
+- Password change is required on first login before Wi-Fi changes are allowed.
+- A master password exists for recovery; it is not exposed here—set your own at build time if needed.
 
 ## Build & Flash (PlatformIO)
-1. PlatformIO CLI oder VS Code Extension installieren.
-2. ESP32 per USB verbinden.
-3. Kompilieren & flashen:
+1. Install PlatformIO CLI or VS Code + PlatformIO extension.
+2. Connect the ESP32 via USB.
+3. Build and flash:
    ```sh
    pio run -t upload
    ```
-4. Serielles Log (115200 Baud):
+4. Serial monitor (115200 baud):
    ```sh
    pio device monitor -b 115200
    ```
 
-## Erstinbetriebnahme
-1. Gerät starten → AP `GrowSensor-Setup` (Passwort `growcontrol`).
-2. Browser öffnet Captive Portal (`http://192.168.4.1`).
-3. **Login:** `Admin` / `admin`. Direkt neues Passwort setzen (Pflicht).
-4. **Wi-Fi-Wizard:** „Netzwerke suchen“ → SSID wählen → Passwort (optional Static IP) → „Verbinden & Speichern“.
-5. Bei Erfolg grüne Meldung „Verbunden mit deiner Pflanze“. Bei falschem Passwort rote Meldung.
+## Stability notice
+- v0.2.0 is untested and provided as a community preview. Use at your own risk.
 
-## Weboberfläche
-- **Dashboard:** Live-Werte + Ø 24h, VPD-Ziel je Stadium, 24h-Chart (Lux/CO₂/Temp/VPD).
-- **Spektrum & VPD-Stadium:** Spektrum (Lux→PPFD-Faktor) und Pflanzenstadium wählen.
-- **Sensoren:** Aktiv/Deaktivieren, Status „aktiv“ / „keine Daten“ / „failed (stalled)“.
-- **Logs:** Letzte ~6h ansehen und herunterladen.
+## ESPHome option
+- Du kannst den ESP32 auch mit ESPHome flashen, um die Sensoren direkt in ESPHome zu nutzen. Lies dazu die ESPHome-Dokumentation und hinterlege die Sensoren korrekt in deiner ESPHome-Konfiguration.
 
-## API (auth-pflichtig, Header `X-Auth` aus Login)
-- `POST /api/auth` (`user`, `pass`) → `{ token, mustChange }`
-- `POST /api/auth/change` (`new_pass`, optional `new_user`)
-- `GET/POST /api/settings` (`channel`, `vpd_stage`, Static-IP-Felder)
-- `POST /api/wifi` (`ssid`, `pass`, `static=0|1`, `ip`, `gw`, `sn`)
-- `GET /api/telemetry` → `{ lux, ppfd, co2, temp, humidity, leaf, vpd, vpd_low, vpd_high }`
-- `GET|POST /api/sensors`
-- `GET /api/networks`
-- `POST /api/reset`
-- `GET /api/logs`
+## License
+- Non-commercial open source license (see `LICENSE`). You may view, use, and modify the code and contribute via pull requests.
+- Commercial use (including selling devices or services, or paid products) requires explicit permission.
+- Contributions are welcome; modified versions must keep the same license and attribution.
+- Deutsche Version: siehe `README.de.md` für eine vollständige Zusammenfassung auf Deutsch.
 
-## Hinweise
-- VPD-Zielkorridore (kPa):
-  - Steckling/Sämling: 0.4–0.8
-  - Vegitativ: 0.8–1.2
-  - Blütephase: 1.0–1.4
-  - Späteblüte: 0.8–1.2
-- Watchdog deaktiviert Sensoren nach >4h unverändertem Messwert; Status wird im Sensor-Tab angezeigt.
-- MH-Z14 Auto-Kalibrierung bleibt deaktiviert (`autoCalibration(false)`).
-
-## Trouble Shooting
-- Keine Werte? Sensor-Tab prüfen (Status „keine Daten“/„failed“) und Verkabelung kontrollieren.
-- WLAN-Probleme? Im AP-Modus erneut verbinden, einloggen und WLAN neu speichern.
+## Contributing
+- Contributions via pull requests are welcome (see `CONTRIBUTING.md`). Please respect the non-commercial license.
+- Experimental hardware/software: see `DISCLAIMER.md` before deploying.
