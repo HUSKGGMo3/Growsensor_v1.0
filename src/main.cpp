@@ -126,10 +126,16 @@ struct SensorTemplate {
   const char *name;
   const char *category;
   const char *interfaceType; // i2c, uart, gpio
-  int sda = -1;
-  int scl = -1;
-  int rx = -1;
-  int tx = -1;
+  int8_t sda;
+  int8_t scl;
+  int8_t rx;
+  int8_t tx;
+
+  constexpr SensorTemplate(const char *id, const char *label, const char *cat,
+                           const char *iface, int8_t sdaPin, int8_t sclPin,
+                           int8_t rxPin, int8_t txPin)
+      : type(id), name(label), category(cat), interfaceType(iface),
+        sda(sdaPin), scl(sclPin), rx(rxPin), tx(txPin) {}
 };
 
 struct SensorConfig {
@@ -149,15 +155,31 @@ struct SensorConfig {
 };
 
 const SensorTemplate SENSOR_TEMPLATES[] = {
-    {"BH1750", "BH1750", "light", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"TSL2591", "TSL2591", "light", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"SHT31", "SHT31", "climate", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"BME280", "BME280", "climate", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"DHT22", "DHT22", "climate", "gpio", -1, -1, -1, -1},
-    {"MLX90614", "MLX90614", "leaf", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"MHZ19", "MH-Z19", "co2", "uart", -1, -1, DEFAULT_CO2_RX_PIN, DEFAULT_CO2_TX_PIN},
-    {"SCD30", "SCD30", "co2", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
-    {"SCD40", "SCD40", "co2", "i2c", DEFAULT_I2C_SDA_PIN, DEFAULT_I2C_SCL_PIN, -1, -1},
+    SensorTemplate("BH1750", "BH1750", "light", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("TSL2591", "TSL2591", "light", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("SHT31", "SHT31", "climate", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("BME280", "BME280", "climate", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("DHT22", "DHT22", "climate", "gpio", -1, -1, -1, -1),
+    SensorTemplate("MLX90614", "MLX90614", "leaf", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("MHZ19", "MH-Z19", "co2", "uart", -1, -1,
+                   static_cast<int8_t>(DEFAULT_CO2_RX_PIN),
+                   static_cast<int8_t>(DEFAULT_CO2_TX_PIN)),
+    SensorTemplate("SCD30", "SCD30", "co2", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
+    SensorTemplate("SCD40", "SCD40", "co2", "i2c",
+                   static_cast<int8_t>(DEFAULT_I2C_SDA_PIN),
+                   static_cast<int8_t>(DEFAULT_I2C_SCL_PIN), -1, -1),
 };
 const size_t SENSOR_TEMPLATE_COUNT = sizeof(SENSOR_TEMPLATES) / sizeof(SENSOR_TEMPLATES[0]);
 
