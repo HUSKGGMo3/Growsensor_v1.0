@@ -47,6 +47,23 @@ enum class LightChannel {
   Bloom
 };
 
+enum class ClimateSensorType {
+  SHT31,
+  DHT22,
+  BME280,
+  BME680,
+  SHT30,
+  DS18B20
+};
+
+enum class Co2SensorType {
+  MHZ19,
+  SENSEAIR_S8,
+  SCD30,
+  SCD40,
+  SCD41
+};
+
 float luxToPPFD(float lux, LightChannel channel) {
   // Factors derived from typical LED spectral profiles; adjust in UI if needed.
   switch (channel) {
@@ -108,6 +125,8 @@ String savedSsid;
 String savedPass;
 bool apMode = false;
 LightChannel channel = LightChannel::FullSpectrum;
+ClimateSensorType climateType = ClimateSensorType::SHT31;
+Co2SensorType co2Type = Co2SensorType::MHZ19;
 Telemetry latest;
 unsigned long lastSensorMillis = 0;
 unsigned long lastHistoryPush = 0;
@@ -179,6 +198,59 @@ LightChannel lightChannelFromString(const String &value) {
   if (value == "bloom")
     return LightChannel::Bloom;
   return LightChannel::FullSpectrum;
+}
+
+String climateSensorName(ClimateSensorType t) {
+  switch (t) {
+  case ClimateSensorType::SHT31:
+    return "sht31";
+  case ClimateSensorType::DHT22:
+    return "dht22";
+  case ClimateSensorType::BME280:
+    return "bme280";
+  case ClimateSensorType::BME680:
+    return "bme680";
+  case ClimateSensorType::SHT30:
+    return "sht30";
+  case ClimateSensorType::DS18B20:
+    return "ds18b20";
+  default:
+    return "sht31";
+  }
+}
+
+ClimateSensorType climateFromString(const String &v) {
+  if (v == "dht22") return ClimateSensorType::DHT22;
+  if (v == "bme280") return ClimateSensorType::BME280;
+  if (v == "bme680") return ClimateSensorType::BME680;
+  if (v == "sht30") return ClimateSensorType::SHT30;
+  if (v == "ds18b20") return ClimateSensorType::DS18B20;
+  return ClimateSensorType::SHT31;
+}
+
+String co2SensorName(Co2SensorType t) {
+  switch (t) {
+  case Co2SensorType::MHZ19:
+    return "mhz19";
+  case Co2SensorType::SENSEAIR_S8:
+    return "senseair_s8";
+  case Co2SensorType::SCD30:
+    return "scd30";
+  case Co2SensorType::SCD40:
+    return "scd40";
+  case Co2SensorType::SCD41:
+    return "scd41";
+  default:
+    return "mhz19";
+  }
+}
+
+Co2SensorType co2FromString(const String &v) {
+  if (v == "senseair_s8") return Co2SensorType::SENSEAIR_S8;
+  if (v == "scd30") return Co2SensorType::SCD30;
+  if (v == "scd40") return Co2SensorType::SCD40;
+  if (v == "scd41") return Co2SensorType::SCD41;
+  return Co2SensorType::MHZ19;
 }
 
 const VpdProfile &vpdProfileById(const String &id) {
@@ -254,6 +326,8 @@ bool connectToWiFi() {
   savedSsid = prefs.getString("ssid", "");
   savedPass = prefs.getString("pass", "");
   channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
+  climateType = climateFromString(prefs.getString("climate_type", "sht31"));
+  co2Type = co2FromString(prefs.getString("co2_type", "mhz19"));
   staticIpEnabled = prefs.getBool("static", false);
   staticIp.fromString(prefs.getString("ip", ""));
   staticGateway.fromString(prefs.getString("gw", ""));
@@ -331,12 +405,16 @@ void initSensors() {
     lightHealth.present = false;
   }
 
-  if (sht31.begin(0x44)) {
-    Serial.println("[Sensor] SHT31 initialized");
-    climateHealth.present = true;
+  if (climateType == ClimateSensorType::SHT31) {
+    if (sht31.begin(0x44)) {
+      Serial.println("[Sensor] SHT31 initialized");
+      climateHealth.present = true;
+    } else {
+      Serial.println("[Sensor] SHT31 not detected");
+      climateHealth.present = false;
+    }
   } else {
-    Serial.println("[Sensor] SHT31 not detected");
-    climateHealth.present = false;
+    climateHealth.present = true; // assume present; unsupported types will report no data
   }
 
   if (mlx.begin()) {
@@ -347,10 +425,14 @@ void initSensors() {
     leafHealth.present = false;
   }
 
-  co2Serial.begin(9600, SERIAL_8N1, CO2_RX_PIN, CO2_TX_PIN);
-  co2Sensor.begin(co2Serial);
-  co2Sensor.autoCalibration(false);
-  co2Health.present = true; // MH-Z14 can be probed via readings
+  if (co2Type == Co2SensorType::MHZ19) {
+    co2Serial.begin(9600, SERIAL_8N1, CO2_RX_PIN, CO2_TX_PIN);
+    co2Sensor.begin(co2Serial);
+    co2Sensor.autoCalibration(false);
+    co2Health.present = true; // MH-Z14 can be probed via readings
+  } else {
+    co2Health.present = true; // other sensors not implemented yet
+  }
 }
 
 void readSensors() {
@@ -367,8 +449,18 @@ void readSensors() {
     }
   }
 
-  float temp = enableClimate && climateHealth.present ? sht31.readTemperature() : NAN;
-  float humidity = enableClimate && climateHealth.present ? sht31.readHumidity() : NAN;
+  float temp = NAN;
+  float humidity = NAN;
+  if (enableClimate && climateHealth.present) {
+    if (climateType == ClimateSensorType::SHT31) {
+      temp = sht31.readTemperature();
+      humidity = sht31.readHumidity();
+    } else {
+      // Other climate sensors not implemented yet
+      temp = NAN;
+      humidity = NAN;
+    }
+  }
   if (!isnan(temp) && !isnan(humidity)) {
     latest.ambientTempC = temp;
     latest.humidity = humidity;
@@ -400,17 +492,21 @@ void readSensors() {
   }
 
   if (enableCo2 && co2Health.present) {
-    int ppm = co2Sensor.getCO2();
-    if (ppm > 0 && ppm < 5000) {
-      latest.co2ppm = ppm;
-      co2Health.healthy = true;
-      co2Health.lastUpdate = millis();
-      if (stallCo2.lastValue != ppm) {
-        stallCo2.lastValue = ppm;
-        stallCo2.lastChange = millis();
+    if (co2Type == Co2SensorType::MHZ19) {
+      int ppm = co2Sensor.getCO2();
+      if (ppm > 0 && ppm < 5000) {
+        latest.co2ppm = ppm;
+        co2Health.healthy = true;
+        co2Health.lastUpdate = millis();
+        if (stallCo2.lastValue != ppm) {
+          stallCo2.lastValue = ppm;
+          stallCo2.lastChange = millis();
+        }
+      } else {
+        co2Health.healthy = false;
       }
     } else {
-      co2Health.healthy = false;
+      co2Health.healthy = false; // unsupported sensor type
     }
   }
 
@@ -568,6 +664,23 @@ String htmlPage() {
         <article class="card">
           <h3 style="margin-top:0">Sensoren</h3>
           <div id="sensorList"></div>
+          <label for="climateType" style="margin-top:12px; display:block;">Klimasensor</label>
+          <select id="climateType">
+            <option value="sht31">SHT31/SHT30</option>
+            <option value="dht22">DHT22/AM2302</option>
+            <option value="bme280">BME280</option>
+            <option value="bme680">BME680</option>
+            <option value="ds18b20">DS18B20 (Temp-only)</option>
+          </select>
+          <label for="co2Type" style="margin-top:12px; display:block;">CO₂ Sensor</label>
+          <select id="co2Type">
+            <option value="mhz19">MH-Z19B/C</option>
+            <option value="senseair_s8">Senseair S8</option>
+            <option value="scd30">Sensirion SCD30</option>
+            <option value="scd40">Sensirion SCD40</option>
+            <option value="scd41">Sensirion SCD41</option>
+          </select>
+          <button id="saveTypes" style="margin-top:8px;">Sensortypen speichern</button>
         </article>
       </section>
 
@@ -802,6 +915,8 @@ String htmlPage() {
           row.appendChild(status);
           container.appendChild(row);
         });
+        document.getElementById('climateType').value = data.climate_type;
+        document.getElementById('co2Type').value = data.co2_type;
       }
 
       async function scanNetworks() {
@@ -884,6 +999,13 @@ String htmlPage() {
       document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
       document.getElementById('loginBtn').addEventListener('click', login);
       document.getElementById('changePassBtn').addEventListener('click', changePassword);
+      document.getElementById('saveTypes').addEventListener('click', async () => {
+        const cType = document.getElementById('climateType').value;
+        const co2Type = document.getElementById('co2Type').value;
+        await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=climate_type&value=${cType}`});
+        await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=co2_type&value=${co2Type}`});
+        await loadSensors();
+      });
 
       setInterval(fetchData, 2500);
       if (!authToken) {
@@ -1091,12 +1213,32 @@ void handleSensorsApi() {
   if (!enforceAuth())
     return;
   if (server.method() == HTTP_POST) {
-    if (!server.hasArg("id") || !server.hasArg("enabled")) {
-      server.send(400, "text/plain", "missing id/enabled");
+    if (!server.hasArg("id")) {
+      server.send(400, "text/plain", "missing id");
+      return;
+    }
+    String id = server.arg("id");
+    if (id == "climate_type" && server.hasArg("value")) {
+      climateType = climateFromString(server.arg("value"));
+      prefs.begin("grow-sensor", false);
+      prefs.putString("climate_type", climateSensorName(climateType));
+      prefs.end();
+      server.send(200, "text/plain", "saved");
+      return;
+    }
+    if (id == "co2_type" && server.hasArg("value")) {
+      co2Type = co2FromString(server.arg("value"));
+      prefs.begin("grow-sensor", false);
+      prefs.putString("co2_type", co2SensorName(co2Type));
+      prefs.end();
+      server.send(200, "text/plain", "saved");
+      return;
+    }
+    if (!server.hasArg("enabled")) {
+      server.send(400, "text/plain", "missing enabled");
       return;
     }
     bool flag = server.arg("enabled") == "1";
-    String id = server.arg("id");
     if (id == "lux") enableLight = flag;
     else if (id == "climate") enableClimate = flag;
     else if (id == "leaf") enableLeaf = flag;
@@ -1117,12 +1259,15 @@ void handleSensorsApi() {
   };
   appendSensor("lux", "BH1750", lightHealth, enableLight);
   json += ",";
-  appendSensor("climate", "SHT31/SHT41", climateHealth, enableClimate);
+  appendSensor("climate", climateSensorName(climateType).c_str(), climateHealth, enableClimate);
   json += ",";
   appendSensor("leaf", "MLX90614", leafHealth, enableLeaf);
   json += ",";
-  appendSensor("co2", "MH-Z14", co2Health, enableCo2);
-  json += "]}";
+  appendSensor("co2", co2SensorName(co2Type).c_str(), co2Health, enableCo2);
+  json += "],";
+  json += "\"climate_type\":\"" + climateSensorName(climateType) + "\",";
+  json += "\"co2_type\":\"" + co2SensorName(co2Type) + "\"";
+  json += "}";
   server.send(200, "application/json", json);
 }
 
