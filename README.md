@@ -1,6 +1,6 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.2.5 (untested / community preview)**
+**Current release: v0.2.6 (untested / community preview)**
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
@@ -46,6 +46,12 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    pio device monitor -b 115200
    ```
 
+## v0.2.6 Changes
+- 6h history is always downsampled to 1-minute buckets for every metric with consistent `live` / `6h` ranges.
+- Mini- and detail charts show proper time/value axes with the right units and now reliably render `/api/history` data without empty graphs.
+- History JSON trims decimals per metric (Lux/Temp/Humidity 1, CO₂ 0, VPD 3, PPFD 1) to keep payloads and RAM usage lean; log output prunes when heap is low and caps API responses.
+- Sensor wizard modal now has a blurred overlay, pop-in animation, ESC/overlay-close debounce to avoid accidental closes, and defensive checks to prevent UI breakage.
+
 ## v0.2.5 Changes
 - VPD korrekt: Targets statt Skalierung + Apply Button für Stages.
 - VPD Heatmap klein/groß konsistent mit rotem Live-Punkt.
@@ -60,7 +66,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Verbesserung: Popup-Chart-UX mit klarerer Skalierung und optionalem Dev-Debug.
 
 ## Stability notice
-- v0.2.5 is untested and provided as a community preview. Use at your own risk.
+- v0.2.6 is untested and provided as a community preview. Use at your own risk.
 
 ## ESPHome option
 - You can also flash the ESP32 with ESPHome to use the sensors directly in ESPHome. See ESPHome documentation and configure the sensors accordingly.

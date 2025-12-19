@@ -40,11 +40,13 @@ static constexpr unsigned long WIFI_TIMEOUT = 15000;
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
 static constexpr unsigned long HISTORY_LIVE_CAPACITY = 512;   // ~17 minutes @2s
-static constexpr unsigned long HISTORY_LONG_CAPACITY = 384;   // ~6h @1/min
+static constexpr unsigned long HISTORY_LONG_CAPACITY = 384;   // 6h @1/min (+small buffer)
 static constexpr unsigned long HISTORY_BUCKET_MS = 60000;     // 1-minute buckets for long-term series
 static constexpr unsigned long LEAF_STALE_MS = 300000;         // 5 minutes stale threshold
 static constexpr float LEAF_DIFF_THRESHOLD = 5.0f;              // °C difference to mark IR sensor unhealthy
 static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log every 30s
+static constexpr size_t LOG_JSON_LIMIT = 180;                   // cap JSON output to latest entries
+static constexpr size_t LOG_HEAP_THRESHOLD = 24000;             // prune logs when free heap drops below ~24KB
 static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4h stall watchdog
 
 // Auth
@@ -245,6 +247,11 @@ void loadPartners();
 String logBuffer[LOG_CAPACITY];
 size_t logStart = 0;
 size_t logCount = 0;
+bool logPruneNoted = false;
+
+// Forward declarations
+void pruneLogsIfLowMemory(bool allowNotice = true);
+void appendLogLine(const String &line);
 
 // Sensor toggles (persisted)
 bool enableLight = true;
@@ -272,17 +279,18 @@ const VpdProfile VPD_PROFILES[] = {
 struct MetricDef {
   const char *id;
   const char *unit;
+  uint8_t decimals;
   HistorySeries series;
 };
 
 MetricDef HISTORY_METRICS[] = {
-    {"lux", "Lux", HistorySeries()},
-    {"ppfd", "µmol/m²/s", HistorySeries()},
-    {"co2", "ppm", HistorySeries()},
-    {"temp", "°C", HistorySeries()},
-    {"humidity", "%", HistorySeries()},
-    {"leaf", "°C", HistorySeries()},
-    {"vpd", "kPa", HistorySeries()},
+    {"lux", "Lux", 1, HistorySeries()},
+    {"ppfd", "µmol/m²/s", 1, HistorySeries()},
+    {"co2", "ppm", 0, HistorySeries()},
+    {"temp", "°C", 1, HistorySeries()},
+    {"humidity", "%", 1, HistorySeries()},
+    {"leaf", "°C", 1, HistorySeries()},
+    {"vpd", "kPa", 3, HistorySeries()},
 };
 const size_t HISTORY_METRIC_COUNT = sizeof(HISTORY_METRICS) / sizeof(HISTORY_METRICS[0]);
 
@@ -476,7 +484,7 @@ void loadPinsFromPrefs() {
   }
 }
 
-void logEvent(const String &msg) {
+void appendLogLine(const String &line) {
   size_t idx = (logStart + logCount) % LOG_CAPACITY;
   if (logCount == LOG_CAPACITY) {
     logStart = (logStart + 1) % LOG_CAPACITY;
@@ -484,7 +492,48 @@ void logEvent(const String &msg) {
   } else {
     logCount++;
   }
-  logBuffer[idx] = String(millis() / 1000) + "s: " + msg;
+  logBuffer[idx] = line;
+}
+
+void pruneLogsIfLowMemory(bool allowNotice) {
+  static bool pruning = false;
+  if (pruning)
+    return;
+  pruning = true;
+  size_t freeHeap = ESP.getFreeHeap();
+  bool lowHeap = freeHeap < LOG_HEAP_THRESHOLD;
+  bool nearFull = logCount >= LOG_CAPACITY - 8;
+  if (lowHeap || nearFull) {
+    size_t drop = 0;
+    if (lowHeap) {
+      drop = logCount > 1 ? (logCount / 2) : (logCount > 0 ? 1 : 0);
+    } else if (nearFull && logCount > 0) {
+      drop = (logCount / 8) + 1;
+    }
+    if (drop > 0) {
+      logStart = (logStart + drop) % LOG_CAPACITY;
+      logCount -= drop;
+    }
+    if (allowNotice && lowHeap && !logPruneNoted) {
+      logPruneNoted = true;
+      char buf[96];
+      snprintf(buf, sizeof(buf), "%lus: Log pruned due to low heap", millis() / 1000);
+      appendLogLine(String(buf));
+    }
+  } else if (!lowHeap) {
+    logPruneNoted = false;
+  }
+  pruning = false;
+}
+
+void logEvent(const String &msg) {
+  pruneLogsIfLowMemory(true);
+  String line;
+  line.reserve(msg.length() + 12);
+  line = String(millis() / 1000);
+  line += "s: ";
+  line += msg;
+  appendLogLine(line);
 }
 
 void loadPartners() {
@@ -963,7 +1012,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.2.5</title>
+    <title>GrowSensor v0.2.6</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
@@ -1036,6 +1085,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tag { display:inline-block; padding:3px 8px; border-radius:999px; font-size:0.8rem; background:#1f2937; color:#cbd5e1; }
       #chartModal { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index:80; }
       #chartModal .modal-card { background:#0b1220; border:1px solid #1f2937; border-radius:14px; padding:16px; width:90%; max-width:520px; box-shadow:0 10px 28px rgba(0,0,0,0.45); display:flex; flex-direction:column; gap:12px; }
+      #sensorWizard { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(15,23,42,0.55); backdrop-filter:blur(2px); z-index:80; transition:opacity 140ms ease; opacity:0; }
+      #sensorWizard.active { display:flex; opacity:1; }
+      #sensorWizard .modal-card { background:#0b1220; border:1px solid #1f2937; border-radius:14px; padding:16px; width:92%; max-width:640px; box-shadow:0 16px 32px rgba(0,0,0,0.5); transform:scale(0.94); opacity:0; transition:transform 160ms ease, opacity 160ms ease; }
+      #sensorWizard.active .modal-card { transform:scale(1); opacity:1; }
       .modal-tabs { display:flex; gap:8px; }
       .modal-tabs button { flex:1; padding:10px; background:#1f2937; border:1px solid #1f2937; color:#e2e8f0; }
       .modal-tabs button.active { background:linear-gradient(120deg,#22d3ee,#6366f1); color:#0b1220; border-color:transparent; }
@@ -1057,7 +1110,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.2.5</h1>
+          <h1>GrowSensor – v0.2.6</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1251,7 +1304,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.2.5 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.2.6 • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1294,8 +1347,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       </div>
     </div>
 
-    <div id="sensorWizard" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:80; align-items:center; justify-content:center;">
-      <div class="modal-card" style="max-width:640px; width:92%; position:relative;">
+    <div id="sensorWizard">
+      <div class="modal-card" style="position:relative;">
         <button class="modal-close" id="sensorWizardClose">&times;</button>
         <h3 style="margin-top:0">Sensor hinzufügen</h3>
         <div class="wizard-step active" data-step="1">
@@ -1405,11 +1458,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
       const metrics = ['lux','ppfd','co2','temp','humidity','leaf','vpd'];
+      const HISTORY_BUCKET_MS = 60000;
       const historyStore = {};
       metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 } });
       const maxLivePoints = 240; // ~10 minutes @2.5s
-      const maxLongPoints = 1440; // 24h @1min
+      const maxLongPoints = 384; // ~6h @1min (+small buffer)
       let lastTelemetryAt = 0;
+      let deviceTimeOffset = 0;
       let devMode = false;
       const DEV_CODE = "Test1234#";
       const hoverCanvases = {};
@@ -1430,15 +1485,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       let clickDebug = false;
       let lastVpdTargets = { low: null, high: null };
       let wifiFormOpen = false;
+      let wizardOpenedAt = 0;
       const detailCache = {};
       const METRIC_META = {
-        lux: { unit:'Lux', label:'Lux' },
-        ppfd:{ unit:'µmol/m²/s', label:'PPFD' },
-        co2: { unit:'ppm', label:'CO₂' },
-        temp:{ unit:'°C', label:'Temperatur' },
-        humidity:{ unit:'%', label:'Luftfeuchte' },
-        leaf:{ unit:'°C', label:'Leaf-Temp' },
-        vpd:{ unit:'kPa', label:'VPD' },
+        lux: { unit:'Lux', label:'Lux', decimals:1 },
+        ppfd:{ unit:'µmol/m²/s', label:'PPFD', decimals:1 },
+        co2: { unit:'ppm', label:'CO₂', decimals:0 },
+        temp:{ unit:'°C', label:'Temperatur', decimals:1 },
+        humidity:{ unit:'%', label:'Luftfeuchte', decimals:1 },
+        leaf:{ unit:'°C', label:'Leaf-Temp', decimals:1 },
+        vpd:{ unit:'kPa', label:'VPD', decimals:3 },
       };
 
       function authedFetch(url, options = {}) { return fetch(url, options); }
@@ -1475,7 +1531,18 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function setModalVisible(el, visible) {
         if (!el) return;
-        el.style.display = visible ? 'flex' : 'none';
+        const animate = el.id === 'sensorWizard';
+        if (animate) {
+          if (visible) {
+            el.style.display = 'flex';
+            requestAnimationFrame(() => el.classList.add('active'));
+          } else {
+            el.classList.remove('active');
+            setTimeout(() => { el.style.display = 'none'; }, 180);
+          }
+        } else {
+          el.style.display = visible ? 'flex' : 'none';
+        }
         el.style.pointerEvents = visible ? 'auto' : 'none';
       }
 
@@ -1488,6 +1555,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           });
         }
       }, true);
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          ['sensorWizard','chartModal','devModal'].forEach(id => setModalVisible(getEl(id), false));
+        }
+      });
 
       function setDot(id, ok, present, enabled) {
         const el = getEl(id);
@@ -1530,17 +1603,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         ctxTarget.scale(1/ratio,1/ratio);
       }
 
+      function normalizeMode(mode) {
+        return mode === '6h' ? '6h' : 'live';
+      }
+
       function recordMetric(metric, value) {
         if (!historyStore[metric]) return;
-        const now = Date.now();
+        const now = Date.now() - deviceTimeOffset;
         const entry = (typeof value === 'number' && !Number.isNaN(value)) ? value : null;
         const store = historyStore[metric];
         store.live.push({ t: now, v: entry });
         if (store.live.length > maxLivePoints) store.live.shift();
-        const bucket = Math.floor(now / 60000);
+        const bucket = Math.floor(now / HISTORY_BUCKET_MS);
         if (store.agg.bucket !== bucket) {
           if (store.agg.count > 0) {
-            store.long.push({ t: store.agg.bucket * 60000, v: store.agg.sum / store.agg.count });
+            store.long.push({ t: store.agg.bucket * HISTORY_BUCKET_MS, v: store.agg.sum / store.agg.count });
             if (store.long.length > maxLongPoints) store.long.shift();
           }
           store.agg.bucket = bucket;
@@ -1556,7 +1633,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function finalizeBucket(metric) {
         const store = historyStore[metric];
         if (!store || store.agg.count === 0) return;
-        const ts = store.agg.bucket * 60000;
+        const ts = store.agg.bucket * HISTORY_BUCKET_MS;
         const lastEntry = store.long[store.long.length - 1];
         if (!lastEntry || lastEntry.t !== ts) {
           store.long.push({ t: ts, v: store.agg.sum / store.agg.count });
@@ -1565,11 +1642,30 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function getSeriesData(metric, mode) {
+        const normalized = normalizeMode(mode);
         finalizeBucket(metric);
         const store = historyStore[metric] || { live: [], long: [] };
-        const source = mode === 'live' ? store.live : store.long;
-        const cap = mode === 'live' ? maxLivePoints : 360;
+        const source = normalized === 'live' ? store.live : store.long;
+        const cap = normalized === 'live' ? maxLivePoints : maxLongPoints;
         return source.slice(-cap);
+      }
+
+      function mergeHistory(metric, points, mode) {
+        const store = historyStore[metric];
+        if (!store) return;
+        const normalized = normalizeMode(mode);
+        const sanitized = points.map(p => ({ t: p.t, v: (p && typeof p.v === 'number' && !Number.isNaN(p.v)) ? p.v : null }));
+        if (normalized === '6h') {
+          store.long = sanitized.slice(-maxLongPoints);
+          if (store.long.length) {
+            const lastTs = store.long[store.long.length - 1].t;
+            store.agg.bucket = Math.floor(lastTs / HISTORY_BUCKET_MS);
+          }
+          store.agg.sum = 0;
+          store.agg.count = 0;
+        } else {
+          store.live = sanitized.slice(-maxLivePoints);
+        }
       }
 
       function collectPaired(mode) {
@@ -1585,54 +1681,67 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function formatTimeLabel(ts, mode, firstTs, lastTs) {
-        if (mode === 'live') {
+        const normalized = normalizeMode(mode);
+        if (normalized === 'live') {
           const delta = Math.max(0, ts - firstTs);
           const mm = Math.floor(delta / 60000);
           const ss = Math.floor((delta % 60000) / 1000);
           return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
         }
-        const now = Date.now();
-        const anchor = lastTs || now;
-        const shifted = now - Math.max(0, anchor - ts);
+        const wallTs = ts + deviceTimeOffset;
+        const anchor = (lastTs || ts) + deviceTimeOffset;
+        const shifted = wallTs > 0 ? wallTs : anchor;
         const d = new Date(shifted);
         return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
       }
 
-      function drawLineChart(canvas, ctxDraw, points, mode, unit) {
+      function drawLineChart(canvas, ctxDraw, points, mode, meta, opts = {}) {
         if (!canvas || !ctxDraw) return false;
+        const normalized = normalizeMode(mode);
+        const decimals = opts.decimals ?? meta?.decimals ?? 1;
+        const xTicks = opts.xTicks ?? 4;
+        const yTicks = opts.yTicks ?? 4;
+        const fontSize = opts.fontSize || 12;
         resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
-        const valid = points.map(p => p.v).filter(v => v !== null);
+        const valid = points.filter(p => p && p.v !== null && !Number.isNaN(p.v));
         if (!valid.length) return false;
-        const maxVal = Math.max(...valid);
-        const minVal = Math.min(...valid);
+        const values = valid.map(p => p.v);
+        const maxVal = Math.max(...values);
+        const minVal = Math.min(...values);
         const span = Math.max(maxVal - minVal, 0.0001);
-        const firstTs = points[0]?.t ?? 0;
-        const lastTs = points[points.length - 1]?.t ?? firstTs;
+        const firstTs = (points.find(p => p && typeof p.t === 'number')?.t) ?? 0;
+        const lastTs = (points.slice().reverse().find(p => p && typeof p.t === 'number')?.t) ?? (firstTs + 1);
+        const timeSpan = Math.max(1, lastTs - firstTs);
         ctxDraw.strokeStyle = '#1f2937';
         ctxDraw.fillStyle = '#94a3b8';
-        ctxDraw.font = '12px system-ui';
+        ctxDraw.font = `${fontSize}px system-ui`;
         ctxDraw.textBaseline = 'bottom';
-        for (let i=0;i<=4;i++){
-          const y=(canvas.height/4)*i;
+        for (let i=0;i<=yTicks;i++){
+          const y=(canvas.height/yTicks)*i;
           ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(canvas.width,y); ctxDraw.stroke();
-          const val = (maxVal - (span*(i/4))).toFixed(2);
-          ctxDraw.fillText(val, 6, Math.min(canvas.height-4,y+12));
+          const val = (maxVal - (span*(i/yTicks))).toFixed(decimals);
+          ctxDraw.fillText(val, 6, Math.min(canvas.height-4,y+fontSize));
         }
-        const ticks = 4;
-        for (let i=0;i<=ticks;i++) {
-          const x = (canvas.width/ticks)*i;
-          const idx = Math.floor((points.length-1)*(i/ticks));
-          const label = formatTimeLabel(points[idx]?.t ?? lastTs, mode, firstTs, lastTs);
-          ctxDraw.fillText(label, Math.max(0,x-16), canvas.height-4);
+        for (let i=0;i<=xTicks;i++) {
+          const x = (canvas.width/xTicks)*i;
+          const ts = firstTs + (timeSpan * (i/xTicks));
+          const label = formatTimeLabel(ts, normalized, firstTs, lastTs);
+          const labelWidth = ctxDraw.measureText(label).width;
+          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, canvas.width - labelWidth));
+          ctxDraw.fillText(label, xPos, canvas.height-4);
+        }
+        if (opts.unitLabel) {
+          const unitWidth = ctxDraw.measureText(opts.unitLabel).width;
+          ctxDraw.fillText(opts.unitLabel, canvas.width - unitWidth - 6, fontSize + 2);
         }
         ctxDraw.strokeStyle = '#22d3ee';
-        ctxDraw.lineWidth = 2;
+        ctxDraw.lineWidth = opts.lineWidth || 2;
         ctxDraw.beginPath();
         let started=false;
-        points.forEach((pt,i)=>{
-          if (pt.v === null) { started=false; return; }
-          const x = (i/Math.max(points.length-1,1))*canvas.width;
+        points.forEach((pt)=>{
+          if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
+          const x = ((pt.t - firstTs)/timeSpan)*canvas.width;
           const y = canvas.height - ((pt.v-minVal)/span)*canvas.height;
           if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
         });
@@ -1683,46 +1792,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!ctxHover || !ctxHover.canvas) { pushError(`Missing DOM element: hover canvas for ${metric}`); return; }
         const canvas = ctxHover.canvas;
         const data = getSeriesData(metric, '6h');
-        const mapped = data.map(p => p.v);
-        const values = mapped.filter(v => v !== null);
-        resizeCanvas(canvas, ctxHover);
-        ctxHover.clearRect(0,0,canvas.width, canvas.height);
-        if (!values.length) return;
-        const maxVal = Math.max(...values);
-        const minVal = Math.min(...values);
-        const span = Math.max(maxVal - minVal, 0.0001);
-        ctxHover.strokeStyle = '#1f2937';
-        ctxHover.lineWidth = 1;
-        ctxHover.beginPath();
-        mapped.forEach((val, i) => {
-          if (val === null) return;
-          const x = (i / Math.max(mapped.length - 1, 1)) * canvas.width;
-          const y = canvas.height - ((val - minVal) / span) * canvas.height;
-          if (i === 0) ctxHover.moveTo(x, y); else ctxHover.lineTo(x, y);
-        });
-        ctxHover.stroke();
-        ctxHover.strokeStyle = '#22d3ee';
-        ctxHover.lineWidth = 2;
-        ctxHover.beginPath();
-        let started = false;
-        mapped.forEach((val, i) => {
-          if (val === null) { started = false; return; }
-          const x = (i / Math.max(mapped.length - 1, 1)) * canvas.width;
-          const y = canvas.height - ((val - minVal) / span) * canvas.height;
-          if (!started) { ctxHover.moveTo(x, y); started = true; }
-          else ctxHover.lineTo(x, y);
-        });
-        ctxHover.stroke();
+        const meta = METRIC_META[metric] || { unit:'', decimals:1 };
+        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:2, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit });
+        if (!ok) {
+          resizeCanvas(canvas, ctxHover);
+          ctxHover.clearRect(0,0,canvas.width, canvas.height);
+        }
       }
 
-      function drawDetailChart(metric, mode, points, unit) {
+      function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, unit);
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1 });
         const debugBox = getEl('chartDebugText');
         if (devMode) {
           const values = points.map(p => p.v).filter(v => v !== null);
-          const min = values.length ? Math.min(...values).toFixed(2) : '–';
-          const max = values.length ? Math.max(...values).toFixed(2) : '–';
+          const min = values.length ? Math.min(...values).toFixed(meta?.decimals ?? 2) : '–';
+          const max = values.length ? Math.max(...values).toFixed(meta?.decimals ?? 2) : '–';
           debugBox.textContent = `points: ${values.length} / ${points.length} • min ${min} • max ${max}`;
           debugBox.style.display = 'block';
         } else {
@@ -1739,11 +1824,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       async function loadDetailHistory(metric, mode) {
         const key = `${metric}-${mode}`;
+        const normalized = normalizeMode(mode);
         if (!detailCache[key]) detailCache[key] = [];
         try {
-          const data = await fetchJson(`/api/history?metric=${metric}&range=${mode === '6h' ? '6h' : 'live'}`);
-          const mapped = (data.points || []).map(p => ({ t: p[0], v: p[1] === null ? null : parseFloat(p[1]) }));
+          const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized === '6h' ? '6h' : 'live'}`);
+          const mapped = (data.points || []).map(p => {
+            const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
+            return { t: p[0], v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+          });
           detailCache[key] = mapped;
+          if (normalized === '6h') mergeHistory(metric, mapped, normalized);
           clearErrors('API /api/history');
         } catch (err) {
           console.warn('history error', err);
@@ -1753,16 +1843,40 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return detailCache[key];
       }
 
+      async function primeHistory() {
+        for (const metric of metrics) {
+          try {
+            const data = await fetchJson(`/api/history?metric=${metric}&range=6h`);
+            const mapped = (data.points || []).map(p => {
+              const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
+              return { t: p[0], v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+            });
+            if (deviceTimeOffset === 0 && mapped.length) {
+              deviceTimeOffset = Date.now() - mapped[mapped.length - 1].t;
+            }
+            mergeHistory(metric, mapped, '6h');
+            detailCache[`${metric}-6h`] = mapped;
+          } catch (err) {
+            pushError(`API /api/history failed: ${err.message}`);
+          }
+        }
+        drawChart();
+        updateAverages();
+        ['lux','co2','temp','humidity','leaf','vpd'].forEach(drawHover);
+      }
+
       function updateAverages() {
-        const set = (id, val, digits=1) => {
+        const setAvg = (id, metric) => {
           const el = getEl(id);
-          if (el) el.textContent = Number.isNaN(val) ? '–' : val.toFixed(digits);
+          const meta = METRIC_META[metric] || { decimals:1 };
+          const val = avg(getSeriesData(metric,'6h'));
+          if (el) el.textContent = Number.isNaN(val) ? '–' : val.toFixed(meta.decimals ?? 1);
         };
-        set('avgLux', avg(getSeriesData('lux','6h')));
-        set('avgCo2', avg(getSeriesData('co2','6h')), 0);
-        set('avgTemp', avg(getSeriesData('temp','6h')));
-        set('avgHum', avg(getSeriesData('humidity','6h')));
-        set('avgVpd', avg(getSeriesData('vpd','6h')), 3);
+        setAvg('avgLux', 'lux');
+        setAvg('avgCo2', 'co2');
+        setAvg('avgTemp', 'temp');
+        setAvg('avgHum', 'humidity');
+        setAvg('avgVpd', 'vpd');
       }
 
       function vpdColor(vpd) {
@@ -1893,6 +2007,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         try {
           const data = await fetchJson('/api/telemetry');
           lastTelemetryAt = Date.now();
+          if (typeof data.now === 'number') {
+            deviceTimeOffset = Date.now() - data.now;
+          }
           updateConnectionStatus(data.ap_mode === 1, data.wifi_connected === 1);
           setText('lux', (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–');
           setText('ppfd', (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–');
@@ -2106,6 +2223,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         });
         setDisplay('advancedPinsWarn', false);
         goWizardStep(1);
+        wizardOpenedAt = Date.now();
         setModalVisible(getEl('sensorWizard'), true);
       }
 
@@ -2147,7 +2265,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const sensorWizard = getEl('sensorWizard');
       if (sensorWizard) {
         sensorWizard.addEventListener('click', (e) => {
-          if (e.target.id === 'sensorWizard') setModalVisible(getEl('sensorWizard'), false);
+          if (e.target.id === 'sensorWizard' && (Date.now() - wizardOpenedAt) > 150) setModalVisible(getEl('sensorWizard'), false);
         });
       }
       const wizBack = getEl('wizBack');
@@ -2526,7 +2644,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       async function renderDetail() {
         if (!detailMetric) return;
-        const meta = METRIC_META[detailMetric] || { unit:'', label: detailMetric.toUpperCase() };
+        const meta = METRIC_META[detailMetric] || { unit:'', label: detailMetric.toUpperCase(), decimals:1 };
         if (yAxisLabel) yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
         if (xAxisLabel) xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss)' : 'Zeit (HH:MM)';
         const showHeatmap = detailMetric === 'vpd' && detailVpdView === 'heatmap';
@@ -2538,7 +2656,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points);
         } else {
           const historyPoints = await loadDetailHistory(detailMetric, detailMode);
-          const ok = drawDetailChart(detailMetric, detailMode, historyPoints, meta.unit);
+          const ok = drawDetailChart(detailMetric, detailMode, historyPoints, meta);
           if (chartEmpty) chartEmpty.style.display = ok ? 'none' : 'flex';
         }
       }
@@ -2570,6 +2688,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       scanNetworks();
       loadLogs();
       loadPartners();
+      primeHistory();
       fetchData();
     </script>
   </body>
@@ -2646,6 +2765,7 @@ void handlePartners() {
 }
 
 void handleTelemetry() {
+  pruneLogsIfLowMemory(false);
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
   IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
   String ipStr = activeIp.toString();
@@ -2668,7 +2788,8 @@ void handleTelemetry() {
            "\"lux_ok\":%d,\"co2_ok\":%d,\"climate_ok\":%d,\"leaf_ok\":%d,\"vpd_ok\":%d,"
            "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
            "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d,"
-           "\"lux_age_ms\":%lu,\"co2_age_ms\":%lu,\"climate_age_ms\":%lu,\"leaf_age_ms\":%lu}",
+           "\"lux_age_ms\":%lu,\"co2_age_ms\":%lu,\"climate_age_ms\":%lu,\"leaf_age_ms\":%lu,"
+           "\"now\":%lu}",
            safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
            safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
@@ -2676,7 +2797,8 @@ void handleTelemetry() {
            luxOk ? 1 : 0, co2Ok ? 1 : 0, climateOk ? 1 : 0, leafOk ? 1 : 0, vpdOk ? 1 : 0,
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
-           ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate));
+           ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate),
+           now);
   server.send(200, "application/json", json);
 }
 
@@ -2696,6 +2818,7 @@ void handleHistory() {
   flushBucketsUpTo(def->series, now);
 
   size_t pointCount = liveRange ? def->series.liveCount : def->series.longCount + (def->series.aggBucketStart != 0 ? 1 : 0);
+  pruneLogsIfLowMemory(false);
   String json;
   json.reserve(64 + pointCount * 24);
   json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
@@ -2708,7 +2831,7 @@ void handleHistory() {
     if (isnan(v)) {
       json += "null";
     } else {
-      json += String(v, 2);
+      json += String(v, def->decimals);
     }
     json += "]";
   };
@@ -3141,11 +3264,16 @@ void handleSensorsConfig() {
 void handleLogs() {
   if (!enforceAuth())
     return;
-  String json = "[";
-  for (size_t i = 0; i < logCount; i++) {
-    size_t idx = (logStart + i) % LOG_CAPACITY;
+  pruneLogsIfLowMemory(false);
+  size_t count = logCount > LOG_JSON_LIMIT ? LOG_JSON_LIMIT : logCount;
+  size_t startIdx = (logStart + (logCount > count ? (logCount - count) : 0)) % LOG_CAPACITY;
+  String json;
+  json.reserve(8 + count * 32);
+  json = "[";
+  for (size_t i = 0; i < count; i++) {
+    size_t idx = (startIdx + i) % LOG_CAPACITY;
     json += "\"" + logBuffer[idx] + "\"";
-    if (i < logCount - 1)
+    if (i < count - 1)
       json += ",";
   }
   json += "]";
@@ -3193,6 +3321,7 @@ void loop() {
   if (apMode) {
     dnsServer.processNextRequest();
   }
+  pruneLogsIfLowMemory(false);
   server.handleClient();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
