@@ -1,493 +1,1328 @@
-diff --git a/src/main.cpp b/src/main.cpp
-new file mode 100644
-index 0000000000000000000000000000000000000000..8da767e67cad75b13d8045aa2067a269fe6b3012
---- /dev/null
-+++ b/src/main.cpp
-@@ -0,0 +1,487 @@
-+#include <Arduino.h>
-+#include <WiFi.h>
-+#include <WebServer.h>
-+#include <DNSServer.h>
-+#include <Preferences.h>
-+#include <Wire.h>
-+#include <BH1750.h>
-+#include <Adafruit_SHT31.h>
-+#include <Adafruit_MLX90614.h>
-+#include <MHZ19.h>
-+
-+// ----------------------------
-+// Pin and peripheral settings
-+// ----------------------------
-+static constexpr uint8_t I2C_SDA_PIN = 21;
-+static constexpr uint8_t I2C_SCL_PIN = 22;
-+static constexpr uint8_t CO2_RX_PIN = 16; // ESP32 RX <- sensor TX
-+static constexpr uint8_t CO2_TX_PIN = 17; // ESP32 TX -> sensor RX
-+
-+// Access point settings
-+static const char *AP_SSID = "GrowSensor-Setup";
-+static const char *AP_PASSWORD = "growcontrol"; // keep non-empty for stability
-+static constexpr byte DNS_PORT = 53;
-+
-+// Wi-Fi connect timeout (ms)
-+static constexpr unsigned long WIFI_TIMEOUT = 15000;
-+
-+// Sensor refresh interval (ms)
-+static constexpr unsigned long SENSOR_INTERVAL = 2000;
-+
-+// Lux to PPFD conversion factors (approximate for common horticulture spectra)
-+enum class LightChannel {
-+  FullSpectrum,
-+  White,
-+  Bloom
-+};
-+
-+float luxToPPFD(float lux, LightChannel channel) {
-+  // Factors derived from typical LED spectral profiles; adjust in UI if needed.
-+  switch (channel) {
-+  case LightChannel::FullSpectrum:
-+    return lux * 0.014f; // full-spectrum horticulture LEDs
-+  case LightChannel::White:
-+    return lux * 0.0157f; // cool/neutral white channels
-+  case LightChannel::Bloom:
-+    return lux * 0.0175f; // red-heavy bloom channels
-+  default:
-+    return lux * 0.015f;
-+  }
-+}
-+
-+struct Telemetry {
-+  float lux = NAN;
-+  float ppfd = NAN;
-+  float ambientTempC = NAN;
-+  float humidity = NAN;
-+  float leafTempC = NAN;
-+  int co2ppm = -1;
-+};
-+
-+// Globals
-+BH1750 lightMeter;
-+Adafruit_SHT31 sht31 = Adafruit_SHT31();
-+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
-+HardwareSerial co2Serial(2);
-+MHZ19 co2Sensor;
-+Preferences prefs;
-+DNSServer dnsServer;
-+WebServer server(80);
-+
-+String savedSsid;
-+String savedPass;
-+bool apMode = false;
-+LightChannel channel = LightChannel::FullSpectrum;
-+Telemetry latest;
-+unsigned long lastSensorMillis = 0;
-+
-+// ----------------------------
-+// Helpers
-+// ----------------------------
-+String lightChannelName() {
-+  switch (channel) {
-+  case LightChannel::FullSpectrum:
-+    return "full_spectrum";
-+  case LightChannel::White:
-+    return "white";
-+  case LightChannel::Bloom:
-+    return "bloom";
-+  default:
-+    return "full_spectrum";
-+  }
-+}
-+
-+LightChannel lightChannelFromString(const String &value) {
-+  if (value == "white")
-+    return LightChannel::White;
-+  if (value == "bloom")
-+    return LightChannel::Bloom;
-+  return LightChannel::FullSpectrum;
-+}
-+
-+// ----------------------------
-+// Wi-Fi handling
-+// ----------------------------
-+void startAccessPoint() {
-+  apMode = true;
-+  WiFi.mode(WIFI_AP);
-+  WiFi.softAP(AP_SSID, AP_PASSWORD);
-+  delay(100); // give the AP time to start
-+
-+  IPAddress apIP = WiFi.softAPIP();
-+  dnsServer.start(DNS_PORT, "*", apIP);
-+  Serial.printf("[AP] Started %s (%s)\n", AP_SSID, apIP.toString().c_str());
-+}
-+
-+bool connectToWiFi() {
-+  prefs.begin("grow-sensor", true);
-+  savedSsid = prefs.getString("ssid", "");
-+  savedPass = prefs.getString("pass", "");
-+  channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
-+  prefs.end();
-+
-+  if (savedSsid.isEmpty()) {
-+    Serial.println("[WiFi] No stored credentials, starting AP");
-+    startAccessPoint();
-+    return false;
-+  }
-+
-+  WiFi.mode(WIFI_STA);
-+  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
-+  Serial.printf("[WiFi] Connecting to %s ...\n", savedSsid.c_str());
-+
-+  unsigned long start = millis();
-+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
-+    delay(250);
-+    Serial.print('.');
-+  }
-+  Serial.println();
-+
-+  if (WiFi.status() == WL_CONNECTED) {
-+    apMode = false;
-+    Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
-+    return true;
-+  }
-+
-+  Serial.println("[WiFi] Connection failed, starting AP");
-+  startAccessPoint();
-+  return false;
-+}
-+
-+void saveWifiCredentials(const String &ssid, const String &pass) {
-+  prefs.begin("grow-sensor", false);
-+  prefs.putString("ssid", ssid);
-+  prefs.putString("pass", pass);
-+  prefs.end();
-+  savedSsid = ssid;
-+  savedPass = pass;
-+}
-+
-+void clearPreferences() {
-+  prefs.begin("grow-sensor", false);
-+  prefs.clear();
-+  prefs.end();
-+}
-+
-+// ----------------------------
-+// Sensor handling
-+// ----------------------------
-+void initSensors() {
-+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-+
-+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire)) {
-+    Serial.println("[Sensor] BH1750 initialized");
-+  } else {
-+    Serial.println("[Sensor] BH1750 not detected");
-+  }
-+
-+  if (sht31.begin(0x44)) {
-+    Serial.println("[Sensor] SHT31 initialized");
-+  } else {
-+    Serial.println("[Sensor] SHT31 not detected");
-+  }
-+
-+  if (mlx.begin()) {
-+    Serial.println("[Sensor] MLX90614 initialized");
-+  } else {
-+    Serial.println("[Sensor] MLX90614 not detected");
-+  }
-+
-+  co2Serial.begin(9600, SERIAL_8N1, CO2_RX_PIN, CO2_TX_PIN);
-+  co2Sensor.begin(co2Serial);
-+  co2Sensor.autoCalibration(false);
-+}
-+
-+void readSensors() {
-+  if (lightMeter.measurementReady()) {
-+    latest.lux = lightMeter.readLightLevel();
-+    latest.ppfd = luxToPPFD(latest.lux, channel);
-+  }
-+
-+  float temp = sht31.readTemperature();
-+  float humidity = sht31.readHumidity();
-+  if (!isnan(temp) && !isnan(humidity)) {
-+    latest.ambientTempC = temp;
-+    latest.humidity = humidity;
-+  }
-+
-+  double objTemp = mlx.readObjectTempC();
-+  if (!isnan(objTemp)) {
-+    latest.leafTempC = objTemp;
-+  }
-+
-+  int ppm = co2Sensor.getCO2();
-+  if (ppm > 0 && ppm < 5000) {
-+    latest.co2ppm = ppm;
-+  }
-+}
-+
-+// ----------------------------
-+// Web server and API
-+// ----------------------------
-+String htmlPage() {
-+  String page = R"HTML(
-+  <!doctype html>
-+  <html lang="de">
-+  <head>
-+    <meta charset="UTF-8" />
-+    <meta name="viewport" content="width=device-width, initial-scale=1" />
-+    <title>GrowSensor</title>
-+    <style>
-+      :root { color-scheme: light dark; }
-+      body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
-+      header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }
-+      h1 { margin: 0; font-size: 1.2rem; }
-+      main { padding: 16px; display: grid; gap: 12px; }
-+      .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); }
-+      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-+      .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
-+      label { display: block; margin-top: 8px; font-size: 0.9rem; }
-+      input, select, button { width: 100%; padding: 10px; margin-top: 4px; border-radius: 8px; border: 1px solid #1f2937; background: #0b1220; color: #e2e8f0; }
-+      button { cursor: pointer; border: none; background: linear-gradient(120deg, #22d3ee, #6366f1); color: #0b1220; font-weight: 600; }
-+      .chart { position: relative; height: 200px; }
-+      canvas { width: 100%; height: 200px; }
-+      footer { text-align: center; padding: 12px; font-size: 0.85rem; color: #94a3b8; }
-+    </style>
-+  </head>
-+  <body>
-+    <header><h1>GrowSensor – v0.1</h1></header>
-+    <main>
-+      <section class="grid">
-+        <article class="card"><div>Licht (Lux)</div><div class="value" id="lux">–</div></article>
-+        <article class="card"><div>PPFD (µmol/m²/s)</div><div class="value" id="ppfd">–</div></article>
-+        <article class="card"><div>CO₂ (ppm)</div><div class="value" id="co2">–</div></article>
-+        <article class="card"><div>Temperatur (°C)</div><div class="value" id="temp">–</div></article>
-+        <article class="card"><div>Luftfeuchte (%)</div><div class="value" id="humidity">–</div></article>
-+        <article class="card"><div>Blatt-Temp (°C)</div><div class="value" id="leaf">–</div></article>
-+      </section>
-+
-+      <section class="card">
-+        <h3 style="margin-top:0">Live Verlauf</h3>
-+        <div class="chart"><canvas id="chart"></canvas></div>
-+      </section>
-+
-+      <section class="grid">
-+        <article class="card">
-+          <h3 style="margin-top:0">Spektrum wählen</h3>
-+          <label for="channel">LED Kanal</label>
-+          <select id="channel">
-+            <option value="full_spectrum">Vollspectrum</option>
-+            <option value="white">White</option>
-+            <option value="bloom">Blütekanal</option>
-+          </select>
-+          <button id="saveChannel">Speichern</button>
-+        </article>
-+
-+        <article class="card">
-+          <h3 style="margin-top:0">Wi-Fi Setup</h3>
-+          <label for="ssid">SSID</label>
-+          <input id="ssid" placeholder="WLAN Name" />
-+          <label for="pass">Passwort</label>
-+          <input id="pass" type="password" placeholder="WLAN Passwort" />
-+          <button id="saveWifi">Verbinden & Speichern</button>
-+          <button id="resetWifi" style="margin-top:8px;background:#ef4444;color:#fff;">WLAN Reset</button>
-+          <p id="wifiStatus" style="margin-top:8px;color:#a5b4fc"></p>
-+        </article>
-+      </section>
-+    </main>
-+    <footer>Growcontroller v0.1 • Sensorgehäuse v0.3</footer>
-+
-+    <script>
-+      const chartCanvas = document.getElementById('chart');
-+      const ctx = chartCanvas.getContext('2d');
-+      const maxPoints = 48;
-+      const history = { labels: [], lux: [], co2: [], temp: [], humidity: [] };
-+
-+      function drawChart() {
-+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
-+        const width = chartCanvas.width;
-+        const height = chartCanvas.height;
-+        ctx.strokeStyle = '#1f2937';
-+        for (let i = 1; i < 5; i++) {
-+          const y = (height / 5) * i;
-+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-+        }
-+        const series = [
-+          { data: history.lux, color: '#22d3ee', label: 'Lux' },
-+          { data: history.co2, color: '#f59e0b', label: 'CO₂' },
-+          { data: history.temp, color: '#34d399', label: 'Temp' },
-+        ];
-+        series.forEach((serie, index) => {
-+          if (!serie.data.length) return;
-+          const maxVal = Math.max(...serie.data);
-+          const minVal = Math.min(...serie.data);
-+          const span = Math.max(maxVal - minVal, 0.0001);
-+          ctx.beginPath();
-+          serie.data.forEach((val, i) => {
-+            const x = (i / Math.max(series[0].data.length - 1, 1)) * width;
-+            const y = height - ((val - minVal) / span) * height;
-+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-+          });
-+          ctx.strokeStyle = serie.color;
-+          ctx.lineWidth = 2;
-+          ctx.stroke();
-+        });
-+      }
-+
-+      function pushHistory(obj) {
-+        history.labels.push(new Date().toLocaleTimeString());
-+        history.lux.push(obj.lux);
-+        history.co2.push(obj.co2);
-+        history.temp.push(obj.temp);
-+        history.humidity.push(obj.humidity);
-+        Object.keys(history).forEach(key => {
-+          if (history[key].length > maxPoints) history[key].shift();
-+        });
-+        drawChart();
-+      }
-+
-+      async function fetchData() {
-+        try {
-+          const res = await fetch('/api/telemetry');
-+          const data = await res.json();
-+          document.getElementById('lux').textContent = data.lux?.toFixed(1) ?? '–';
-+          document.getElementById('ppfd').textContent = data.ppfd?.toFixed(1) ?? '–';
-+          document.getElementById('co2').textContent = data.co2 ?? '–';
-+          document.getElementById('temp').textContent = data.temp?.toFixed(1) ?? '–';
-+          document.getElementById('humidity').textContent = data.humidity?.toFixed(1) ?? '–';
-+          document.getElementById('leaf').textContent = data.leaf?.toFixed(1) ?? '–';
-+          pushHistory(data);
-+        } catch (err) {
-+          console.warn('telemetry failed', err);
-+        }
-+      }
-+
-+      async function loadSettings() {
-+        const res = await fetch('/api/settings');
-+        const data = await res.json();
-+        document.getElementById('channel').value = data.channel;
-+        document.getElementById('wifiStatus').textContent = data.wifi;
-+        document.getElementById('ssid').value = data.ssid || '';
-+      }
-+
-+      document.getElementById('saveChannel').addEventListener('click', async () => {
-+        const channel = document.getElementById('channel').value;
-+        await fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}` });
-+        document.getElementById('wifiStatus').textContent = 'Spektrum gespeichert';
-+      });
-+
-+      document.getElementById('saveWifi').addEventListener('click', async () => {
-+        const ssid = document.getElementById('ssid').value;
-+        const pass = document.getElementById('pass').value;
-+        document.getElementById('wifiStatus').textContent = 'Speichern & Neustart...';
-+        await fetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}` });
-+        setTimeout(() => location.reload(), 2000);
-+      });
-+
-+      document.getElementById('resetWifi').addEventListener('click', async () => {
-+        document.getElementById('wifiStatus').textContent = 'Werkseinstellungen...';
-+        await fetch('/api/reset', { method: 'POST' });
-+        setTimeout(() => location.reload(), 1500);
-+      });
-+
-+      setInterval(fetchData, 2500);
-+      loadSettings();
-+      fetchData();
-+    </script>
-+  </body>
-+  </html>
-+  )HTML";
-+  return page;
-+}
-+
-+void handleRoot() { server.send(200, "text/html", htmlPage()); }
-+
-+void handleNotFound() {
-+  if (apMode) {
-+    // Captive portal redirect while the access point is active
-+    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
-+    server.send(302, "text/plain", "");
-+    return;
-+  }
-+  server.send(404, "text/plain", "Not found");
-+}
-+
-+void handleTelemetry() {
-+  char json[256];
-+  snprintf(json, sizeof(json),
-+           "{\"lux\":%.1f,\"ppfd\":%.1f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f}",
-+           latest.lux, latest.ppfd, latest.co2ppm, latest.ambientTempC, latest.humidity,
-+           latest.leafTempC);
-+  server.send(200, "application/json", json);
-+}
-+
-+void handleSettings() {
-+  if (server.method() == HTTP_GET) {
-+    String json = "{";
-+    json += "\"channel\":\"" + lightChannelName() + "\",";
-+    json += "\"wifi\":\"" + String(apMode ? "Access Point aktiv" : "Verbunden: " + WiFi.SSID()) + "\",";
-+    json += "\"ssid\":\"" + savedSsid + "\"";
-+    json += "}";
-+    server.send(200, "application/json", json);
-+    return;
-+  }
-+
-+  if (!server.hasArg("channel")) {
-+    server.send(400, "text/plain", "channel missing");
-+    return;
-+  }
-+  LightChannel next = lightChannelFromString(server.arg("channel"));
-+  channel = next;
-+  prefs.begin("grow-sensor", false);
-+  prefs.putString("channel", lightChannelName());
-+  prefs.end();
-+  server.send(200, "text/plain", "saved");
-+}
-+
-+void handleWifiSave() {
-+  if (!server.hasArg("ssid") || !server.hasArg("pass")) {
-+    server.send(400, "text/plain", "missing ssid/pass");
-+    return;
-+  }
-+  saveWifiCredentials(server.arg("ssid"), server.arg("pass"));
-+  server.send(200, "text/plain", "ok, rebooting");
-+  delay(500);
-+  ESP.restart();
-+}
-+
-+void handleReset() {
-+  clearPreferences();
-+  server.send(200, "text/plain", "cleared");
-+  delay(200);
-+  ESP.restart();
-+}
-+
-+void setupServer() {
-+  server.on("/", HTTP_GET, handleRoot);
-+  server.on("/api/telemetry", HTTP_GET, handleTelemetry);
-+  server.on("/api/settings", HTTP_GET, handleSettings);
-+  server.on("/api/settings", HTTP_POST, handleSettings);
-+  server.on("/api/wifi", HTTP_POST, handleWifiSave);
-+  server.on("/api/reset", HTTP_POST, handleReset);
-+  server.onNotFound(handleNotFound);
-+  server.begin();
-+}
-+
-+// ----------------------------
-+// Arduino entry points
-+// ----------------------------
-+void setup() {
-+  Serial.begin(115200);
-+  delay(200);
-+  Serial.println("\nGrowSensor booting...");
-+
-+  initSensors();
-+  connectToWiFi();
-+  setupServer();
-+}
-+
-+void loop() {
-+  dnsServer.processNextRequest();
-+  server.handleClient();
-+
-+  if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
-+    lastSensorMillis = millis();
-+    readSensors();
-+  }
-+}
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <BH1750.h>
+#include <Adafruit_SHT31.h>
+#include <Adafruit_MLX90614.h>
+#include <MHZ19.h>
+#include <math.h>
+#include <esp_system.h>
+
+// ----------------------------
+// Pin and peripheral settings
+// ----------------------------
+static constexpr uint8_t I2C_SDA_PIN = 21;
+static constexpr uint8_t I2C_SCL_PIN = 22;
+static constexpr uint8_t CO2_RX_PIN = 16; // ESP32 RX <- sensor TX
+static constexpr uint8_t CO2_TX_PIN = 17; // ESP32 TX -> sensor RX
+
+// Access point settings
+static const char *AP_SSID = "GrowSensor-Setup";
+static const char *AP_PASSWORD = "growcontrol"; // keep non-empty for stability
+static constexpr byte DNS_PORT = 53;
+
+// Wi-Fi connect timeout (ms)
+static constexpr unsigned long WIFI_TIMEOUT = 15000;
+
+// Sensor refresh interval (ms)
+static constexpr unsigned long SENSOR_INTERVAL = 2000;
+static constexpr unsigned long HISTORY_PUSH_INTERVAL = 300000; // 5 minutes for 24h window (288 points)
+static constexpr unsigned long LEAF_STALE_MS = 300000;         // 5 minutes stale threshold
+static constexpr float LEAF_DIFF_THRESHOLD = 5.0f;              // °C difference to mark IR sensor unhealthy
+static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log every 30s
+static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4h stall watchdog
+
+// Auth
+static const char *DEFAULT_USER = "Admin";
+static const char *DEFAULT_PASS = "admin";
+static const char *SUPPORT_MASTER_PASS = "GROW-SUPPORT-RESET-2024";
+
+// Lux to PPFD conversion factors (approximate for common horticulture spectra)
+enum class LightChannel {
+  FullSpectrum,
+  White,
+  Bloom
+};
+
+enum class ClimateSensorType {
+  SHT31,
+  DHT22,
+  BME280,
+  BME680,
+  SHT30,
+  DS18B20
+};
+
+enum class Co2SensorType {
+  MHZ19,
+  SENSEAIR_S8,
+  SCD30,
+  SCD40,
+  SCD41
+};
+
+float luxToPPFD(float lux, LightChannel channel) {
+  // Factors derived from typical LED spectral profiles; adjust in UI if needed.
+  switch (channel) {
+  case LightChannel::FullSpectrum:
+    return lux * 0.014f; // full-spectrum horticulture LEDs
+  case LightChannel::White:
+    return lux * 0.0157f; // cool/neutral white channels
+  case LightChannel::Bloom:
+    return lux * 0.0175f; // red-heavy bloom channels
+  default:
+    return lux * 0.015f;
+  }
+}
+
+struct Telemetry {
+  float lux = NAN;
+  float ppfd = NAN;
+  float ambientTempC = NAN;
+  float humidity = NAN;
+  float leafTempC = NAN;
+  int co2ppm = -1;
+  float vpd = NAN;
+  float vpdTargetLow = NAN;
+  float vpdTargetHigh = NAN;
+};
+
+struct SensorHealth {
+  bool present = false;
+  bool enabled = true;
+  bool healthy = false;
+  unsigned long lastUpdate = 0;
+};
+
+struct SensorStall {
+  float lastValue = NAN;
+  unsigned long lastChange = 0;
+};
+
+struct VpdProfile {
+  const char *id;
+  const char *label;
+  float factor;      // scaling factor for VPD (stage-specific tolerance)
+  float targetLow;   // recommended lower bound (kPa)
+  float targetHigh;  // recommended upper bound (kPa)
+};
+
+// Globals
+BH1750 lightMeter;
+Adafruit_SHT31 sht31 = Adafruit_SHT31();
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+HardwareSerial co2Serial(2);
+MHZ19 co2Sensor;
+Preferences prefs;
+DNSServer dnsServer;
+WebServer server(80);
+
+// Wi-Fi config
+String savedSsid;
+String savedPass;
+bool apMode = false;
+LightChannel channel = LightChannel::FullSpectrum;
+ClimateSensorType climateType = ClimateSensorType::SHT31;
+Co2SensorType co2Type = Co2SensorType::MHZ19;
+Telemetry latest;
+unsigned long lastSensorMillis = 0;
+unsigned long lastHistoryPush = 0;
+
+bool staticIpEnabled = false;
+IPAddress staticIp;
+IPAddress staticGateway;
+IPAddress staticSubnet;
+
+// Sensor health tracking
+SensorHealth lightHealth;
+SensorHealth climateHealth;
+SensorHealth leafHealth;
+SensorHealth co2Health;
+
+// Logging buffer
+String logBuffer[LOG_CAPACITY];
+size_t logStart = 0;
+size_t logCount = 0;
+
+// Sensor toggles (persisted)
+bool enableLight = true;
+bool enableClimate = true;
+bool enableLeaf = true;
+bool enableCo2 = true;
+
+// Auth/session
+String adminUser = DEFAULT_USER;
+String adminPass = DEFAULT_PASS;
+bool mustChangePassword = true;
+String sessionToken;
+
+// VPD stage
+String vpdStageId = "seedling";
+
+// Stall tracking
+SensorStall stallLight;
+SensorStall stallClimateTemp;
+SensorStall stallClimateHum;
+SensorStall stallLeaf;
+SensorStall stallCo2;
+
+const VpdProfile VPD_PROFILES[] = {
+    {"seedling", "Steckling/Sämling", 0.65f, 0.4f, 0.8f},
+    {"veg", "Vegitativ", 1.0f, 0.8f, 1.2f},
+    {"bloom", "Blütephase", 1.1f, 1.0f, 1.4f},
+    {"late_bloom", "Späteblüte", 0.95f, 0.8f, 1.2f},
+};
+
+// ----------------------------
+// Helpers
+// ----------------------------
+String lightChannelName() {
+  switch (channel) {
+  case LightChannel::FullSpectrum:
+    return "full_spectrum";
+  case LightChannel::White:
+    return "white";
+  case LightChannel::Bloom:
+    return "bloom";
+  default:
+    return "full_spectrum";
+  }
+}
+
+LightChannel lightChannelFromString(const String &value) {
+  if (value == "white")
+    return LightChannel::White;
+  if (value == "bloom")
+    return LightChannel::Bloom;
+  return LightChannel::FullSpectrum;
+}
+
+String climateSensorName(ClimateSensorType t) {
+  switch (t) {
+  case ClimateSensorType::SHT31:
+    return "sht31";
+  case ClimateSensorType::DHT22:
+    return "dht22";
+  case ClimateSensorType::BME280:
+    return "bme280";
+  case ClimateSensorType::BME680:
+    return "bme680";
+  case ClimateSensorType::SHT30:
+    return "sht30";
+  case ClimateSensorType::DS18B20:
+    return "ds18b20";
+  default:
+    return "sht31";
+  }
+}
+
+ClimateSensorType climateFromString(const String &v) {
+  if (v == "dht22") return ClimateSensorType::DHT22;
+  if (v == "bme280") return ClimateSensorType::BME280;
+  if (v == "bme680") return ClimateSensorType::BME680;
+  if (v == "sht30") return ClimateSensorType::SHT30;
+  if (v == "ds18b20") return ClimateSensorType::DS18B20;
+  return ClimateSensorType::SHT31;
+}
+
+String co2SensorName(Co2SensorType t) {
+  switch (t) {
+  case Co2SensorType::MHZ19:
+    return "mhz19";
+  case Co2SensorType::SENSEAIR_S8:
+    return "senseair_s8";
+  case Co2SensorType::SCD30:
+    return "scd30";
+  case Co2SensorType::SCD40:
+    return "scd40";
+  case Co2SensorType::SCD41:
+    return "scd41";
+  default:
+    return "mhz19";
+  }
+}
+
+Co2SensorType co2FromString(const String &v) {
+  if (v == "senseair_s8") return Co2SensorType::SENSEAIR_S8;
+  if (v == "scd30") return Co2SensorType::SCD30;
+  if (v == "scd40") return Co2SensorType::SCD40;
+  if (v == "scd41") return Co2SensorType::SCD41;
+  return Co2SensorType::MHZ19;
+}
+
+const VpdProfile &vpdProfileById(const String &id) {
+  for (const auto &p : VPD_PROFILES) {
+    if (id == p.id)
+      return p;
+  }
+  return VPD_PROFILES[0];
+}
+
+bool hasToken() { return sessionToken.length() > 0; }
+
+String generateToken() {
+  uint32_t r = esp_random();
+  char buf[17];
+  snprintf(buf, sizeof(buf), "%08lx%08lx", millis(), (unsigned long)r);
+  return String(buf);
+}
+
+bool isAuthorized() {
+  if (!hasToken())
+    return false;
+  if (!server.hasHeader("X-Auth"))
+    return false;
+  return server.header("X-Auth") == sessionToken;
+}
+
+bool enforceAuth() {
+  if (!isAuthorized()) {
+    server.send(401, "text/plain", "unauthorized");
+    return false;
+  }
+  return true;
+}
+
+void persistSensorFlags() {
+  prefs.begin("grow-sensor", false);
+  prefs.putBool("en_light", enableLight);
+  prefs.putBool("en_climate", enableClimate);
+  prefs.putBool("en_leaf", enableLeaf);
+  prefs.putBool("en_co2", enableCo2);
+  prefs.end();
+}
+
+void logEvent(const String &msg) {
+  size_t idx = (logStart + logCount) % LOG_CAPACITY;
+  if (logCount == LOG_CAPACITY) {
+    logStart = (logStart + 1) % LOG_CAPACITY;
+    idx = (logStart + logCount - 1) % LOG_CAPACITY;
+  } else {
+    logCount++;
+  }
+  logBuffer[idx] = String(millis() / 1000) + "s: " + msg;
+}
+
+// ----------------------------
+// Wi-Fi handling
+// ----------------------------
+void startAccessPoint() {
+  apMode = true;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  delay(100); // give the AP time to start
+
+  IPAddress apIP = WiFi.softAPIP();
+  dnsServer.start(DNS_PORT, "*", apIP);
+  Serial.printf("[AP] Started %s (%s)\n", AP_SSID, apIP.toString().c_str());
+  logEvent("AP mode active: " + String(AP_SSID));
+}
+
+bool connectToWiFi() {
+  prefs.begin("grow-sensor", true);
+  savedSsid = prefs.getString("ssid", "");
+  savedPass = prefs.getString("pass", "");
+  channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
+  climateType = climateFromString(prefs.getString("climate_type", "sht31"));
+  co2Type = co2FromString(prefs.getString("co2_type", "mhz19"));
+  staticIpEnabled = prefs.getBool("static", false);
+  staticIp.fromString(prefs.getString("ip", ""));
+  staticGateway.fromString(prefs.getString("gw", ""));
+  staticSubnet.fromString(prefs.getString("sn", ""));
+  enableLight = prefs.getBool("en_light", true);
+  enableClimate = prefs.getBool("en_climate", true);
+  enableLeaf = prefs.getBool("en_leaf", true);
+  enableCo2 = prefs.getBool("en_co2", true);
+  adminUser = prefs.getString("user", DEFAULT_USER);
+  adminPass = prefs.getString("pass", DEFAULT_PASS);
+  mustChangePassword = prefs.getBool("must_change", true);
+  vpdStageId = prefs.getString("vpd_stage", "seedling");
+  prefs.end();
+
+  if (savedSsid.isEmpty()) {
+    Serial.println("[WiFi] No stored credentials, starting AP");
+    startAccessPoint();
+    return false;
+  }
+
+  WiFi.mode(WIFI_STA);
+  if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
+    WiFi.config(staticIp, staticGateway, staticSubnet);
+  }
+  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+  Serial.printf("[WiFi] Connecting to %s ...\n", savedSsid.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    apMode = false;
+    Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    logEvent("WiFi connected: " + WiFi.localIP().toString());
+    return true;
+  }
+
+  Serial.println("[WiFi] Connection failed, starting AP");
+  logEvent("WiFi connection failed, switching to AP");
+  startAccessPoint();
+  return false;
+}
+
+void saveWifiCredentials(const String &ssid, const String &pass) {
+  prefs.begin("grow-sensor", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+  savedSsid = ssid;
+  savedPass = pass;
+}
+
+void clearPreferences() {
+  prefs.begin("grow-sensor", false);
+  prefs.clear();
+  prefs.end();
+  logEvent("Preferences cleared");
+}
+
+// ----------------------------
+// Sensor handling
+// ----------------------------
+void initSensors() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire)) {
+    Serial.println("[Sensor] BH1750 initialized");
+    lightHealth.present = true;
+  } else {
+    Serial.println("[Sensor] BH1750 not detected");
+    lightHealth.present = false;
+  }
+
+  if (climateType == ClimateSensorType::SHT31) {
+    if (sht31.begin(0x44)) {
+      Serial.println("[Sensor] SHT31 initialized");
+      climateHealth.present = true;
+    } else {
+      Serial.println("[Sensor] SHT31 not detected");
+      climateHealth.present = false;
+    }
+  } else {
+    climateHealth.present = true; // assume present; unsupported types will report no data
+  }
+
+  if (mlx.begin()) {
+    Serial.println("[Sensor] MLX90614 initialized");
+    leafHealth.present = true;
+  } else {
+    Serial.println("[Sensor] MLX90614 not detected");
+    leafHealth.present = false;
+  }
+
+  if (co2Type == Co2SensorType::MHZ19) {
+    co2Serial.begin(9600, SERIAL_8N1, CO2_RX_PIN, CO2_TX_PIN);
+    co2Sensor.begin(co2Serial);
+    co2Sensor.autoCalibration(false);
+    co2Health.present = true; // MH-Z14 can be probed via readings
+  } else {
+    co2Health.present = true; // other sensors not implemented yet
+  }
+}
+
+void readSensors() {
+  if (enableLight && lightHealth.present && lightMeter.measurementReady()) {
+    latest.lux = lightMeter.readLightLevel();
+    latest.ppfd = luxToPPFD(latest.lux, channel);
+    lightHealth.healthy = !isnan(latest.lux);
+    lightHealth.lastUpdate = millis();
+    if (!isnan(latest.lux)) {
+      if (isnan(stallLight.lastValue) || fabsf(stallLight.lastValue - latest.lux) > 0.01f) {
+        stallLight.lastValue = latest.lux;
+        stallLight.lastChange = millis();
+      }
+    }
+  }
+
+  float temp = NAN;
+  float humidity = NAN;
+  if (enableClimate && climateHealth.present) {
+    if (climateType == ClimateSensorType::SHT31) {
+      temp = sht31.readTemperature();
+      humidity = sht31.readHumidity();
+    } else {
+      // Other climate sensors not implemented yet
+      temp = NAN;
+      humidity = NAN;
+    }
+  }
+  if (!isnan(temp) && !isnan(humidity)) {
+    latest.ambientTempC = temp;
+    latest.humidity = humidity;
+    climateHealth.healthy = true;
+    climateHealth.lastUpdate = millis();
+    if (isnan(stallClimateTemp.lastValue) || fabsf(stallClimateTemp.lastValue - temp) > 0.01f) {
+      stallClimateTemp.lastValue = temp;
+      stallClimateTemp.lastChange = millis();
+    }
+    if (isnan(stallClimateHum.lastValue) || fabsf(stallClimateHum.lastValue - humidity) > 0.01f) {
+      stallClimateHum.lastValue = humidity;
+      stallClimateHum.lastChange = millis();
+    }
+  } else {
+    climateHealth.healthy = false;
+  }
+
+  double objTemp = enableLeaf && leafHealth.present ? mlx.readObjectTempC() : NAN;
+  if (!isnan(objTemp)) {
+    latest.leafTempC = objTemp;
+    leafHealth.healthy = true;
+    leafHealth.lastUpdate = millis();
+    if (isnan(stallLeaf.lastValue) || fabsf(stallLeaf.lastValue - objTemp) > 0.01f) {
+      stallLeaf.lastValue = objTemp;
+      stallLeaf.lastChange = millis();
+    }
+  } else {
+    leafHealth.healthy = false;
+  }
+
+  if (enableCo2 && co2Health.present) {
+    if (co2Type == Co2SensorType::MHZ19) {
+      int ppm = co2Sensor.getCO2();
+      if (ppm > 0 && ppm < 5000) {
+        latest.co2ppm = ppm;
+        co2Health.healthy = true;
+        co2Health.lastUpdate = millis();
+        if (stallCo2.lastValue != ppm) {
+          stallCo2.lastValue = ppm;
+          stallCo2.lastChange = millis();
+        }
+      } else {
+        co2Health.healthy = false;
+      }
+    } else {
+      co2Health.healthy = false; // unsupported sensor type
+    }
+  }
+
+  // Compute VPD when data is valid and IR sensor is not drifting excessively
+  float leafForVpd = latest.leafTempC;
+  if (!leafHealth.healthy && !isnan(latest.ambientTempC)) {
+    // Fallback: approximate leaf temp as ambient -2°C if IR sensor failed
+    leafForVpd = latest.ambientTempC - 2.0f;
+    latest.leafTempC = leafForVpd;
+  }
+
+  bool leafFresh = leafHealth.healthy || (!isnan(leafForVpd) && !isnan(latest.ambientTempC));
+  bool leafAligned = !isnan(leafForVpd) && !isnan(latest.ambientTempC) && fabs(leafForVpd - latest.ambientTempC) <= LEAF_DIFF_THRESHOLD;
+  if (leafFresh && leafAligned && !isnan(latest.humidity) && !isnan(latest.ambientTempC)) {
+    float satVP = 0.6108f * expf((17.27f * latest.ambientTempC) / (latest.ambientTempC + 237.3f)); // kPa
+    latest.vpd = (1.0f - (latest.humidity / 100.0f)) * satVP;
+  } else {
+    latest.vpd = NAN;
+  }
+
+  const VpdProfile &profile = vpdProfileById(vpdStageId);
+  if (!isnan(latest.vpd)) {
+    latest.vpd = latest.vpd * profile.factor;
+  }
+  latest.vpdTargetLow = profile.targetLow;
+  latest.vpdTargetHigh = profile.targetHigh;
+
+  unsigned long now = millis();
+  auto stallCheck = [&](SensorStall &stall, SensorHealth &health, bool &enabled, const char *name) {
+    if (stall.lastChange == 0)
+      stall.lastChange = now;
+    if (now - stall.lastChange > STALL_LIMIT_MS && enabled) {
+      enabled = false;
+      health.healthy = false;
+      persistSensorFlags();
+      logEvent(String(name) + " disabled (stalled >4h)");
+    }
+  };
+
+  stallCheck(stallLight, lightHealth, enableLight, "Light");
+  stallCheck(stallClimateTemp, climateHealth, enableClimate, "Climate");
+  stallCheck(stallLeaf, leafHealth, enableLeaf, "Leaf");
+  stallCheck(stallCo2, co2Health, enableCo2, "CO2");
+}
+
+// ----------------------------
+// Web server and API
+// ----------------------------
+String htmlPage() {
+  String page = R"HTML(
+  <!doctype html>
+  <html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GrowSensor</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
+      header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 10; }
+      h1 { margin: 0; font-size: 1.2rem; }
+      main { padding: 16px; display: grid; gap: 12px; }
+      .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); }
+      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+      label { display: block; margin-top: 8px; font-size: 0.9rem; }
+      input, select, button { width: 100%; padding: 10px; margin-top: 4px; border-radius: 8px; border: 1px solid #1f2937; background: #0b1220; color: #e2e8f0; }
+      button { cursor: pointer; border: none; background: linear-gradient(120deg, #22d3ee, #6366f1); color: #0b1220; font-weight: 600; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .row > * { flex: 1; }
+      .status { font-weight: 600; }
+      .status.ok { color: #34d399; }
+      .status.err { color: #f87171; }
+      .logbox { width: 100%; min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; white-space: pre-wrap; }
+      .chart { position: relative; height: 200px; }
+      canvas { width: 100%; height: 200px; }
+      footer { text-align: center; padding: 12px; font-size: 0.85rem; color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <header><h1>GrowSensor – v0.1</h1></header>
+    <main>
+      <section class="grid">
+        <article class="card"><div>Licht (Lux)</div><div class="value" id="lux">–</div></article>
+        <article class="card"><div>PPFD (µmol/m²/s)</div><div class="value" id="ppfd">–</div></article>
+        <article class="card"><div>CO₂ (ppm)</div><div class="value" id="co2">–</div></article>
+        <article class="card"><div>Umgebungstemperatur (°C)</div><div class="value" id="temp">–</div></article>
+        <article class="card"><div>Luftfeuchte (%)</div><div class="value" id="humidity">–</div></article>
+        <article class="card"><div>Leaf-Temp (°C)</div><div class="value" id="leaf">–</div></article>
+        <article class="card"><div>VPD (kPa)</div><div class="value" id="vpd">–</div></article>
+      </section>
+
+      <section class="card" id="avgCard">
+        <h3 style="margin-top:0">Gestern Ø (24h)</h3>
+        <div class="grid">
+          <div><strong>Lux:</strong> <span id="avgLux">–</span></div>
+          <div><strong>CO₂:</strong> <span id="avgCo2">–</span></div>
+          <div><strong>Temp:</strong> <span id="avgTemp">–</span></div>
+          <div><strong>Feuchte:</strong> <span id="avgHum">–</span></div>
+          <div><strong>VPD:</strong> <span id="avgVpd">–</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 style="margin-top:0">Live Verlauf</h3>
+        <div class="chart"><canvas id="chart"></canvas></div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h3 style="margin-top:0">Spektrum wählen</h3>
+          <label for="channel">LED Kanal</label>
+          <select id="channel">
+            <option value="full_spectrum">Vollspectrum</option>
+            <option value="white">White</option>
+            <option value="bloom">Blütekanal</option>
+          </select>
+          <button id="saveChannel">Speichern</button>
+          <label for="vpdStage" style="margin-top:12px; display:block;">Pflanzenstadium (VPD)</label>
+          <select id="vpdStage">
+            <option value="seedling">Steckling / Sämling (1 Woche)</option>
+            <option value="veg">Vegitativ</option>
+            <option value="bloom">Blütephase</option>
+            <option value="late_bloom">Späteblüte</option>
+          </select>
+          <p id="vpdTarget" style="margin-top:8px; color:#a5b4fc"></p>
+        </article>
+
+        <article class="card">
+          <h3 style="margin-top:0">Wi-Fi Setup</h3>
+          <div class="row">
+            <div style="flex:2">
+              <label for="ssid">SSID</label>
+              <select id="ssid"></select>
+            </div>
+            <button id="scanWifi" style="flex:1; margin-top: 28px;">Netzwerke suchen</button>
+          </div>
+          <label for="pass">Passwort</label>
+          <input id="pass" type="password" placeholder="WLAN Passwort" />
+          <div class="row">
+            <label style="flex:1; display:flex; gap:6px; align-items:center;">
+              <input type="checkbox" id="staticIpToggle" style="width:auto;"> Static IP
+            </label>
+          </div>
+          <div class="row">
+            <input id="ip" placeholder="IP (optional)" />
+            <input id="gw" placeholder="Gateway (optional)" />
+            <input id="sn" placeholder="Subnet (optional)" />
+          </div>
+          <button id="saveWifi">Verbinden & Speichern</button>
+          <button id="resetWifi" style="margin-top:8px;background:#ef4444;color:#fff;">WLAN Reset</button>
+          <p id="wifiStatus" class="status" style="margin-top:8px;"></p>
+        </article>
+
+        <article class="card">
+          <h3 style="margin-top:0">Sensoren</h3>
+          <div id="sensorList"></div>
+          <label for="climateType" style="margin-top:12px; display:block;">Klimasensor</label>
+          <select id="climateType">
+            <option value="sht31">SHT31/SHT30</option>
+            <option value="dht22">DHT22/AM2302</option>
+            <option value="bme280">BME280</option>
+            <option value="bme680">BME680</option>
+            <option value="ds18b20">DS18B20 (Temp-only)</option>
+          </select>
+          <label for="co2Type" style="margin-top:12px; display:block;">CO₂ Sensor</label>
+          <select id="co2Type">
+            <option value="mhz19">MH-Z19B/C</option>
+            <option value="senseair_s8">Senseair S8</option>
+            <option value="scd30">Sensirion SCD30</option>
+            <option value="scd40">Sensirion SCD40</option>
+            <option value="scd41">Sensirion SCD41</option>
+          </select>
+          <button id="saveTypes" style="margin-top:8px;">Sensortypen speichern</button>
+        </article>
+      </section>
+
+      <section class="card">
+        <h3 style="margin-top:0">Logs (letzte 6h)</h3>
+        <button id="refreshLogs">Aktualisieren</button>
+        <button id="downloadLogs">Download</button>
+        <pre class="logbox" id="logBox"></pre>
+      </section>
+    </main>
+    <footer>Growcontroller v0.1 • Sensorgehäuse v0.3</footer>
+
+    <div id="loginModal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:50;">
+      <div class="card" style="max-width:420px;width:90%;">
+        <h3 style="margin-top:0">Login</h3>
+        <label for="loginUser">Benutzer</label>
+        <input id="loginUser" placeholder="Admin" />
+        <label for="loginPass">Passwort</label>
+        <input id="loginPass" type="password" placeholder="admin" />
+        <label for="newPass">Neues Passwort (erforderlich beim ersten Login)</label>
+        <input id="newPass" type="password" placeholder="Neues Passwort" />
+        <div class="row">
+          <button id="loginBtn">Login</button>
+          <button id="changePassBtn" style="background:#22c55e;color:#0b1220;">Passwort ändern</button>
+        </div>
+        <p id="loginStatus" class="status" style="margin-top:8px;"></p>
+      </div>
+    </div>
+
+    <script>
+      let authToken = localStorage.getItem('growsensor_token') || '';
+      let mustChangePassword = false;
+
+      function showLogin(message = '') {
+        document.getElementById('loginModal').style.display = 'flex';
+        if (message) {
+          document.getElementById('loginStatus').textContent = message;
+          document.getElementById('loginStatus').className = 'status err';
+        }
+      }
+
+      function hideLogin() {
+        document.getElementById('loginModal').style.display = 'none';
+        document.getElementById('loginStatus').textContent = '';
+      }
+
+      async function authedFetch(url, options = {}) {
+        options.headers = options.headers || {};
+        if (authToken) {
+          options.headers['X-Auth'] = authToken;
+        }
+        const res = await fetch(url, options);
+        if (res.status === 401) {
+          showLogin('Bitte erneut einloggen');
+          throw new Error('unauthorized');
+        }
+        return res;
+      }
+
+      async function login() {
+        const user = document.getElementById('loginUser').value || 'Admin';
+        const pass = document.getElementById('loginPass').value || 'admin';
+        const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}` });
+        if (res.ok) {
+          const data = await res.json();
+          authToken = data.token;
+          mustChangePassword = data.mustChange === 1;
+          localStorage.setItem('growsensor_token', authToken);
+          document.getElementById('loginStatus').textContent = mustChangePassword ? 'Bitte Passwort ändern' : 'Angemeldet';
+          document.getElementById('loginStatus').className = 'status ok';
+          if (!mustChangePassword) {
+            hideLogin();
+            await loadSettings();
+            fetchData();
+          }
+        } else {
+          document.getElementById('loginStatus').textContent = 'Login fehlgeschlagen';
+          document.getElementById('loginStatus').className = 'status err';
+        }
+      }
+
+      async function changePassword() {
+        const newPass = document.getElementById('newPass').value;
+        if (!newPass) {
+          document.getElementById('loginStatus').textContent = 'Neues Passwort erforderlich';
+          document.getElementById('loginStatus').className = 'status err';
+          return;
+        }
+        try {
+          const res = await authedFetch('/api/auth/change', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: `new_pass=${encodeURIComponent(newPass)}&new_user=${encodeURIComponent(document.getElementById('loginUser').value || 'Admin')}` });
+          if (res.ok) {
+            mustChangePassword = false;
+            document.getElementById('loginStatus').textContent = 'Passwort geändert';
+            document.getElementById('loginStatus').className = 'status ok';
+            hideLogin();
+            await loadSettings();
+            fetchData();
+          }
+        } catch (err) {
+          document.getElementById('loginStatus').textContent = 'Änderung fehlgeschlagen';
+          document.getElementById('loginStatus').className = 'status err';
+        }
+      }
+      const chartCanvas = document.getElementById('chart');
+      const ctx = chartCanvas.getContext('2d');
+      const maxPoints = 288; // 5-min samples for 24h
+      const history = { labels: [], lux: [], co2: [], temp: [], humidity: [], vpd: [] };
+      let lastHistoryPush = 0;
+
+      function drawChart() {
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
+        const width = chartCanvas.width;
+        const height = chartCanvas.height;
+        ctx.strokeStyle = '#1f2937';
+        for (let i = 1; i < 5; i++) {
+          const y = (height / 5) * i;
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        }
+        const series = [
+          { data: history.lux, color: '#22d3ee', label: 'Lux' },
+          { data: history.co2, color: '#f59e0b', label: 'CO₂' },
+          { data: history.temp, color: '#34d399', label: 'Temp' },
+          { data: history.vpd, color: '#a855f7', label: 'VPD' },
+        ];
+        series.forEach((serie, index) => {
+          if (!serie.data.length) return;
+          const maxVal = Math.max(...serie.data);
+          const minVal = Math.min(...serie.data);
+          const span = Math.max(maxVal - minVal, 0.0001);
+          ctx.beginPath();
+          serie.data.forEach((val, i) => {
+            const x = (i / Math.max(series[0].data.length - 1, 1)) * width;
+            const y = height - ((val - minVal) / span) * height;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.strokeStyle = serie.color;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        });
+      }
+
+      function pushHistory(obj) {
+        const now = Date.now();
+        if (lastHistoryPush && (now - lastHistoryPush < 300000)) return; // 5 minutes
+        lastHistoryPush = now;
+        history.labels.push(new Date().toLocaleTimeString());
+        history.lux.push(obj.lux);
+        history.co2.push(obj.co2);
+        history.temp.push(obj.temp);
+        history.humidity.push(obj.humidity);
+        history.vpd.push(obj.vpd);
+        Object.keys(history).forEach(key => {
+          if (history[key].length > maxPoints) history[key].shift();
+        });
+        drawChart();
+        updateAverages();
+      }
+
+      function avg(arr) {
+        const filtered = arr.filter(v => typeof v === 'number' && !Number.isNaN(v));
+        if (!filtered.length) return NaN;
+        return filtered.reduce((a,b)=>a+b,0) / filtered.length;
+      }
+
+      function updateAverages() {
+        const set = (id, val, digits=1) => {
+          document.getElementById(id).textContent = Number.isNaN(val) ? '–' : val.toFixed(digits);
+        };
+        set('avgLux', avg(history.lux));
+        set('avgCo2', avg(history.co2), 0);
+        set('avgTemp', avg(history.temp));
+        set('avgHum', avg(history.humidity));
+        set('avgVpd', avg(history.vpd), 3);
+      }
+
+      async function fetchData() {
+        try {
+          const res = await authedFetch('/api/telemetry');
+          const data = await res.json();
+          document.getElementById('lux').textContent = data.lux?.toFixed(1) ?? '–';
+          document.getElementById('ppfd').textContent = data.ppfd?.toFixed(1) ?? '–';
+          document.getElementById('co2').textContent = data.co2 ?? '–';
+          document.getElementById('temp').textContent = data.temp?.toFixed(1) ?? '–';
+          document.getElementById('humidity').textContent = data.humidity?.toFixed(1) ?? '–';
+          document.getElementById('leaf').textContent = data.leaf?.toFixed(1) ?? '–';
+          document.getElementById('vpd').textContent = (data.vpd && !Number.isNaN(data.vpd)) ? data.vpd.toFixed(3) : '–';
+          document.getElementById('vpdTarget').textContent = `Ziel: ${data.vpd_low?.toFixed(2) ?? '–'} – ${data.vpd_high?.toFixed(2) ?? '–'} kPa`;
+          pushHistory(data);
+        } catch (err) {
+          console.warn('telemetry failed', err);
+        }
+      }
+
+      async function loadSettings() {
+        const res = await authedFetch('/api/settings');
+        const data = await res.json();
+        document.getElementById('channel').value = data.channel;
+        document.getElementById('vpdStage').value = data.vpd_stage;
+        document.getElementById('wifiStatus').textContent = data.wifi;
+        document.getElementById('wifiStatus').className = 'status ' + (data.connected ? 'ok' : 'err');
+        document.getElementById('ip').value = data.ip || '';
+        document.getElementById('gw').value = data.gw || '';
+        document.getElementById('sn').value = data.sn || '';
+        document.getElementById('staticIpToggle').checked = data.static || false;
+        await loadSensors();
+      }
+
+      async function loadSensors() {
+        const res = await authedFetch('/api/sensors');
+        const data = await res.json();
+        const container = document.getElementById('sensorList');
+        container.innerHTML = '';
+        data.sensors.forEach(sensor => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          const label = document.createElement('label');
+          label.style.flex = '2';
+          label.textContent = `${sensor.name} (${sensor.id})`;
+          const toggle = document.createElement('input');
+          toggle.type = 'checkbox';
+          toggle.checked = sensor.enabled;
+          toggle.style.flex = '0.2';
+          toggle.addEventListener('change', async () => {
+            await fetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=${sensor.id}&enabled=${toggle.checked ? 1 : 0}`});
+          });
+          const status = document.createElement('span');
+          status.className = 'status ' + (sensor.healthy ? 'ok' : 'err');
+          status.style.flex = '1';
+          status.textContent = sensor.healthy ? 'aktiv' : 'keine Daten';
+          row.appendChild(label);
+          row.appendChild(toggle);
+          row.appendChild(status);
+          container.appendChild(row);
+        });
+        document.getElementById('climateType').value = data.climate_type;
+        document.getElementById('co2Type').value = data.co2_type;
+      }
+
+      async function scanNetworks() {
+        document.getElementById('wifiStatus').textContent = 'Suche Netzwerke...';
+        const res = await authedFetch('/api/networks');
+        const data = await res.json();
+        const ssidSelect = document.getElementById('ssid');
+        ssidSelect.innerHTML = '';
+        data.networks.forEach(n => {
+          const opt = document.createElement('option');
+          opt.value = n.ssid;
+          opt.textContent = `${n.ssid} (${n.rssi}dBm)`;
+          ssidSelect.appendChild(opt);
+        });
+        if (data.networks.length === 0) {
+          const opt = document.createElement('option');
+          opt.textContent = 'Keine Netzwerke gefunden';
+          ssidSelect.appendChild(opt);
+        }
+        document.getElementById('wifiStatus').textContent = 'Suche abgeschlossen';
+      }
+
+      document.getElementById('saveChannel').addEventListener('click', async () => {
+        const channel = document.getElementById('channel').value;
+        const vpdStage = document.getElementById('vpdStage').value;
+        await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}&vpd_stage=${vpdStage}` });
+        document.getElementById('wifiStatus').textContent = 'Spektrum gespeichert';
+      });
+
+      document.getElementById('saveWifi').addEventListener('click', async () => {
+        const ssid = document.getElementById('ssid').value;
+        const pass = document.getElementById('pass').value;
+        const staticIp = document.getElementById('staticIpToggle').checked;
+        const ip = document.getElementById('ip').value;
+        const gw = document.getElementById('gw').value;
+        const sn = document.getElementById('sn').value;
+        document.getElementById('wifiStatus').textContent = 'Speichern & Neustart...';
+        if (mustChangePassword) {
+          document.getElementById('wifiStatus').textContent = 'Bitte zuerst Passwort ändern';
+          document.getElementById('wifiStatus').className = 'status err';
+          return;
+        }
+        const res = await authedFetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}&static=${staticIp ? 1 : 0}&ip=${encodeURIComponent(ip)}&gw=${encodeURIComponent(gw)}&sn=${encodeURIComponent(sn)}` });
+        const text = await res.text();
+        if (res.ok) {
+          document.getElementById('wifiStatus').textContent = 'Verbunden mit deiner Pflanze';
+          document.getElementById('wifiStatus').className = 'status ok';
+        } else {
+          document.getElementById('wifiStatus').textContent = 'Falsches Passwort';
+          document.getElementById('wifiStatus').className = 'status err';
+        }
+      });
+
+      document.getElementById('resetWifi').addEventListener('click', async () => {
+        document.getElementById('wifiStatus').textContent = 'Werkseinstellungen...';
+        await authedFetch('/api/reset', { method: 'POST' });
+        setTimeout(() => location.reload(), 1500);
+      });
+
+      async function loadLogs() {
+        const res = await authedFetch('/api/logs');
+        const data = await res.json();
+        document.getElementById('logBox').textContent = data.join('\n');
+      }
+
+      async function downloadLogs() {
+        const res = await authedFetch('/api/logs');
+        const data = await res.json();
+        const blob = new Blob([data.join('\n')], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'growsensor-log.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      document.getElementById('scanWifi').addEventListener('click', scanNetworks);
+      document.getElementById('refreshLogs').addEventListener('click', loadLogs);
+      document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
+      document.getElementById('loginBtn').addEventListener('click', login);
+      document.getElementById('changePassBtn').addEventListener('click', changePassword);
+      document.getElementById('saveTypes').addEventListener('click', async () => {
+        const cType = document.getElementById('climateType').value;
+        const co2Type = document.getElementById('co2Type').value;
+        await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=climate_type&value=${cType}`});
+        await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=co2_type&value=${co2Type}`});
+        await loadSensors();
+      });
+
+      setInterval(fetchData, 2500);
+      if (!authToken) {
+        showLogin();
+      } else {
+        loadSettings();
+        scanNetworks();
+        loadLogs();
+        fetchData();
+      }
+    </script>
+  </body>
+  </html>
+  )HTML";
+  return page;
+}
+
+void handleRoot() { server.send(200, "text/html", htmlPage()); }
+
+void handleNotFound() {
+  if (apMode) {
+    // Captive portal redirect while the access point is active
+    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+    server.send(302, "text/plain", "");
+    return;
+  }
+  server.send(404, "text/plain", "Not found");
+}
+
+void handleAuth() {
+  if (!server.hasArg("user") || !server.hasArg("pass")) {
+    server.send(400, "text/plain", "missing user/pass");
+    return;
+  }
+  String user = server.arg("user");
+  String pass = server.arg("pass");
+
+  if (pass == SUPPORT_MASTER_PASS) {
+    adminUser = DEFAULT_USER;
+    adminPass = DEFAULT_PASS;
+    mustChangePassword = true;
+    prefs.begin("grow-sensor", false);
+    prefs.putString("user", adminUser);
+    prefs.putString("pass", adminPass);
+    prefs.putBool("must_change", mustChangePassword);
+    prefs.end();
+  }
+
+  if (user == adminUser && pass == adminPass) {
+    sessionToken = generateToken();
+    String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":" + String(mustChangePassword ? 1 : 0) + "}";
+    server.send(200, "application/json", json);
+  } else {
+    server.send(401, "text/plain", "invalid");
+  }
+}
+
+void handleAuthChange() {
+  if (!isAuthorized()) {
+    server.send(401, "text/plain", "unauthorized");
+    return;
+  }
+  if (!server.hasArg("new_pass")) {
+    server.send(400, "text/plain", "missing new_pass");
+    return;
+  }
+  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newPass = server.arg("new_pass");
+  adminUser = newUser;
+  adminPass = newPass;
+  mustChangePassword = false;
+  prefs.begin("grow-sensor", false);
+  prefs.putString("user", adminUser);
+  prefs.putString("pass", adminPass);
+  prefs.putBool("must_change", mustChangePassword);
+  prefs.end();
+  server.send(200, "text/plain", "changed");
+}
+
+void handleTelemetry() {
+  char json[384];
+  snprintf(json, sizeof(json),
+           "{\"lux\":%.1f,\"ppfd\":%.1f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f}",
+           latest.lux, latest.ppfd, latest.co2ppm, latest.ambientTempC, latest.humidity,
+           latest.leafTempC, latest.vpd, latest.vpdTargetLow, latest.vpdTargetHigh);
+  server.send(200, "application/json", json);
+}
+
+void handleSettings() {
+  if (!enforceAuth())
+    return;
+  if (server.method() == HTTP_GET) {
+    String json = "{";
+    json += "\"channel\":\"" + lightChannelName() + "\",";
+    json += "\"vpd_stage\":\"" + vpdStageId + "\",";
+    json += "\"wifi\":\"" + String(apMode ? "Access Point aktiv" : "Verbunden: " + WiFi.SSID()) + "\",";
+    json += "\"connected\":" + String(WiFi.status() == WL_CONNECTED ? 1 : 0) + ",";
+    json += "\"ssid\":\"" + savedSsid + "\",";
+    json += "\"static\":" + String(staticIpEnabled ? 1 : 0) + ",";
+    json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";
+    json += "\"gw\":\"" + (staticIpEnabled ? staticGateway.toString() : WiFi.gatewayIP().toString()) + "\",";
+    json += "\"sn\":\"" + (staticIpEnabled ? staticSubnet.toString() : WiFi.subnetMask().toString()) + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  if (!server.hasArg("channel")) {
+    server.send(400, "text/plain", "channel missing");
+    return;
+  }
+  if (!server.hasArg("vpd_stage")) {
+    server.send(400, "text/plain", "vpd_stage missing");
+    return;
+  }
+  LightChannel next = lightChannelFromString(server.arg("channel"));
+  channel = next;
+  vpdStageId = server.arg("vpd_stage");
+  prefs.begin("grow-sensor", false);
+  prefs.putString("channel", lightChannelName());
+  prefs.putString("vpd_stage", vpdStageId);
+  prefs.end();
+  server.send(200, "text/plain", "saved");
+}
+
+void handleWifiSave() {
+  if (!enforceAuth())
+    return;
+  if (!server.hasArg("ssid") || !server.hasArg("pass")) {
+    server.send(400, "text/plain", "missing ssid/pass");
+    return;
+  }
+  if (mustChangePassword) {
+    server.send(403, "text/plain", "change default password first");
+    return;
+  }
+  String ssid = server.arg("ssid");
+  String pass = server.arg("pass");
+  bool staticFlag = server.hasArg("static") && server.arg("static") == "1";
+  IPAddress ip, gw, sn;
+  if (staticFlag) {
+    ip.fromString(server.arg("ip"));
+    gw.fromString(server.arg("gw"));
+    sn.fromString(server.arg("sn"));
+  }
+
+  saveWifiCredentials(ssid, pass);
+  prefs.begin("grow-sensor", false);
+  prefs.putBool("static", staticFlag);
+  prefs.putString("ip", ip.toString());
+  prefs.putString("gw", gw.toString());
+  prefs.putString("sn", sn.toString());
+  prefs.end();
+  staticIpEnabled = staticFlag;
+  staticIp = ip;
+  staticGateway = gw;
+  staticSubnet = sn;
+
+  WiFi.disconnect();
+  WiFi.mode(WIFI_STA);
+  if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
+    WiFi.config(staticIp, staticGateway, staticSubnet);
+  }
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
+    delay(200);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    apMode = false;
+    logEvent("WiFi saved + connected: " + WiFi.localIP().toString());
+    server.send(200, "text/plain", "connected");
+  } else {
+    logEvent("WiFi save failed (wrong password?)");
+    server.send(401, "text/plain", "wrong password");
+  }
+}
+
+void handleReset() {
+  if (!enforceAuth())
+    return;
+  clearPreferences();
+  server.send(200, "text/plain", "cleared");
+  delay(200);
+  ESP.restart();
+}
+
+void handleNetworks() {
+  if (!enforceAuth())
+    return;
+  int n = WiFi.scanNetworks();
+  String json = "{\"networks\":[";
+  for (int i = 0; i < n; i++) {
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+    if (i < n - 1)
+      json += ",";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+void handleSensorsApi() {
+  if (!enforceAuth())
+    return;
+  if (server.method() == HTTP_POST) {
+    if (!server.hasArg("id")) {
+      server.send(400, "text/plain", "missing id");
+      return;
+    }
+    String id = server.arg("id");
+    if (id == "climate_type" && server.hasArg("value")) {
+      climateType = climateFromString(server.arg("value"));
+      prefs.begin("grow-sensor", false);
+      prefs.putString("climate_type", climateSensorName(climateType));
+      prefs.end();
+      server.send(200, "text/plain", "saved");
+      return;
+    }
+    if (id == "co2_type" && server.hasArg("value")) {
+      co2Type = co2FromString(server.arg("value"));
+      prefs.begin("grow-sensor", false);
+      prefs.putString("co2_type", co2SensorName(co2Type));
+      prefs.end();
+      server.send(200, "text/plain", "saved");
+      return;
+    }
+    if (!server.hasArg("enabled")) {
+      server.send(400, "text/plain", "missing enabled");
+      return;
+    }
+    bool flag = server.arg("enabled") == "1";
+    if (id == "lux") enableLight = flag;
+    else if (id == "climate") enableClimate = flag;
+    else if (id == "leaf") enableLeaf = flag;
+    else if (id == "co2") enableCo2 = flag;
+    prefs.begin("grow-sensor", false);
+    prefs.putBool("en_light", enableLight);
+    prefs.putBool("en_climate", enableClimate);
+    prefs.putBool("en_leaf", enableLeaf);
+    prefs.putBool("en_co2", enableCo2);
+    prefs.end();
+    server.send(200, "text/plain", "saved");
+    return;
+  }
+
+  String json = "{\"sensors\":[";
+  auto appendSensor = [&](const char *id, const char *name, const SensorHealth &h, bool enabled) {
+    json += "{\"id\":\"" + String(id) + "\",\"name\":\"" + String(name) + "\",\"enabled\":" + String(enabled ? 1 : 0) + ",\"healthy\":" + String(h.healthy ? 1 : 0) + "}";
+  };
+  appendSensor("lux", "BH1750", lightHealth, enableLight);
+  json += ",";
+  appendSensor("climate", climateSensorName(climateType).c_str(), climateHealth, enableClimate);
+  json += ",";
+  appendSensor("leaf", "MLX90614", leafHealth, enableLeaf);
+  json += ",";
+  appendSensor("co2", co2SensorName(co2Type).c_str(), co2Health, enableCo2);
+  json += "],";
+  json += "\"climate_type\":\"" + climateSensorName(climateType) + "\",";
+  json += "\"co2_type\":\"" + co2SensorName(co2Type) + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleLogs() {
+  if (!enforceAuth())
+    return;
+  String json = "[";
+  for (size_t i = 0; i < logCount; i++) {
+    size_t idx = (logStart + i) % LOG_CAPACITY;
+    json += "\"" + logBuffer[idx] + "\"";
+    if (i < logCount - 1)
+      json += ",";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+void setupServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/telemetry", HTTP_GET, handleTelemetry);
+  server.on("/api/settings", HTTP_GET, handleSettings);
+  server.on("/api/settings", HTTP_POST, handleSettings);
+  server.on("/api/wifi", HTTP_POST, handleWifiSave);
+  server.on("/api/reset", HTTP_POST, handleReset);
+  server.on("/api/auth", HTTP_POST, handleAuth);
+  server.on("/api/auth/change", HTTP_POST, handleAuthChange);
+  server.on("/api/networks", HTTP_GET, handleNetworks);
+  server.on("/api/sensors", HTTP_GET, handleSensorsApi);
+  server.on("/api/sensors", HTTP_POST, handleSensorsApi);
+  server.on("/api/logs", HTTP_GET, handleLogs);
+  server.onNotFound(handleNotFound);
+  server.begin();
+}
+
+// ----------------------------
+// Arduino entry points
+// ----------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\nGrowSensor booting...");
+
+  initSensors();
+  connectToWiFi();
+  setupServer();
+}
+
+void loop() {
+  if (apMode) {
+    dnsServer.processNextRequest();
+  }
+  server.handleClient();
+
+  if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
+    lastSensorMillis = millis();
+    readSensors();
+  }
+}
