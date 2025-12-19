@@ -41,6 +41,7 @@ static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4
 // Auth
 static const char *DEFAULT_USER = "Admin";
 static const char *DEFAULT_PASS = "admin";
+static const char *SUPPORT_MASTER_PASS = "";
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
   FullSpectrum,
@@ -340,10 +341,22 @@ void logEvent(const String &msg) {
 
 void rebuildSensorList() {
   sensors.clear();
-  sensors.push_back({"lux", "BH1750", "light", enableLight, lightHealth.healthy, lightHealth.present, &lightHealth, &enableLight});
-  sensors.push_back({"climate", climateSensorName(climateType), "climate", enableClimate, climateHealth.healthy, climateHealth.present, &climateHealth, &enableClimate});
-  sensors.push_back({"leaf", "MLX90614", "leaf", enableLeaf, leafHealth.healthy, leafHealth.present, &leafHealth, &enableLeaf});
-  sensors.push_back({"co2", co2SensorName(co2Type), "co2", enableCo2, co2Health.healthy, co2Health.present, &co2Health, &enableCo2});
+  auto addSensor = [&](const String &id, const String &type, const String &cat, bool enabled, SensorHealth &h, bool &flag) {
+    SensorSlot s;
+    s.id = id;
+    s.type = type;
+    s.category = cat;
+    s.enabled = enabled;
+    s.healthy = h.healthy;
+    s.present = h.present;
+    s.health = &h;
+    s.enabledFlag = &flag;
+    sensors.push_back(s);
+  };
+  addSensor("lux", "BH1750", "light", enableLight, lightHealth, enableLight);
+  addSensor("climate", climateSensorName(climateType), "climate", enableClimate, climateHealth, enableClimate);
+  addSensor("leaf", "MLX90614", "leaf", enableLeaf, leafHealth, enableLeaf);
+  addSensor("co2", co2SensorName(co2Type), "co2", enableCo2, co2Health, enableCo2);
 }
 
 SensorSlot *findSensor(const String &id) {
