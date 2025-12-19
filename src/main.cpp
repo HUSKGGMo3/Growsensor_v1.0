@@ -964,12 +964,12 @@ String htmlPage() {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor</title>
+    <title>GrowSensor v0.2.5</title>
     <style>
       :root { color-scheme: light dark; }
       body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
       header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 10; }
-      h1 { margin: 0; font-size: 1.2rem; }
+      h1 { margin: 0; font-size: 1.2rem; position:relative; }
       .header-row { display:flex; justify-content: space-between; align-items: center; gap:12px; flex-wrap: wrap; }
       .conn { display:flex; align-items:center; gap:8px; }
       .led { width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,0.25); display:inline-block; }
@@ -1005,7 +1005,11 @@ String htmlPage() {
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
       .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
       nav { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-      nav button { width:auto; padding:8px 12px; }
+      nav button { width:auto; padding:8px 12px; position:relative; overflow:hidden; }
+      nav button::before, nav button::after { content:""; position:absolute; inset:-30%; background:radial-gradient(circle, rgba(34,197,94,0.4) 0, rgba(34,197,94,0.0) 60%); opacity:0; transform:scale(0.6); transition:opacity 180ms ease, transform 220ms ease; pointer-events:none; mix-blend-mode:screen; }
+      nav button::after { inset:-50%; animation: drift 3s linear infinite; }
+      nav button:hover::before, nav button:hover::after { opacity:1; transform:scale(1); }
+      @keyframes drift { from { transform: translate3d(-8px,-6px,0) scale(1); } 50% { transform: translate3d(8px,8px,0) scale(1.05);} to { transform: translate3d(-6px,6px,0) scale(1);} }
       .view { display:none; flex-direction:column; gap:12px; }
       .view.active { display:flex; }
       .menu-btn { background:#1f2937; color:#e2e8f0; border:1px solid #1f2937; }
@@ -1039,13 +1043,18 @@ String htmlPage() {
       .wizard-step { display:none; flex-direction:column; gap:10px; }
       .wizard-step.active { display:flex; }
       .pill { padding:4px 8px; border-radius:999px; background:#1f2937; color:#cbd5e1; font-size:0.85rem; display:inline-flex; gap:6px; align-items:center; }
+      .chart-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#94a3b8; background:rgba(15,23,42,0.6); }
+      .axis-label { font-size:0.9rem; color:#94a3b8; }
+      .wifi-bars { display:flex; gap:4px; align-items:flex-end; height:16px; }
+      .wifi-bar { width:4px; background:#334155; border-radius:2px; }
+      .wifi-bar.active { background:#22c55e; }
     </style>
   </head>
   <body>
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.2.2</h1>
+          <h1>GrowSensor – v0.2.5</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1075,6 +1084,7 @@ String htmlPage() {
           <div class="card-header"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
           <div class="value" id="ppfd">–</div>
           <div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="ppfd" width="320" height="140"></canvas></div>
         </article>
         <article class="card metric-tile" data-metric="co2">
           <div class="card-header"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
@@ -1148,11 +1158,13 @@ String htmlPage() {
             <option value="bloom">Blütephase</option>
             <option value="late_bloom">Späteblüte</option>
           </select>
+          <button id="applyStage" style="margin-top:8px;">Apply changes</button>
+          <p id="vpdStageStatus" class="status" style="margin-top:6px;"></p>
           <p id="vpdTarget" style="margin-top:8px; color:#a5b4fc"></p>
           <p class="hover-hint">Hover über einer Kachel für den 6h-Mini-Graph.</p>
         </article>
 
-        <article class="card" id="wifiCard">
+      <article class="card" id="wifiCard">
           <h3 style="margin-top:0">Wi-Fi Setup</h3>
           <div id="wifiConnectedBlock" class="hidden">
             <div class="wifi-status">
@@ -1160,9 +1172,12 @@ String htmlPage() {
               <strong>Verbunden</strong>
             </div>
             <div class="row" style="margin-top:4px;">
+              <div><strong>SSID:</strong> <span id="wifiSsid">–</span></div>
               <div><strong>IP:</strong> <span id="wifiIp">–</span></div>
-              <div><strong>Gateway:</strong> <span id="wifiGw">–</span></div>
-              <div><strong>Subnet:</strong> <span id="wifiSn">–</span></div>
+            </div>
+            <div class="row" style="margin-top:4px; align-items:center;">
+              <div><strong>Signal:</strong></div>
+              <div class="wifi-bars" id="wifiBars"></div>
             </div>
             <button id="toggleWifiForm" class="ghost" style="width:auto; margin-top:8px;">Wi-Fi ändern</button>
           </div>
@@ -1228,7 +1243,7 @@ String htmlPage() {
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.2.2 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.2.5 • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1261,7 +1276,12 @@ String htmlPage() {
           </div>
           <canvas id="vpdHeatmap" style="width:100%; height:260px; display:none;"></canvas>
           <canvas id="detailChart" style="width:100%; height:260px;"></canvas>
+          <div id="chartEmpty" class="chart-empty" style="display:none;">Keine Daten</div>
           <div id="chartDebugText" class="dev-note" style="display:none; position:absolute; top:8px; left:12px;"></div>
+          <div class="row axis-label" style="justify-content:space-between; align-items:center; margin-top:6px;">
+            <div id="yAxisLabel">Wert</div>
+            <div id="xAxisLabel">Zeit</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1315,7 +1335,7 @@ String htmlPage() {
     <script>
       const chartCanvas = document.getElementById('chart');
       const ctx = chartCanvas.getContext('2d');
-      const metrics = ['lux','co2','temp','humidity','leaf','vpd'];
+      const metrics = ['lux','ppfd','co2','temp','humidity','leaf','vpd'];
       const historyStore = {};
       metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 } });
       const maxLivePoints = 240; // ~10 minutes @2.5s
@@ -1331,11 +1351,26 @@ String htmlPage() {
       const vpdHeatmapCtx = vpdHeatmapCanvas.getContext('2d');
       const vpdTileCanvas = document.getElementById('vpdTileCanvas');
       const vpdTileCtx = vpdTileCanvas.getContext('2d');
+      const chartEmpty = document.getElementById('chartEmpty');
+      const xAxisLabel = document.getElementById('xAxisLabel');
+      const yAxisLabel = document.getElementById('yAxisLabel');
+      const wifiBars = document.getElementById('wifiBars');
       let detailMetric = null;
       let detailMode = 'live';
       let detailVpdView = 'heatmap';
       let clickDebug = false;
       let lastVpdTargets = { low: null, high: null };
+      let wifiFormOpen = false;
+      const detailCache = {};
+      const METRIC_META = {
+        lux: { unit:'Lux', label:'Lux' },
+        ppfd:{ unit:'µmol/m²/s', label:'PPFD' },
+        co2: { unit:'ppm', label:'CO₂' },
+        temp:{ unit:'°C', label:'Temperatur' },
+        humidity:{ unit:'%', label:'Luftfeuchte' },
+        leaf:{ unit:'°C', label:'Leaf-Temp' },
+        vpd:{ unit:'kPa', label:'VPD' },
+      };
 
       function authedFetch(url, options = {}) { return fetch(url, options); }
       function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
@@ -1447,16 +1482,47 @@ String htmlPage() {
         return out.filter(p => p.temp !== null && p.hum !== null && p.vpd !== null);
       }
 
-      function drawLineChart(canvas, ctxDraw, points) {
+      function formatTimeLabel(ts, mode, firstTs, lastTs) {
+        if (mode === 'live') {
+          const delta = Math.max(0, ts - firstTs);
+          const mm = Math.floor(delta / 60000);
+          const ss = Math.floor((delta % 60000) / 1000);
+          return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+        }
+        const now = Date.now();
+        const anchor = lastTs || now;
+        const shifted = now - Math.max(0, anchor - ts);
+        const d = new Date(shifted);
+        return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+      }
+
+      function drawLineChart(canvas, ctxDraw, points, mode, unit) {
         resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
         const valid = points.map(p => p.v).filter(v => v !== null);
-        if (!valid.length) return;
+        if (!valid.length) return false;
         const maxVal = Math.max(...valid);
         const minVal = Math.min(...valid);
         const span = Math.max(maxVal - minVal, 0.0001);
+        const firstTs = points[0]?.t ?? 0;
+        const lastTs = points[points.length - 1]?.t ?? firstTs;
         ctxDraw.strokeStyle = '#1f2937';
-        for (let i=1;i<5;i++){ const y=(canvas.height/5)*i; ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(canvas.width,y); ctxDraw.stroke(); }
+        ctxDraw.fillStyle = '#94a3b8';
+        ctxDraw.font = '12px system-ui';
+        ctxDraw.textBaseline = 'bottom';
+        for (let i=0;i<=4;i++){
+          const y=(canvas.height/4)*i;
+          ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(canvas.width,y); ctxDraw.stroke();
+          const val = (maxVal - (span*(i/4))).toFixed(2);
+          ctxDraw.fillText(val, 6, Math.min(canvas.height-4,y+12));
+        }
+        const ticks = 4;
+        for (let i=0;i<=ticks;i++) {
+          const x = (canvas.width/ticks)*i;
+          const idx = Math.floor((points.length-1)*(i/ticks));
+          const label = formatTimeLabel(points[idx]?.t ?? lastTs, mode, firstTs, lastTs);
+          ctxDraw.fillText(label, Math.max(0,x-16), canvas.height-4);
+        }
         ctxDraw.strokeStyle = '#22d3ee';
         ctxDraw.lineWidth = 2;
         ctxDraw.beginPath();
@@ -1468,6 +1534,7 @@ String htmlPage() {
           if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
         });
         ctxDraw.stroke();
+        return true;
       }
 
       function drawChart() {
@@ -1544,26 +1611,42 @@ String htmlPage() {
         ctxHover.stroke();
       }
 
-      function drawDetailChart(metric, mode) {
-        if (!detailCtx || !metric) return;
-        const data = getSeriesData(metric, mode);
-        drawLineChart(detailChartCanvas, detailCtx, data);
+      function drawDetailChart(metric, mode, points, unit) {
+        if (!detailCtx || !metric) return false;
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, unit);
         const debugBox = document.getElementById('chartDebugText');
         if (devMode) {
-          const values = data.map(p => p.v).filter(v => v !== null);
+          const values = points.map(p => p.v).filter(v => v !== null);
           const min = values.length ? Math.min(...values).toFixed(2) : '–';
           const max = values.length ? Math.max(...values).toFixed(2) : '–';
-          debugBox.textContent = `points: ${values.length} / ${data.length} • min ${min} • max ${max}`;
+          debugBox.textContent = `points: ${values.length} / ${points.length} • min ${min} • max ${max}`;
           debugBox.style.display = 'block';
         } else {
           debugBox.style.display = 'none';
         }
+        return ok;
       }
 
       function avg(arr) {
         const filtered = arr.map(p => p.v).filter(v => v !== null);
         if (!filtered.length) return NaN;
         return filtered.reduce((a,b)=>a+b,0) / filtered.length;
+      }
+
+      async function loadDetailHistory(metric, mode) {
+        const key = `${metric}-${mode}`;
+        if (!detailCache[key]) detailCache[key] = [];
+        try {
+          const res = await authedFetch(`/api/history?metric=${metric}&range=${mode === '6h' ? '6h' : 'live'}`);
+          if (!res.ok) throw new Error('history failed');
+          const data = await res.json();
+          const mapped = (data.points || []).map(p => ({ t: p[0], v: p[1] === null ? null : parseFloat(p[1]) }));
+          detailCache[key] = mapped;
+        } catch (err) {
+          console.warn('history error', err);
+          detailCache[key] = [];
+        }
+        return detailCache[key];
       }
 
       function updateAverages() {
@@ -1603,6 +1686,13 @@ String htmlPage() {
         return Math.max(0, Math.min(2.5, vpd));
       }
 
+      function humidityForVpd(tempC, vpd) {
+        const es = 0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3));
+        const rh = (1 - (vpd / es)) * 100;
+        if (Number.isNaN(rh)) return null;
+        return Math.max(30, Math.min(100, rh));
+      }
+
       function drawVpdHeatmap(ctxDraw, canvas, mode, targets, overlayEl, markerData) {
         resizeCanvas(canvas, ctxDraw);
         const w = canvas.width;
@@ -1621,18 +1711,34 @@ String htmlPage() {
           }
         }
         if (targets && targets.low !== null && targets.high !== null) {
+          const samples = 32;
           ctxDraw.fillStyle = 'rgba(34,197,94,0.18)';
-          const bandTop = ((tempMax - (tempMin+6)) / (tempMax - tempMin)) * h;
-          const bandBottom = h - bandTop;
-          const lowX = ((Math.max(humMin, targets.low*50) - humMin)/(humMax - humMin))*w;
-          const highX = ((Math.min(humMax, targets.high*50) - humMin)/(humMax - humMin))*w;
-          ctxDraw.fillRect(Math.min(lowX, highX), bandTop, Math.abs(highX-lowX), bandBottom-bandTop);
+          ctxDraw.strokeStyle = '#a5f3fc';
+          ctxDraw.lineWidth = 2;
+          ctxDraw.beginPath();
+          for (let i=0;i<samples;i++) {
+            const t = tempMin + (i/(samples-1))*(tempMax-tempMin);
+            const humHigh = humidityForVpd(t, targets.low);
+            const x = ((humHigh - humMin)/(humMax-humMin))*w;
+            const y = (1 - (t - tempMin)/(tempMax - tempMin))*h;
+            if (i===0) ctxDraw.moveTo(x,y); else ctxDraw.lineTo(x,y);
+          }
+          for (let i=samples-1;i>=0;i--) {
+            const t = tempMin + (i/(samples-1))*(tempMax-tempMin);
+            const humLow = humidityForVpd(t, targets.high);
+            const x = ((humLow - humMin)/(humMax-humMin))*w;
+            const y = (1 - (t - tempMin)/(tempMax - tempMin))*h;
+            ctxDraw.lineTo(x,y);
+          }
+          ctxDraw.closePath();
+          ctxDraw.fill();
+          ctxDraw.stroke();
         }
         const points = markerData || [];
         points.forEach((pt, idx) => {
           const x = ((pt.hum - humMin) / (humMax - humMin)) * w;
           const y = (1 - (pt.temp - tempMin) / (tempMax - tempMin)) * h;
-          ctxDraw.fillStyle = idx === points.length -1 ? '#fbbf24' : 'rgba(14,165,233,0.6)';
+          ctxDraw.fillStyle = idx === points.length -1 ? '#ef4444' : 'rgba(14,165,233,0.6)';
           ctxDraw.strokeStyle = '#0f172a';
           ctxDraw.lineWidth = 2;
           ctxDraw.beginPath();
@@ -1656,8 +1762,9 @@ String htmlPage() {
         detailMetric = metric;
         detailMode = 'live';
         detailVpdView = 'heatmap';
-        document.getElementById('chartModalTitle').textContent = `Detailansicht: ${metric.toUpperCase()}`;
-        document.getElementById('chartModalBadge').textContent = metric;
+        const meta = METRIC_META[metric] || { label: metric.toUpperCase(), unit:'' };
+        document.getElementById('chartModalTitle').textContent = `Detailansicht: ${meta.label}`;
+        document.getElementById('chartModalBadge').textContent = meta.unit || metric;
         document.getElementById('tabLive').classList.add('active');
         document.getElementById('tabLast6h').classList.remove('active');
         const showVpd = metric === 'vpd';
@@ -1721,6 +1828,7 @@ String htmlPage() {
         const data = await res.json();
         document.getElementById('channel').value = data.channel;
         document.getElementById('vpdStage').value = data.vpd_stage;
+        document.getElementById('vpdStageStatus').textContent = '';
         document.getElementById('wifiStatus').textContent = data.wifi;
         document.getElementById('wifiStatus').className = 'status ' + (data.connected ? 'ok' : 'err');
         document.getElementById('ip').value = data.ip || '';
@@ -1774,6 +1882,10 @@ String htmlPage() {
             await loadSensors();
           });
           tags.appendChild(btn);
+          const hint = document.createElement('div');
+          hint.className = 'hover-hint';
+          hint.textContent = sensor.enabled ? 'Deaktivieren' : 'Aktivieren';
+          tags.appendChild(hint);
           tile.appendChild(tags);
           activeBox.appendChild(tile);
         });
@@ -1816,19 +1928,23 @@ String htmlPage() {
         const typeSelect = document.getElementById('sensorTypeSelect');
         catSelect.innerHTML = '';
         typeSelect.innerHTML = '';
-        const categories = ['light','climate','leaf','co2','other'];
+        const categories = Array.from(new Set(SENSOR_TEMPLATES.map(t => t.category)));
         categories.forEach(cat => {
           const opt = document.createElement('option');
           opt.value = cat;
           opt.textContent = cat;
           catSelect.appendChild(opt);
         });
-        SENSOR_TEMPLATES.forEach(tpl => {
-          const opt = document.createElement('option');
-          opt.value = tpl.type;
-          opt.textContent = `${tpl.name} (${tpl.category})`;
-          typeSelect.appendChild(opt);
-        });
+        const updateTypeOptions = (cat) => {
+          typeSelect.innerHTML = '';
+          SENSOR_TEMPLATES.filter(t => t.category === cat).forEach(tpl => {
+            const opt = document.createElement('option');
+            opt.value = tpl.type;
+            opt.textContent = `${tpl.name}`;
+            typeSelect.appendChild(opt);
+          });
+        };
+        updateTypeOptions(categories[0]);
       }
 
       function populateWizardPins(tpl) {
@@ -1843,6 +1959,14 @@ String htmlPage() {
         wizardAdvanced = false;
         fillWizardSelectors();
         document.getElementById('sensorCategorySelect').value = wizardTemplate.category;
+        const typeSelect = document.getElementById('sensorTypeSelect');
+        typeSelect.innerHTML = '';
+        SENSOR_TEMPLATES.filter(t => t.category === wizardTemplate.category).forEach(item => {
+          const opt = document.createElement('option');
+          opt.value = item.type;
+          opt.textContent = `${item.name}`;
+          typeSelect.appendChild(opt);
+        });
         document.getElementById('sensorTypeSelect').value = wizardTemplate.type;
         populateWizardPins(wizardTemplate);
         document.getElementById('defaultPinsInfo').textContent = 'Standardpins werden genutzt.';
@@ -1854,6 +1978,14 @@ String htmlPage() {
 
       document.getElementById('sensorCategorySelect').addEventListener('change', () => {
         const cat = document.getElementById('sensorCategorySelect').value;
+        const typeSelect = document.getElementById('sensorTypeSelect');
+        typeSelect.innerHTML = '';
+        SENSOR_TEMPLATES.filter(t => t.category === cat).forEach(tpl => {
+          const opt = document.createElement('option');
+          opt.value = tpl.type;
+          opt.textContent = `${tpl.name}`;
+          typeSelect.appendChild(opt);
+        });
         const tpl = SENSOR_TEMPLATES.find(t => t.category === cat) || SENSOR_TEMPLATES[0];
         wizardTemplate = tpl;
         document.getElementById('sensorTypeSelect').value = tpl.type;
@@ -1884,6 +2016,7 @@ String htmlPage() {
         goWizardStep(Math.min(3, wizardStep + 1));
       });
       document.getElementById('advancedPinsBtn').addEventListener('click', () => {
+        if (!confirm('Wirklich Pinbelegung ändern?')) return;
         wizardAdvanced = true;
         document.getElementById('advancedPinsWarn').style.display = 'block';
         ['wizSda','wizScl','wizRx','wizTx'].forEach(id => document.getElementById(id).disabled = false);
@@ -1945,9 +2078,25 @@ String htmlPage() {
 
       document.getElementById('saveChannel').addEventListener('click', async () => {
         const channel = document.getElementById('channel').value;
-        const vpdStage = document.getElementById('vpdStage').value;
-        await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}&vpd_stage=${vpdStage}` });
+        await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}` });
         document.getElementById('wifiStatus').textContent = 'Spektrum gespeichert';
+      });
+
+      document.getElementById('applyStage').addEventListener('click', async () => {
+        const vpdStage = document.getElementById('vpdStage').value;
+        const channel = document.getElementById('channel').value;
+        const status = document.getElementById('vpdStageStatus');
+        status.textContent = 'Speichern...';
+        status.className = 'status';
+        const res = await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}&vpd_stage=${vpdStage}` });
+        if (res.ok) {
+          status.textContent = 'VPD Targets aktualisiert';
+          status.classList.add('ok');
+          await fetchData();
+        } else {
+          status.textContent = 'Speichern fehlgeschlagen';
+          status.classList.add('err');
+        }
       });
 
       document.getElementById('saveWifi').addEventListener('click', async () => {
@@ -2081,21 +2230,36 @@ String htmlPage() {
         const ap = flag(data.ap_mode);
         const form = document.getElementById('wifiForm');
         const block = document.getElementById('wifiConnectedBlock');
-        if (connected && !ap) {
+        if (connected && !ap && !wifiFormOpen) {
           block.classList.remove('hidden');
           form.classList.add('hidden');
           document.getElementById('wifiIp').textContent = data.ip || '–';
-          document.getElementById('wifiGw').textContent = data.gw || '–';
-          document.getElementById('wifiSn').textContent = data.sn || '–';
+          document.getElementById('wifiSsid').textContent = data.ssid || '–';
+          updateWifiBars(data.rssi);
         } else {
-          block.classList.add('hidden');
-          form.classList.remove('hidden');
+          block.classList.toggle('hidden', !(connected && !ap));
+          form.classList.toggle('hidden', !wifiFormOpen ? (connected && !ap) : false);
+        }
+      }
+
+      function updateWifiBars(rssi) {
+        if (!wifiBars) return;
+        wifiBars.innerHTML = '';
+        const level = typeof rssi === 'number' ? (rssi >= -50 ? 4 : rssi >= -60 ? 3 : rssi >= -70 ? 2 : rssi >= -80 ? 1 : 0) : 0;
+        for (let i=1;i<=4;i++) {
+          const bar = document.createElement('div');
+          bar.className = 'wifi-bar';
+          if (i <= level) bar.classList.add('active');
+          bar.style.height = `${6 + i*3}px`;
+          wifiBars.appendChild(bar);
         }
       }
 
       document.getElementById('toggleWifiForm').addEventListener('click', () => {
+        wifiFormOpen = !wifiFormOpen;
         const form = document.getElementById('wifiForm');
-        form.classList.toggle('hidden');
+        if (wifiFormOpen) form.classList.remove('hidden'); else form.classList.add('hidden');
+        document.getElementById('toggleWifiForm').textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
       });
 
       function setDevVisible() {
@@ -2126,16 +2290,22 @@ String htmlPage() {
         }
       });
 
-      function renderDetail() {
+      async function renderDetail() {
         if (!detailMetric) return;
+        const meta = METRIC_META[detailMetric] || { unit:'', label: detailMetric.toUpperCase() };
+        yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
+        xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss)' : 'Zeit (HH:MM)';
         const showHeatmap = detailMetric === 'vpd' && detailVpdView === 'heatmap';
         vpdHeatmapCanvas.style.display = showHeatmap ? 'block' : 'none';
         detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
+        chartEmpty.style.display = 'none';
         if (showHeatmap) {
           const points = collectPaired(detailMode);
           drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, document.getElementById('chartModalCard'), points);
         } else {
-          drawDetailChart(detailMetric, detailMode);
+          const historyPoints = await loadDetailHistory(detailMetric, detailMode);
+          const ok = drawDetailChart(detailMetric, detailMode, historyPoints, meta.unit);
+          chartEmpty.style.display = ok ? 'none' : 'flex';
         }
       }
 
@@ -2146,7 +2316,7 @@ String htmlPage() {
         const tileStatus = document.getElementById('vpdTileStatus');
         const tileNoData = document.getElementById('vpdTileNoData');
         const points = collectPaired('live').slice(-60);
-        if (temp === null || hum === null || vpd === null || Number.isNaN(temp) || Number.isNaN(hum)) {
+        if (temp === null || hum === null || vpd === null || Number.isNaN(temp) || Number.isNaN(hum) || points.length === 0) {
           tileNoData.style.display = 'flex';
           tileStatus.textContent = 'keine Daten';
           return;
