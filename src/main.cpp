@@ -1082,7 +1082,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.2.7</title>
+    <title>GrowSensor v0.2.6</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
@@ -1178,13 +1178,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .time-row { margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
       .tz-select { width:auto; min-width:160px; }
       .time-text { font-size:0.9rem; color:#cbd5e1; }
+      .tile-settings { display:flex; flex-direction:column; gap:8px; }
+      .tile-setting { display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid #1f2937; border-radius:10px; padding:10px; background:#0b1220; }
+      .tile-setting .info { display:flex; flex-direction:column; gap:4px; }
+      .tile-setting .info strong { font-size:1rem; }
+      .tile-setting .info small { color:#94a3b8; }
+      .tile-toggle { display:inline-flex; align-items:center; gap:8px; background:#111827; color:#e2e8f0; border:1px solid #1f2937; padding:8px 12px; border-radius:10px; width:auto; }
+      .tile-toggle .toggle-dot { width:12px; height:12px; border-radius:50%; box-shadow:0 0 0 3px rgba(52,211,153,0.25); }
+      .tile-toggle.off { border-color:#b91c1c; color:#fecdd3; background:#1f2937; }
+      .tile-toggle.off .toggle-dot { box-shadow:0 0 0 3px rgba(248,113,113,0.25); }
     </style>
   </head>
   <body>
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.2.7</h1>
+          <h1>GrowSensor – v0.2.6</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1220,6 +1229,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     </div>
     <main>
       <div id="view-dashboard" class="view active">
+        <section class="card" id="tileSettingsCard">
+          <div class="card-header" style="margin-bottom:6px;"><h3 style="margin:0;">Dashboard anpassen</h3><span class="badge">Kacheln</span></div>
+          <p class="hover-hint">Anzeige einzelner Kacheln ein- oder ausschalten (nur Sichtbarkeit, Sensoren bleiben aktiv).</p>
+          <div id="tileSettingsList" class="tile-settings"></div>
+          <div class="row" style="margin-top:10px;">
+            <button id="resetTiles" class="ghost" style="width:auto;">Reset Dashboard Layout</button>
+          </div>
+        </section>
         <section class="grid metrics">
         <article class="card metric-tile" data-metric="lux">
           <div class="card-header"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
@@ -1389,7 +1406,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.2.7 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.2.6 • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1540,9 +1557,181 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (el) el.style.display = visible ? displayStyle : 'none';
       }
 
+      const TILE_DEFS = [
+        { id:'lux', label:'Licht', unit:'Lux', defaultVisible:true, defaultOrder:0 },
+        { id:'ppfd', label:'PPFD', unit:'µmol/m²/s', defaultVisible:true, defaultOrder:1 },
+        { id:'co2', label:'CO₂', unit:'ppm', defaultVisible:true, defaultOrder:2 },
+        { id:'temp', label:'Umgebung', unit:'°C', defaultVisible:true, defaultOrder:3 },
+        { id:'humidity', label:'Luftfeuchte', unit:'%', defaultVisible:true, defaultOrder:4 },
+        { id:'leaf', label:'Leaf-Temp', unit:'°C', defaultVisible:true, defaultOrder:5 },
+        { id:'vpd', label:'VPD', unit:'kPa', defaultVisible:true, defaultOrder:6 },
+      ];
+      const TILE_STATE_KEY = 'dashboardTilePrefs';
+      const TILE_INSERT_EARLY_CAP = 6;
+      let tileVisibility = {};
+      let tileOrder = TILE_DEFS.map(t => t.id);
+
+      function tileMeta(id) {
+        return TILE_DEFS.find(t => t.id === id) || { id, label: id.toUpperCase(), unit:'', defaultVisible:true, defaultOrder: TILE_INSERT_EARLY_CAP - 1 };
+      }
+
+      function loadTilePrefs() {
+        let saved = {};
+        try {
+          saved = JSON.parse(localStorage.getItem(TILE_STATE_KEY) || '{}') || {};
+        } catch (err) {
+          console.warn('Failed to parse tile prefs', err);
+          saved = {};
+        }
+        const savedVis = (saved && typeof saved.visibility === 'object') ? saved.visibility : {};
+        tileVisibility = {};
+        const normalizeVisible = (val, fallback = true) => {
+          if (val === undefined) return fallback;
+          if (val === false || val === 0 || val === '0') return false;
+          return true;
+        };
+        const ensureVis = (id) => {
+          const meta = tileMeta(id);
+          if (Object.prototype.hasOwnProperty.call(savedVis, id)) {
+            tileVisibility[id] = normalizeVisible(savedVis[id], meta.defaultVisible !== false);
+          } else {
+            tileVisibility[id] = meta.defaultVisible !== false;
+          }
+        };
+        TILE_DEFS.forEach(def => ensureVis(def.id));
+        Object.keys(savedVis).forEach(id => {
+          if (!Object.prototype.hasOwnProperty.call(tileVisibility, id)) {
+            tileVisibility[id] = normalizeVisible(savedVis[id], true);
+          }
+        });
+        const savedOrder = Array.isArray(saved.order) ? saved.order.filter(id => typeof id === 'string') : [];
+        const baseOrder = TILE_DEFS.slice().sort((a,b) => (a.defaultOrder ?? 0) - (b.defaultOrder ?? 0)).map(d => d.id);
+        const seen = new Set();
+        const nextOrder = [];
+        const pushId = (id, preferEarly = false) => {
+          if (!id || seen.has(id)) return;
+          const idx = preferEarly ? Math.min(nextOrder.length, TILE_INSERT_EARLY_CAP) : nextOrder.length;
+          nextOrder.splice(idx, 0, id);
+          seen.add(id);
+        };
+        savedOrder.forEach(id => pushId(id));
+        baseOrder.forEach((id, idx) => {
+          const meta = tileMeta(id);
+          pushId(id, (meta.defaultOrder ?? idx) < TILE_INSERT_EARLY_CAP);
+        });
+        Object.keys(tileVisibility).forEach(id => {
+          if (!seen.has(id)) pushId(id, true);
+        });
+        tileOrder = nextOrder;
+      }
+
+      function persistTilePrefs() {
+        try {
+          localStorage.setItem(TILE_STATE_KEY, JSON.stringify({ visibility: tileVisibility, order: tileOrder }));
+        } catch (err) {
+          console.warn('Failed to store tile prefs', err);
+        }
+      }
+
+      function syncTilesFromDom() {
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const id = tile.dataset.metric;
+          if (!id) return;
+          if (tileVisibility[id] === undefined) tileVisibility[id] = true;
+          if (!tileOrder.includes(id)) {
+            const insertAt = Math.min(tileOrder.length, TILE_INSERT_EARLY_CAP);
+            tileOrder.splice(insertAt, 0, id);
+          }
+        });
+      }
+
+      function applyTileOrder() {
+        const grid = document.querySelector('.metrics');
+        if (!grid) return;
+        const tileMap = new Map();
+        grid.querySelectorAll('.metric-tile').forEach(el => tileMap.set(el.dataset.metric, el));
+        tileOrder.forEach(id => {
+          const node = tileMap.get(id);
+          if (node) grid.appendChild(node);
+        });
+        tileMap.forEach((node, id) => {
+          if (!tileOrder.includes(id)) grid.appendChild(node);
+        });
+      }
+
+      function applyTileVisibility() {
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const id = tile.dataset.metric;
+          const visible = tileVisibility[id] !== false;
+          tile.style.display = visible ? '' : 'none';
+        });
+      }
+
+      function setToggleVisual(toggleBtn, visible) {
+        if (!toggleBtn) return;
+        const dot = toggleBtn.querySelector('.toggle-dot');
+        toggleBtn.classList.toggle('off', !visible);
+        if (dot) {
+          dot.style.background = visible ? '#22c55e' : '#ef4444';
+          dot.classList.toggle('pulse', visible);
+          dot.style.boxShadow = visible ? '0 0 0 3px rgba(52,211,153,0.35)' : '0 0 0 3px rgba(248,113,113,0.28)';
+        }
+        const text = toggleBtn.querySelector('.toggle-text');
+        if (text) text.textContent = visible ? 'Sichtbar' : 'Versteckt';
+      }
+
+      function renderTileSettings() {
+        const list = getEl('tileSettingsList');
+        if (!list) return;
+        list.innerHTML = '';
+        tileOrder.forEach(id => {
+          const meta = tileMeta(id);
+          const visible = tileVisibility[id] !== false;
+          const row = document.createElement('div');
+          row.className = 'tile-setting';
+          const info = document.createElement('div');
+          info.className = 'info';
+          const label = document.createElement('strong');
+          label.textContent = meta.label || id;
+          const desc = document.createElement('small');
+          desc.textContent = meta.unit ? `Einheit: ${meta.unit}` : 'Dashboard-Kachel';
+          info.appendChild(label);
+          info.appendChild(desc);
+          const toggle = document.createElement('button');
+          toggle.className = 'tile-toggle';
+          toggle.innerHTML = `<span class="toggle-dot"></span><span class="toggle-text"></span>`;
+          setToggleVisual(toggle, visible);
+          toggle.addEventListener('click', () => {
+            tileVisibility[id] = !(tileVisibility[id] !== false);
+            applyTileVisibility();
+            renderTileSettings();
+            persistTilePrefs();
+          });
+          row.appendChild(info);
+          row.appendChild(toggle);
+          list.appendChild(row);
+        });
+      }
+
+      function resetTileLayout() {
+        tileVisibility = {};
+        tileOrder = TILE_DEFS.map(t => t.id);
+        TILE_DEFS.forEach(def => tileVisibility[def.id] = def.defaultVisible !== false);
+        syncTilesFromDom();
+        applyTileOrder();
+        applyTileVisibility();
+        renderTileSettings();
+        persistTilePrefs();
+      }
+
+      loadTilePrefs();
+      syncTilesFromDom();
+      applyTileOrder();
+      applyTileVisibility();
+
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
-      const metrics = ['lux','ppfd','co2','temp','humidity','leaf','vpd'];
+      const metrics = Array.from(new Set(tileOrder));
       const HISTORY_BUCKET_MS = 60000;
       const historyStore = {};
       metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 }, synced:false });
@@ -2060,7 +2249,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
         drawChart();
         updateAverages();
-        ['lux','co2','temp','humidity','leaf','vpd'].forEach(drawHover);
+        tileOrder.forEach(drawHover);
       }
 
       function updateAverages() {
@@ -2242,7 +2431,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
           drawChart();
           updateAverages();
-          ['lux','co2','temp','humidity','leaf','vpd'].forEach(drawHover);
+          tileOrder.forEach(drawHover);
           renderVpdTile(data);
           renderDetail();
           applyWifiState(data);
@@ -2784,6 +2973,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
       const navSensors = getEl('navSensors');
       if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
+      const resetTilesBtn = getEl('resetTiles');
+      if (resetTilesBtn) resetTilesBtn.addEventListener('click', resetTileLayout);
+      renderTileSettings();
+      applyTileVisibility();
 
       function applyWifiState(data) {
         const connected = flag(data.wifi_connected);

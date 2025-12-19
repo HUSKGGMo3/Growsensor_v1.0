@@ -1,8 +1,8 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.2.7 (untested / community preview)**
+**Current release: v0.2.6 (untested / community preview)**
 
-### Hotfix v0.2.7
+### Hotfix v0.2.6
 - Adds NTP-backed real-time clocks with timezone selection in the header and a visible “Zeit nicht synchron” badge until sync succeeds.
 - History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels.
 - Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.google.com, time.cloudflare.com) and graceful fallback to relative time until synced.
@@ -52,16 +52,15 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    pio device monitor -b 115200
    ```
 
-## v0.2.7 Changes
-- NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connects with periodic refresh and persisted timezone (Preferences/NVS).
-- `/api/telemetry` and `/api/history` now emit epoch millisecond timestamps; UI renders wall-clock time on all charts (main, hover, detail) when synced and falls back to relative mm:ss with a “Zeit nicht synchron” badge until then.
-- Header dropdown for timezone selection with persisted choice and live local-time indicator.
-
 ## v0.2.6 Changes
-- 6h history is always downsampled to 1-minute buckets for every metric with consistent `live` / `6h` ranges.
-- Mini- and detail charts show proper time/value axes with the right units and now reliably render `/api/history` data without empty graphs.
-- History JSON trims decimals per metric (Lux/Temp/Humidity 1, CO₂ 0, VPD 3, PPFD 1) to keep payloads and RAM usage lean; log output prunes when heap is low and caps API responses.
-- Sensor wizard modal now has a blurred overlay, pop-in animation, ESC/overlay-close debounce to avoid accidental closes, and defensive checks to prevent UI breakage.
+- Dashboard tiles can now be shown or hidden per metric; each toggle shows a green pulsing dot (on) or a red dot (off).
+- New metrics default to visible and are inserted near the top of the dashboard (first two rows) via an explicit tile order plus a visibility map.
+- Find the setting on the dashboard under **“Dashboard anpassen”**, including short descriptions per tile and a reset-to-default layout button.
+- Visibility is persisted in the browser (`localStorage`) and survives reloads/reboots; this only changes what is shown, not sensor collection.
+- NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).
+- `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts.
+- Header timezone dropdown with persistent selection and live clock.
+  (v0.2.6 remains untested – please use with care.)
 
 ## v0.2.5 Changes
 - VPD korrekt: Targets statt Skalierung + Apply Button für Stages.
@@ -77,7 +76,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Verbesserung: Popup-Chart-UX mit klarerer Skalierung und optionalem Dev-Debug.
 
 ## Stability notice
-- v0.2.7 is untested and provided as a community preview. Use at your own risk.
+- v0.2.6 is untested and provided as a community preview. Use at your own risk.
 
 ## ESPHome option
 - You can also flash the ESP32 with ESPHome to use the sensors directly in ESPHome. See ESPHome documentation and configure the sensors accordingly.
