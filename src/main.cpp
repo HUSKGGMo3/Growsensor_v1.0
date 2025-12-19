@@ -39,9 +39,6 @@ static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log
 static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4h stall watchdog
 
 // Auth
-static const char *DEFAULT_USER = "Admin";
-static const char *DEFAULT_PASS = "admin";
-static const char *SUPPORT_MASTER_PASS = "";
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
   FullSpectrum,
@@ -181,12 +178,6 @@ bool enableClimate = true;
 bool enableLeaf = true;
 bool enableCo2 = true;
 
-// Auth/session
-String adminUser = DEFAULT_USER;
-String adminPass = DEFAULT_PASS;
-bool mustChangePassword = true;
-String sessionToken;
-
 // VPD stage
 String vpdStageId = "seedling";
 
@@ -289,15 +280,6 @@ const VpdProfile &vpdProfileById(const String &id) {
   return VPD_PROFILES[0];
 }
 
-bool hasToken() { return sessionToken.length() > 0; }
-
-String generateToken() {
-  uint32_t r = esp_random();
-  char buf[17];
-  snprintf(buf, sizeof(buf), "%08lx%08lx", millis(), (unsigned long)r);
-  return String(buf);
-}
-
 float safeFloat(float v, float fallback = 0.0f) { return isnan(v) ? fallback : v; }
 int safeInt(int v, int fallback = 0) { return v < 0 ? fallback : v; }
 
@@ -305,19 +287,7 @@ float currentPpfdFactor() {
   return luxToPPFD(1.0f, channel);
 }
 
-bool isAuthorized() {
-  if (!hasToken())
-    return false;
-  if (!server.hasHeader("X-Auth"))
-    return false;
-  return server.header("X-Auth") == sessionToken;
-}
-
 bool enforceAuth() {
-  if (!isAuthorized()) {
-    server.send(401, "text/plain", "unauthorized");
-    return false;
-  }
   return true;
 }
 
@@ -410,10 +380,7 @@ bool connectToWiFi() {
   savedWifiPass = prefs.getString("wifi_pass", "");
   bool hasWifiPassKey = prefs.isKey("wifi_pass");
   bool hasLegacyPassKey = prefs.isKey("pass");
-  bool hasAdminPassKey = prefs.isKey("admin_pass");
-  bool hasAdminUserKey = prefs.isKey("admin_user");
   String legacyPass = hasLegacyPassKey ? prefs.getString("pass", "") : "";
-  String legacyUser = prefs.getString("user", DEFAULT_USER);
   channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
   climateType = climateFromString(prefs.getString("climate_type", "sht31"));
   co2Type = co2FromString(prefs.getString("co2_type", "mhz19"));
@@ -425,21 +392,11 @@ bool connectToWiFi() {
   enableClimate = prefs.getBool("en_climate", true);
   enableLeaf = prefs.getBool("en_leaf", true);
   enableCo2 = prefs.getBool("en_co2", true);
-  adminUser = hasAdminUserKey ? prefs.getString("admin_user", DEFAULT_USER) : legacyUser;
-  adminPass = prefs.getString("admin_pass", DEFAULT_PASS);
-  mustChangePassword = prefs.getBool("must_change", true);
   vpdStageId = prefs.getString("vpd_stage", "seedling");
   bool migrateLegacyWifiPass = !hasWifiPassKey && hasLegacyPassKey && savedWifiPass.isEmpty() && !legacyPass.isEmpty() && !savedSsid.isEmpty();
   if (migrateLegacyWifiPass) {
     savedWifiPass = legacyPass;
     prefs.putString("wifi_pass", savedWifiPass);
-  }
-  if (!hasAdminUserKey && legacyUser.length() > 0) {
-    prefs.putString("admin_user", adminUser);
-  }
-  if (!hasAdminPassKey && hasLegacyPassKey && !legacyPass.isEmpty() && !migrateLegacyWifiPass && !mustChangePassword) {
-    adminPass = legacyPass;
-    prefs.putString("admin_pass", adminPass);
   }
   prefs.end();
   loadPartners();
@@ -735,13 +692,20 @@ String htmlPage() {
       body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
       header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 10; }
       h1 { margin: 0; font-size: 1.2rem; }
+      .header-row { display:flex; justify-content: space-between; align-items: center; gap:12px; flex-wrap: wrap; }
+      .conn { display:flex; align-items:center; gap:8px; }
+      .led { width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,0.25); display:inline-block; }
+      .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:0.8rem; background:#1f2937; color:#cbd5e1; }
+      .badge-dev { background:#10b981; color:#0f172a; }
+      .ghost { background:transparent; border:1px solid #1f2937; color:#e2e8f0; }
       main { padding: 16px; display: grid; gap: 12px; }
-      .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); }
-      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); position: relative; overflow:hidden; }
+      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
       .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
       label { display: block; margin-top: 8px; font-size: 0.9rem; }
       input, select, button { width: 100%; padding: 10px; margin-top: 4px; border-radius: 8px; border: 1px solid #1f2937; background: #0b1220; color: #e2e8f0; }
       button { cursor: pointer; border: none; background: linear-gradient(120deg, #22d3ee, #6366f1); color: #0b1220; font-weight: 600; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
       .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
       .row > * { flex: 1; }
       .status { font-weight: 600; }
@@ -751,19 +715,80 @@ String htmlPage() {
       .chart { position: relative; height: 200px; }
       canvas { width: 100%; height: 200px; }
       footer { text-align: center; padding: 12px; font-size: 0.85rem; color: #94a3b8; }
+      .card-header { display:flex; align-items:center; justify-content: space-between; gap:8px; }
+      .status-dot { width:12px; height:12px; border-radius:50%; background:#6b7280; box-shadow:0 0 0 3px rgba(107,114,128,0.25); }
+      .metric { cursor: default; }
+      .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; }
+      .metric:hover .hover-chart { display:flex; }
+      .hover-chart canvas { width:100%; height:140px; }
+      .vpd-bar { position: relative; height: 14px; border-radius: 999px; background: #0b1220; margin-top: 12px; overflow: hidden; }
+      .vpd-range { position:absolute; top:0; bottom:0; background: linear-gradient(90deg, #22c55e, #a855f7); opacity:0.25; }
+      .vpd-marker { position:absolute; top:-3px; bottom:-3px; width:4px; background:#f59e0b; border-radius:2px; display:none; }
+      .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
+      #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
+      .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
     </style>
   </head>
   <body>
-    <header><h1>GrowSensor – v0.2</h1></header>
+    <header>
+      <div class="header-row">
+        <div>
+          <h1>GrowSensor – v0.2</h1>
+          <div class="hover-hint">Live Monitoring</div>
+        </div>
+        <div class="header-row" style="gap:10px;">
+          <div class="conn">
+            <span class="led" id="connLed"></span>
+            <span id="connText">offline</span>
+            <span class="badge" id="wifiMode">Offline</span>
+          </div>
+          <button id="openDev" class="ghost" style="width:auto;">Dev-Modus</button>
+          <span id="devStatus" class="badge badge-dev" style="display:none;">Dev aktiv</span>
+        </div>
+      </div>
+    </header>
     <main>
-      <section class="grid">
-        <article class="card"><div>Licht (Lux)</div><div class="value" id="lux">–</div></article>
-        <article class="card"><div>PPFD (µmol/m²/s)</div><div class="value" id="ppfd">–</div><div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div></article>
-        <article class="card"><div>CO₂ (ppm)</div><div class="value" id="co2">–</div></article>
-        <article class="card"><div>Umgebungstemperatur (°C)</div><div class="value" id="temp">–</div></article>
-        <article class="card"><div>Luftfeuchte (%)</div><div class="value" id="humidity">–</div></article>
-        <article class="card"><div>Leaf-Temp (°C)</div><div class="value" id="leaf">–</div></article>
-        <article class="card"><div>VPD (kPa)</div><div class="value" id="vpd">–</div><div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div></article>
+      <section class="grid metrics">
+        <article class="card metric" data-metric="lux">
+          <div class="card-header"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
+          <div class="value" id="lux">–</div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="lux" width="320" height="140"></canvas></div>
+        </article>
+        <article class="card metric" data-metric="lux">
+          <div class="card-header"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
+          <div class="value" id="ppfd">–</div>
+          <div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
+        </article>
+        <article class="card metric" data-metric="co2">
+          <div class="card-header"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
+          <div class="value" id="co2">–</div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="co2" width="320" height="140"></canvas></div>
+        </article>
+        <article class="card metric" data-metric="temp">
+          <div class="card-header"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
+          <div class="value" id="temp">–</div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="temp" width="320" height="140"></canvas></div>
+        </article>
+        <article class="card metric" data-metric="humidity">
+          <div class="card-header"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
+          <div class="value" id="humidity">–</div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="humidity" width="320" height="140"></canvas></div>
+        </article>
+        <article class="card metric" data-metric="leaf">
+          <div class="card-header"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
+          <div class="value" id="leaf">–</div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="leaf" width="320" height="140"></canvas></div>
+        </article>
+        <article class="card metric" data-metric="vpd">
+          <div class="card-header"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
+          <div class="value" id="vpd">–</div>
+          <div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div>
+          <div class="vpd-bar">
+            <div class="vpd-range" id="vpdRange"></div>
+            <div class="vpd-marker" id="vpdMarker"></div>
+          </div>
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="vpd" width="320" height="140"></canvas></div>
+        </article>
       </section>
 
       <section class="card" id="avgCard">
@@ -800,9 +825,10 @@ String htmlPage() {
             <option value="late_bloom">Späteblüte</option>
           </select>
           <p id="vpdTarget" style="margin-top:8px; color:#a5b4fc"></p>
+          <p class="hover-hint">Hover über einer Kachel für den 6h-Mini-Graph.</p>
         </article>
 
-        <article class="card">
+        <article class="card" id="wifiCard">
           <h3 style="margin-top:0">Wi-Fi Setup</h3>
           <div class="row">
             <div style="flex:2">
@@ -819,13 +845,14 @@ String htmlPage() {
             </label>
           </div>
           <div class="row">
-            <input id="ip" placeholder="IP (optional)" />
-            <input id="gw" placeholder="Gateway (optional)" />
-            <input id="sn" placeholder="Subnet (optional)" />
+            <input id="ip" placeholder="IP (optional)" class="dev-only" />
+            <input id="gw" placeholder="Gateway (optional)" class="dev-only" />
+            <input id="sn" placeholder="Subnet (optional)" class="dev-only" />
           </div>
-          <button id="saveWifi">Verbinden & Speichern</button>
-          <button id="resetWifi" style="margin-top:8px;background:#ef4444;color:#fff;">WLAN Reset</button>
+          <button id="saveWifi" class="dev-only">Verbinden & Speichern</button>
+          <button id="resetWifi" class="dev-only" style="margin-top:8px;background:#ef4444;color:#fff;">WLAN Reset</button>
           <p id="wifiStatus" class="status" style="margin-top:8px;"></p>
+          <p class="dev-note" id="wifiDevNote">Wi-Fi Änderungen nur im Dev-Modus.</p>
         </article>
 
         <article class="card">
@@ -872,7 +899,7 @@ String htmlPage() {
         <pre class="logbox" id="logBox"></pre>
       </section>
 
-      <section class="card">
+      <section class="card" id="partnerCard" style="display:none;">
         <h3 style="margin-top:0">Partner & Supporter</h3>
         <div id="partnerList"></div>
         <div class="row" style="margin-top:12px;">
@@ -888,138 +915,59 @@ String htmlPage() {
     </main>
     <footer>Growcontroller v0.2 • Sensorgehäuse v0.3</footer>
 
-    <div id="loginModal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:50;">
+    <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
-        <h3 style="margin-top:0">Login</h3>
-        <label for="loginUser">Benutzer</label>
-        <input id="loginUser" placeholder="Admin" />
-        <label for="loginPass">Passwort</label>
-        <input id="loginPass" type="password" placeholder="admin" />
+        <h3 style="margin-top:0">Dev-Modus aktivieren</h3>
+        <label for="devCode">Code</label>
+        <input id="devCode" type="password" placeholder="Dev-Code" />
         <div class="row">
-          <button id="loginBtn">Login</button>
+          <button id="activateDev">Aktivieren</button>
+          <button id="cancelDev" class="ghost">Abbrechen</button>
         </div>
-        <p id="loginStatus" class="status" style="margin-top:8px;"></p>
-      </div>
-    </div>
-
-    <div id="forceChangeModal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);z-index:60;">
-      <div class="card" style="max-width:420px;width:90%;">
-        <h3 style="margin-top:0">Passwort ändern</h3>
-        <label for="forceNewPass">Neues Passwort</label>
-        <input id="forceNewPass" type="password" placeholder="Mindestens 8 Zeichen" />
-        <label for="forceNewPass2">Passwort wiederholen</label>
-        <input id="forceNewPass2" type="password" placeholder="Passwort erneut" />
-        <button id="forceChangeBtn" style="margin-top:8px;background:#22c55e;color:#0b1220;">Speichern</button>
-        <p id="forceChangeStatus" class="status" style="margin-top:8px;"></p>
+        <p id="devStatusMsg" class="status" style="margin-top:8px;"></p>
       </div>
     </div>
 
     <script>
-let authToken = localStorage.getItem('growsensor_token') || '';
-let mustChangePassword = false;
-
-function showLogin(message = '') {
-  document.getElementById('loginModal').style.display = 'flex';
-        if (message) {
-          document.getElementById('loginStatus').textContent = message;
-          document.getElementById('loginStatus').className = 'status err';
-        }
-      }
-
-function hideLogin() {
-  document.getElementById('loginModal').style.display = 'none';
-  document.getElementById('loginStatus').textContent = '';
-}
-
-function showForceChange() {
-  document.getElementById('forceChangeModal').style.display = 'flex';
-}
-
-function hideForceChange() {
-  document.getElementById('forceChangeModal').style.display = 'none';
-  document.getElementById('forceChangeStatus').textContent = '';
-  document.getElementById('forceNewPass').value = '';
-  document.getElementById('forceNewPass2').value = '';
-}
-
-async function authedFetch(url, options = {}) {
-  options.headers = options.headers || {};
-  if (authToken) {
-    options.headers['X-Auth'] = authToken;
-  }
-        const res = await fetch(url, options);
-        if (res.status === 401) {
-          showLogin('Bitte erneut einloggen');
-          throw new Error('unauthorized');
-        }
-        return res;
-      }
-
-async function login() {
-  const user = document.getElementById('loginUser').value || 'Admin';
-  const pass = document.getElementById('loginPass').value || 'admin';
-  const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}` });
-  if (res.ok) {
-    const data = await res.json();
-    authToken = data.token;
-    mustChangePassword = data.mustChange === 1;
-    localStorage.setItem('growsensor_token', authToken);
-    document.getElementById('loginStatus').textContent = 'Angemeldet';
-    document.getElementById('loginStatus').className = 'status ok';
-    hideLogin();
-    if (mustChangePassword) {
-      showForceChange();
-      document.getElementById('forceNewPass').focus();
-    } else {
-      await loadSettings();
-      fetchData();
-    }
-  } else {
-    document.getElementById('loginStatus').textContent = 'Login fehlgeschlagen';
-    document.getElementById('loginStatus').className = 'status err';
-  }
-}
-
-async function forceChangePassword() {
-  const pass1 = document.getElementById('forceNewPass').value;
-  const pass2 = document.getElementById('forceNewPass2').value;
-  const status = document.getElementById('forceChangeStatus');
-  if (pass1.length < 8) {
-    status.textContent = 'Mindestens 8 Zeichen erforderlich';
-    status.className = 'status err';
-    return;
-  }
-  if (pass1 !== pass2) {
-    status.textContent = 'Passwörter stimmen nicht überein';
-    status.className = 'status err';
-    return;
-  }
-  try {
-    const res = await authedFetch('/api/auth/change', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: `new_pass=${encodeURIComponent(pass1)}&new_user=${encodeURIComponent(document.getElementById('loginUser').value || 'Admin')}` });
-    if (res.ok) {
-      const data = await res.json();
-      authToken = data.token;
-      localStorage.setItem('growsensor_token', authToken);
-      mustChangePassword = false;
-      status.textContent = 'Passwort geändert';
-      status.className = 'status ok';
-      hideForceChange();
-      await loadSettings();
-      fetchData();
-    } else {
-      status.textContent = 'Fehler beim Ändern';
-      status.className = 'status err';
-    }
-  } catch (err) {
-    status.textContent = 'Fehler beim Ändern';
-    status.className = 'status err';
-  }
-}
       const chartCanvas = document.getElementById('chart');
       const ctx = chartCanvas.getContext('2d');
       const maxPoints = 288; // 5-min samples for 24h
       const history = { labels: [], lux: [], co2: [], temp: [], humidity: [], vpd: [] };
       let lastHistoryPush = 0;
+      const hoverHistory = { lux: [], co2: [], temp: [], humidity: [], leaf: [], vpd: [] };
+      const hoverMax = 720;
+      let lastHoverPush = 0;
+      let lastTelemetryAt = 0;
+      let devMode = false;
+      const DEV_CODE = "Test1234#";
+      const hoverCanvases = {};
+      document.querySelectorAll('.hover-canvas').forEach(c => hoverCanvases[c.dataset.metric] = c.getContext('2d'));
+
+      function authedFetch(url, options = {}) { return fetch(url, options); }
+      function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
+
+      function setDot(id, ok, present, enabled) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        let color = '#6b7280';
+        if (enabled && present) color = ok ? '#34d399' : '#fbbf24';
+        else if (enabled && !present) color = '#9ca3af';
+        el.style.background = color;
+        el.style.boxShadow = `0 0 0 3px ${color}33`;
+      }
+
+      function updateConnectionStatus(apMode = false, wifiConnected = false) {
+        const online = (Date.now() - lastTelemetryAt) < 10000;
+        const dot = document.getElementById('connLed');
+        const text = document.getElementById('connText');
+        dot.style.background = online ? '#34d399' : '#ef4444';
+        dot.style.boxShadow = online ? '0 0 0 3px rgba(52,211,153,0.25)' : '0 0 0 3px rgba(239,68,68,0.25)';
+        text.textContent = online ? 'online' : 'offline';
+        const badge = document.getElementById('wifiMode');
+        badge.textContent = apMode ? 'AP' : (wifiConnected ? 'WLAN' : 'Offline');
+        badge.style.background = apMode ? '#f59e0b' : (wifiConnected ? '#22c55e' : '#ef4444');
+        badge.style.color = '#0f172a';
+      }
 
       function drawChart() {
         ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
@@ -1036,13 +984,16 @@ async function forceChangePassword() {
           { data: history.temp, color: '#34d399', label: 'Temp' },
           { data: history.vpd, color: '#a855f7', label: 'VPD' },
         ];
-        series.forEach((serie, index) => {
+        series.forEach((serie) => {
           if (!serie.data.length) return;
-          const maxVal = Math.max(...serie.data);
-          const minVal = Math.min(...serie.data);
+          const cleaned = serie.data.filter(v => typeof v === 'number' && !Number.isNaN(v));
+          if (!cleaned.length) return;
+          const maxVal = Math.max(...cleaned);
+          const minVal = Math.min(...cleaned);
           const span = Math.max(maxVal - minVal, 0.0001);
           ctx.beginPath();
           serie.data.forEach((val, i) => {
+            if (Number.isNaN(val)) return;
             const x = (i / Math.max(series[0].data.length - 1, 1)) * width;
             const y = height - ((val - minVal) / span) * height;
             if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
@@ -1058,16 +1009,64 @@ async function forceChangePassword() {
         if (lastHistoryPush && (now - lastHistoryPush < 300000)) return; // 5 minutes
         lastHistoryPush = now;
         history.labels.push(new Date().toLocaleTimeString());
-        history.lux.push(obj.lux);
-        history.co2.push(obj.co2);
-        history.temp.push(obj.temp);
-        history.humidity.push(obj.humidity);
-        history.vpd.push(obj.vpd);
+        history.lux.push(typeof obj.lux === 'number' ? obj.lux : NaN);
+        history.co2.push(typeof obj.co2 === 'number' ? obj.co2 : NaN);
+        history.temp.push(typeof obj.temp === 'number' ? obj.temp : NaN);
+        history.humidity.push(typeof obj.humidity === 'number' ? obj.humidity : NaN);
+        history.vpd.push(typeof obj.vpd === 'number' ? obj.vpd : NaN);
         Object.keys(history).forEach(key => {
           if (history[key].length > maxPoints) history[key].shift();
         });
         drawChart();
         updateAverages();
+      }
+
+      function pushHoverHistory(obj) {
+        const now = Date.now();
+        if (lastHoverPush && (now - lastHoverPush < 30000)) return; // 30s
+        lastHoverPush = now;
+        const map = { lux: obj.lux, co2: obj.co2, temp: obj.temp, humidity: obj.humidity, leaf: obj.leaf, vpd: obj.vpd };
+        Object.keys(map).forEach(key => {
+          const val = map[key];
+          const entry = (typeof val === 'number' && !Number.isNaN(val)) ? val : NaN;
+          hoverHistory[key].push(entry);
+          if (hoverHistory[key].length > hoverMax) hoverHistory[key].shift();
+        });
+      }
+
+      function drawHover(metric) {
+        const ctxHover = hoverCanvases[metric];
+        if (!ctxHover) return;
+        const canvas = ctxHover.canvas;
+        ctxHover.clearRect(0, 0, canvas.width, canvas.height);
+        const data = hoverHistory[metric] || [];
+        const values = data.filter(v => typeof v === 'number' && !Number.isNaN(v));
+        if (!values.length) return;
+        const maxVal = Math.max(...values);
+        const minVal = Math.min(...values);
+        const span = Math.max(maxVal - minVal, 0.0001);
+        ctxHover.strokeStyle = '#1f2937';
+        ctxHover.lineWidth = 1;
+        ctxHover.beginPath();
+        data.forEach((val, i) => {
+          if (Number.isNaN(val)) return;
+          const x = (i / Math.max(data.length - 1, 1)) * canvas.width;
+          const y = canvas.height - ((val - minVal) / span) * canvas.height;
+          if (i === 0) ctxHover.moveTo(x, y); else ctxHover.lineTo(x, y);
+        });
+        ctxHover.stroke();
+        ctxHover.strokeStyle = '#22d3ee';
+        ctxHover.lineWidth = 2;
+        ctxHover.beginPath();
+        let started = false;
+        data.forEach((val, i) => {
+          if (Number.isNaN(val)) { started = false; return; }
+          const x = (i / Math.max(data.length - 1, 1)) * canvas.width;
+          const y = canvas.height - ((val - minVal) / span) * canvas.height;
+          if (!started) { ctxHover.moveTo(x, y); started = true; }
+          else ctxHover.lineTo(x, y);
+        });
+        ctxHover.stroke();
       }
 
       function avg(arr) {
@@ -1087,28 +1086,62 @@ async function forceChangePassword() {
         set('avgVpd', avg(history.vpd), 3);
       }
 
+      function updateVpdBar(low, high, value) {
+        const range = document.getElementById('vpdRange');
+        const marker = document.getElementById('vpdMarker');
+        const min = 0.0, max = 2.0;
+        const clamp = (v) => Math.min(max, Math.max(min, v ?? min));
+        const l = clamp(low ?? 0);
+        const h = clamp(high ?? 0);
+        const startPct = ((l - min) / (max - min)) * 100;
+        const widthPct = Math.max(((h - l) / (max - min)) * 100, 0);
+        range.style.left = `${startPct}%`;
+        range.style.width = `${widthPct}%`;
+        if (typeof value === 'number' && !Number.isNaN(value)) {
+          const v = clamp(value);
+          marker.style.left = `${((v - min) / (max - min)) * 100}%`;
+          marker.style.display = 'block';
+        } else {
+          marker.style.display = 'none';
+        }
+      }
+
       async function fetchData() {
         try {
           const res = await authedFetch('/api/telemetry');
           const data = await res.json();
-          document.getElementById('lux').textContent = data.lux?.toFixed(1) ?? '–';
-          document.getElementById('ppfd').textContent = data.ppfd?.toFixed(1) ?? '–';
-          document.getElementById('ppfdFactor').textContent = (data.ppfd_factor && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–';
+          lastTelemetryAt = Date.now();
+          updateConnectionStatus(data.ap_mode === 1, data.wifi_connected === 1);
+          document.getElementById('lux').textContent = (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–';
+          document.getElementById('ppfd').textContent = (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–';
+          document.getElementById('ppfdFactor').textContent = (typeof data.ppfd_factor === 'number' && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–';
           document.getElementById('ppfdSpectrum').textContent = document.getElementById('channel').selectedOptions[0]?.textContent || '–';
-          document.getElementById('co2').textContent = data.co2 ?? '–';
-          document.getElementById('temp').textContent = data.temp?.toFixed(1) ?? '–';
-          document.getElementById('humidity').textContent = data.humidity?.toFixed(1) ?? '–';
-          document.getElementById('leaf').textContent = data.leaf?.toFixed(1) ?? '–';
-          document.getElementById('vpd').textContent = (data.vpd && !Number.isNaN(data.vpd)) ? data.vpd.toFixed(3) : '–';
-          document.getElementById('vpdTarget').textContent = `Ziel: ${data.vpd_low?.toFixed(2) ?? '–'} – ${data.vpd_high?.toFixed(2) ?? '–'} kPa`;
+          document.getElementById('co2').textContent = (typeof data.co2 === 'number' && data.co2 > 0) ? data.co2.toFixed(0) : '–';
+          document.getElementById('temp').textContent = (typeof data.temp === 'number' && !Number.isNaN(data.temp)) ? data.temp.toFixed(1) : '–';
+          document.getElementById('humidity').textContent = (typeof data.humidity === 'number' && !Number.isNaN(data.humidity)) ? data.humidity.toFixed(1) : '–';
+          document.getElementById('leaf').textContent = (typeof data.leaf === 'number' && !Number.isNaN(data.leaf)) ? data.leaf.toFixed(1) : '–';
+          const vpdOk = flag(data.vpd_ok) && typeof data.vpd === 'number' && !Number.isNaN(data.vpd);
+          document.getElementById('vpd').textContent = vpdOk ? data.vpd.toFixed(3) : '–';
+          document.getElementById('vpdTarget').textContent = `Ziel: ${typeof data.vpd_low === 'number' ? data.vpd_low.toFixed(2) : '–'} – ${typeof data.vpd_high === 'number' ? data.vpd_high.toFixed(2) : '–'} kPa`;
           const statusEl = document.getElementById('vpdStatus');
           const status = data.vpd_status ?? 0;
-          if (status < 0) { statusEl.textContent = 'unter Ziel'; statusEl.style.color = '#f59e0b'; }
+          if (!vpdOk) { statusEl.textContent = 'keine Daten'; statusEl.style.color = '#9ca3af'; }
+          else if (status < 0) { statusEl.textContent = 'unter Ziel'; statusEl.style.color = '#f59e0b'; }
           else if (status > 0) { statusEl.textContent = 'über Ziel'; statusEl.style.color = '#f87171'; }
           else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
+          updateVpdBar(data.vpd_low, data.vpd_high, vpdOk ? data.vpd : null);
+          setDot('luxDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
+          setDot('ppfdDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
+          setDot('co2Dot', flag(data.co2_ok), flag(data.co2_present), flag(data.co2_enabled, true));
+          setDot('tempDot', flag(data.climate_ok), flag(data.climate_present), flag(data.climate_enabled, true));
+          setDot('humidityDot', flag(data.climate_ok), flag(data.climate_present), flag(data.climate_enabled, true));
+          setDot('leafDot', flag(data.leaf_ok), flag(data.leaf_present), flag(data.leaf_enabled, true));
+          setDot('vpdDot', flag(data.vpd_ok), flag(data.climate_present) && flag(data.leaf_present), flag(data.climate_enabled) || flag(data.leaf_enabled));
           pushHistory(data);
+          pushHoverHistory(data);
         } catch (err) {
           console.warn('telemetry failed', err);
+          updateConnectionStatus(false, false);
         }
       }
 
@@ -1191,6 +1224,7 @@ async function forceChangePassword() {
       });
 
       document.getElementById('saveWifi').addEventListener('click', async () => {
+        if (!devMode) { document.getElementById('wifiStatus').textContent = 'Dev-Modus erforderlich'; document.getElementById('wifiStatus').className='status err'; return; }
         const ssid = document.getElementById('ssid').value;
         const pass = document.getElementById('pass').value;
         const staticIp = document.getElementById('staticIpToggle').checked;
@@ -1198,11 +1232,6 @@ async function forceChangePassword() {
         const gw = document.getElementById('gw').value;
         const sn = document.getElementById('sn').value;
         document.getElementById('wifiStatus').textContent = 'Speichern & Neustart...';
-        if (mustChangePassword) {
-          document.getElementById('wifiStatus').textContent = 'Bitte zuerst Passwort ändern';
-          document.getElementById('wifiStatus').className = 'status err';
-          return;
-        }
         const res = await authedFetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}&static=${staticIp ? 1 : 0}&ip=${encodeURIComponent(ip)}&gw=${encodeURIComponent(gw)}&sn=${encodeURIComponent(sn)}` });
         const text = await res.text();
         if (res.ok) {
@@ -1215,6 +1244,7 @@ async function forceChangePassword() {
       });
 
       document.getElementById('resetWifi').addEventListener('click', async () => {
+        if (!devMode) { document.getElementById('wifiStatus').textContent = 'Dev-Modus erforderlich'; document.getElementById('wifiStatus').className='status err'; return; }
         document.getElementById('wifiStatus').textContent = 'Werkseinstellungen...';
         await authedFetch('/api/reset', { method: 'POST' });
         setTimeout(() => location.reload(), 1500);
@@ -1238,11 +1268,9 @@ async function forceChangePassword() {
         URL.revokeObjectURL(url);
       }
 
-document.getElementById('scanWifi').addEventListener('click', scanNetworks);
-document.getElementById('refreshLogs').addEventListener('click', loadLogs);
-document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
-document.getElementById('loginBtn').addEventListener('click', login);
-document.getElementById('forceChangeBtn').addEventListener('click', forceChangePassword);
+      document.getElementById('scanWifi').addEventListener('click', scanNetworks);
+      document.getElementById('refreshLogs').addEventListener('click', loadLogs);
+      document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
       document.getElementById('saveTypes').addEventListener('click', async () => {
         const cType = document.getElementById('climateType').value;
         const co2Type = document.getElementById('co2Type').value;
@@ -1275,6 +1303,7 @@ document.getElementById('forceChangeBtn').addEventListener('click', forceChangeP
       }
 
       document.getElementById('savePartner').addEventListener('click', async () => {
+        if (!devMode) { return; }
         const body = new URLSearchParams();
         body.set('id', document.getElementById('partnerId').value);
         body.set('name', document.getElementById('partnerName').value);
@@ -1286,16 +1315,46 @@ document.getElementById('forceChangeBtn').addEventListener('click', forceChangeP
         await loadPartners();
       });
 
-      setInterval(fetchData, 2500);
-      if (!authToken) {
-        showLogin();
-      } else {
-        loadSettings();
-        scanNetworks();
-        loadLogs();
-        loadPartners();
-        fetchData();
+      document.querySelectorAll('.metric').forEach(card => {
+        const metric = card.dataset.metric;
+        card.addEventListener('mouseenter', () => drawHover(metric));
+      });
+
+      function setDevVisible() {
+        document.querySelectorAll('.dev-only').forEach(el => el.disabled = !devMode);
+        document.getElementById('wifiDevNote').style.display = devMode ? 'none' : 'block';
+        document.getElementById('partnerCard').style.display = devMode ? 'block' : 'none';
+        document.getElementById('devStatus').style.display = devMode ? 'inline-block' : 'none';
       }
+
+      document.getElementById('openDev').addEventListener('click', () => {
+        document.getElementById('devModal').style.display = 'flex';
+        document.getElementById('devStatusMsg').textContent = '';
+        document.getElementById('devCode').value = '';
+      });
+      document.getElementById('cancelDev').addEventListener('click', () => document.getElementById('devModal').style.display = 'none');
+      document.getElementById('activateDev').addEventListener('click', () => {
+        const code = document.getElementById('devCode').value;
+        const status = document.getElementById('devStatusMsg');
+        if (code === DEV_CODE) {
+          devMode = true;
+          status.textContent = 'Dev aktiviert';
+          status.className = 'status ok';
+          document.getElementById('devModal').style.display = 'none';
+          setDevVisible();
+        } else {
+          status.textContent = 'Falscher Code';
+          status.className = 'status err';
+        }
+      });
+
+      setInterval(fetchData, 2500);
+      setDevVisible();
+      loadSettings();
+      scanNetworks();
+      loadLogs();
+      loadPartners();
+      fetchData();
     </script>
   </body>
   </html>
@@ -1315,92 +1374,12 @@ void handleNotFound() {
   server.send(404, "text/plain", "Not found");
 }
 
-void handleAuth() {
-  if (!server.hasArg("user") || !server.hasArg("pass")) {
-    server.send(400, "text/plain", "missing user/pass");
-    return;
-  }
-
-  String user = server.arg("user");
-  String pass = server.arg("pass");
-
-  if (strlen(SUPPORT_MASTER_PASS) > 0 && pass == SUPPORT_MASTER_PASS) {
-    adminUser = DEFAULT_USER;
-    adminPass = DEFAULT_PASS;
-    mustChangePassword = true;
-    prefs.begin("grow-sensor", false);
-    prefs.putString("admin_user", adminUser);
-    prefs.putString("admin_pass", adminPass);
-    prefs.putBool("must_change", mustChangePassword);
-    prefs.end();
-  }
-
-  if (!mustChangePassword && user == DEFAULT_USER && pass == DEFAULT_PASS) {
-    server.send(401, "text/plain", "invalid");
-    return;
-  }
-
-  if (user == adminUser && pass == adminPass) {
-    sessionToken = generateToken();
-    String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":" + String(mustChangePassword ? 1 : 0) + "}";
-    server.send(200, "application/json", json);
-  } else {
-    server.send(401, "text/plain", "invalid");
-  }
-}
-void handleAuthChange() {
-  bool authorized = isAuthorized();
-  bool allowFirstChangeWithoutToken = false;
-
-  if (!authorized) {
-    if (mustChangePassword && server.hasArg("old_pass")) {
-      String oldPass = server.arg("old_pass");
-      bool masterOk = strlen(SUPPORT_MASTER_PASS) > 0 && oldPass == SUPPORT_MASTER_PASS;
-      if (oldPass == adminPass || masterOk) {
-        allowFirstChangeWithoutToken = true;
-      }
-    }
-    if (!allowFirstChangeWithoutToken) {
-      server.send(401, "text/plain", "unauthorized");
-      return;
-    }
-  }
-
-  if (!server.hasArg("new_pass")) {
-    server.send(400, "text/plain", "missing new_pass");
-    return;
-  }
-
-  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
-  String newPass = server.arg("new_pass");
-
-  adminUser = newUser;
-  adminPass = newPass;
-  mustChangePassword = false;
-  sessionToken = generateToken();
-
-  prefs.begin("grow-sensor", false);
-  prefs.putString("admin_user", adminUser);
-  prefs.putString("admin_pass", adminPass);
-  prefs.putBool("must_change", mustChangePassword);
-  prefs.end();
-
-  String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
-  server.send(200, "application/json", json);
-}
-// end handleAuthChange
-
 void handlePartners() {
   if (!enforceAuth())
     return;
   if (server.method() == HTTP_POST) {
     if (!server.hasArg("id")) {
       server.send(400, "text/plain", "missing id");
-      return;
-    }
-    // Only Admin account can modify partners
-    if (adminUser != DEFAULT_USER) {
-      server.send(403, "text/plain", "forbidden");
       return;
     }
     String id = server.arg("id");
@@ -1442,12 +1421,27 @@ void handlePartners() {
 }
 
 void handleTelemetry() {
-  char json[384];
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  bool luxOk = enableLight && lightHealth.present && !isnan(latest.lux) && latest.lux > 0;
+  bool climateOk = enableClimate && climateHealth.present && !isnan(latest.ambientTempC) && !isnan(latest.humidity);
+  bool leafOk = enableLeaf && leafHealth.present && !isnan(latest.leafTempC);
+  bool co2Ok = enableCo2 && co2Health.present && latest.co2ppm > 0;
+  bool vpdOk = !isnan(latest.vpd);
+  char json[640];
   snprintf(json, sizeof(json),
-           "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d}",
-           safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm), safeFloat(latest.ambientTempC),
+           "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,"
+           "\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d,"
+           "\"wifi_connected\":%d,\"ap_mode\":%d,"
+           "\"lux_ok\":%d,\"co2_ok\":%d,\"climate_ok\":%d,\"leaf_ok\":%d,\"vpd_ok\":%d,"
+           "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
+           "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d}",
+           safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
-           safeFloat(latest.vpdTargetHigh), latest.vpdStatus);
+           safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
+           wifiConnected ? 1 : 0, apMode ? 1 : 0,
+           luxOk ? 1 : 0, co2Ok ? 1 : 0, climateOk ? 1 : 0, leafOk ? 1 : 0, vpdOk ? 1 : 0,
+           lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
+           enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0);
   server.send(200, "application/json", json);
 }
 
@@ -1493,10 +1487,6 @@ void handleWifiSave() {
     return;
   if (!server.hasArg("ssid") || !server.hasArg("pass")) {
     server.send(400, "text/plain", "missing ssid/pass");
-    return;
-  }
-  if (mustChangePassword) {
-    server.send(403, "text/plain", "change default password first");
     return;
   }
   String ssid = server.arg("ssid");
@@ -1573,10 +1563,6 @@ void handleSensorsApi() {
     if (!server.hasArg("id")) {
       server.send(400, "text/plain", "missing id");
       return;
-    }
-    // Only Admin user can modify partners
-    if (adminUser != DEFAULT_USER || adminPass.isEmpty()) {
-      // still allow default Admin user (but require auth already)
     }
     String id = server.arg("id");
     if (id == "replace") {
@@ -1721,8 +1707,6 @@ void setupServer() {
   server.on("/api/settings", HTTP_POST, handleSettings);
   server.on("/api/wifi", HTTP_POST, handleWifiSave);
   server.on("/api/reset", HTTP_POST, handleReset);
-  server.on("/api/auth", HTTP_POST, handleAuth);
-  server.on("/api/auth/change", HTTP_POST, handleAuthChange);
   server.on("/api/networks", HTTP_GET, handleNetworks);
   server.on("/api/sensors", HTTP_GET, handleSensorsApi);
   server.on("/api/sensors", HTTP_POST, handleSensorsApi);
