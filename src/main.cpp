@@ -146,7 +146,7 @@ WebServer server(80);
 
 // Wi-Fi config
 String savedSsid;
-String savedPass;
+String savedWifiPass;
 bool apMode = false;
 LightChannel channel = LightChannel::FullSpectrum;
 ClimateSensorType climateType = ClimateSensorType::SHT31;
@@ -405,9 +405,15 @@ void startAccessPoint() {
 }
 
 bool connectToWiFi() {
-  prefs.begin("grow-sensor", true);
+  prefs.begin("grow-sensor", false);
   savedSsid = prefs.getString("ssid", "");
-  savedPass = prefs.getString("pass", "");
+  savedWifiPass = prefs.getString("wifi_pass", "");
+  bool hasWifiPassKey = prefs.isKey("wifi_pass");
+  bool hasLegacyPassKey = prefs.isKey("pass");
+  bool hasAdminPassKey = prefs.isKey("admin_pass");
+  bool hasAdminUserKey = prefs.isKey("admin_user");
+  String legacyPass = hasLegacyPassKey ? prefs.getString("pass", "") : "";
+  String legacyUser = prefs.getString("user", DEFAULT_USER);
   channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
   climateType = climateFromString(prefs.getString("climate_type", "sht31"));
   co2Type = co2FromString(prefs.getString("co2_type", "mhz19"));
@@ -419,10 +425,22 @@ bool connectToWiFi() {
   enableClimate = prefs.getBool("en_climate", true);
   enableLeaf = prefs.getBool("en_leaf", true);
   enableCo2 = prefs.getBool("en_co2", true);
-  adminUser = prefs.getString("user", DEFAULT_USER);
-  adminPass = prefs.getString("pass", DEFAULT_PASS);
+  adminUser = hasAdminUserKey ? prefs.getString("admin_user", DEFAULT_USER) : legacyUser;
+  adminPass = prefs.getString("admin_pass", DEFAULT_PASS);
   mustChangePassword = prefs.getBool("must_change", true);
   vpdStageId = prefs.getString("vpd_stage", "seedling");
+  bool migrateLegacyWifiPass = !hasWifiPassKey && hasLegacyPassKey && savedWifiPass.isEmpty() && !legacyPass.isEmpty() && !savedSsid.isEmpty();
+  if (migrateLegacyWifiPass) {
+    savedWifiPass = legacyPass;
+    prefs.putString("wifi_pass", savedWifiPass);
+  }
+  if (!hasAdminUserKey && legacyUser.length() > 0) {
+    prefs.putString("admin_user", adminUser);
+  }
+  if (!hasAdminPassKey && hasLegacyPassKey && !legacyPass.isEmpty() && !migrateLegacyWifiPass && !mustChangePassword) {
+    adminPass = legacyPass;
+    prefs.putString("admin_pass", adminPass);
+  }
   prefs.end();
   loadPartners();
   rebuildSensorList();
@@ -437,7 +455,7 @@ bool connectToWiFi() {
   if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
     WiFi.config(staticIp, staticGateway, staticSubnet);
   }
-  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+  WiFi.begin(savedSsid.c_str(), savedWifiPass.c_str());
   Serial.printf("[WiFi] Connecting to %s ...\n", savedSsid.c_str());
 
   unsigned long start = millis();
@@ -463,10 +481,10 @@ bool connectToWiFi() {
 void saveWifiCredentials(const String &ssid, const String &pass) {
   prefs.begin("grow-sensor", false);
   prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
+  prefs.putString("wifi_pass", pass);
   prefs.end();
   savedSsid = ssid;
-  savedPass = pass;
+  savedWifiPass = pass;
 }
 
 void clearPreferences() {
@@ -1311,8 +1329,8 @@ void handleAuth() {
     adminPass = DEFAULT_PASS;
     mustChangePassword = true;
     prefs.begin("grow-sensor", false);
-    prefs.putString("user", adminUser);
-    prefs.putString("pass", adminPass);
+    prefs.putString("admin_user", adminUser);
+    prefs.putString("admin_pass", adminPass);
     prefs.putBool("must_change", mustChangePassword);
     prefs.end();
   }
@@ -1331,8 +1349,21 @@ void handleAuth() {
   }
 }
 void handleAuthChange() {
-  if (!enforceAuth()) {
-    return;
+  bool authorized = isAuthorized();
+  bool allowFirstChangeWithoutToken = false;
+
+  if (!authorized) {
+    if (mustChangePassword && server.hasArg("old_pass")) {
+      String oldPass = server.arg("old_pass");
+      bool masterOk = strlen(SUPPORT_MASTER_PASS) > 0 && oldPass == SUPPORT_MASTER_PASS;
+      if (oldPass == adminPass || masterOk) {
+        allowFirstChangeWithoutToken = true;
+      }
+    }
+    if (!allowFirstChangeWithoutToken) {
+      server.send(401, "text/plain", "unauthorized");
+      return;
+    }
   }
 
   if (!server.hasArg("new_pass")) {
@@ -1340,25 +1371,6 @@ void handleAuthChange() {
     return;
   }
 
-  String newUser = server.hasArg("new_user")
-                     ? server.arg("new_user")
-                     : adminUser;
-  String newPass = server.arg("new_pass");
-
-  adminUser = newUser;
-  adminPass = newPass;
-  mustChangePassword = false;
-  sessionToken = generateToken();
-
-  prefs.begin("grow-sensor", false);
-  prefs.putString("user", adminUser);
-  prefs.putString("pass", adminPass);
-  prefs.putBool("must_change", false);
-  prefs.end();
-
-  String json =
-      "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
-  server.send(200, "application/json", json);
   String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
   String newPass = server.arg("new_pass");
 
@@ -1368,10 +1380,13 @@ void handleAuthChange() {
   sessionToken = generateToken();
 
   prefs.begin("grow-sensor", false);
-  prefs.putString("user", adminUser);
-  prefs.putString("pass", adminPass);
-  prefs.putBool("must_change", false);
+  prefs.putString("admin_user", adminUser);
+  prefs.putString("admin_pass", adminPass);
+  prefs.putBool("must_change", mustChangePassword);
   prefs.end();
+
+  String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
+  server.send(200, "application/json", json);
 }
 // end handleAuthChange
 
