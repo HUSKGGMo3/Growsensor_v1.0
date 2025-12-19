@@ -1,9 +1,11 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.2.6 (untested / community preview)**
+**Current release: v0.2.7 (untested / community preview)**
 
-### Hotfix v0.2.6
-- Fix build error caused by ambiguous `String(float, decimals)` overload; decimals now correctly typed/cast.
+### Hotfix v0.2.7
+- Adds NTP-backed real-time clocks with timezone selection in the header and a visible “Zeit nicht synchron” badge until sync succeeds.
+- History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels.
+- Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.google.com, time.cloudflare.com) and graceful fallback to relative time until synced.
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
@@ -15,6 +17,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
 - VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
 - Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
+- Time-aware charts with SNTP-based epoch timestamps; timezone-aware axes (Europe/Berlin, UTC, America/New_York, Asia/Tokyo, more) and a header clock badge that indicates sync state.
 - Authentication with forced password change on first login.
 - Partner / Supporter module stored locally and shown in the UI.
 
@@ -49,6 +52,11 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    pio device monitor -b 115200
    ```
 
+## v0.2.7 Changes
+- NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connects with periodic refresh and persisted timezone (Preferences/NVS).
+- `/api/telemetry` and `/api/history` now emit epoch millisecond timestamps; UI renders wall-clock time on all charts (main, hover, detail) when synced and falls back to relative mm:ss with a “Zeit nicht synchron” badge until then.
+- Header dropdown for timezone selection with persisted choice and live local-time indicator.
+
 ## v0.2.6 Changes
 - 6h history is always downsampled to 1-minute buckets for every metric with consistent `live` / `6h` ranges.
 - Mini- and detail charts show proper time/value axes with the right units and now reliably render `/api/history` data without empty graphs.
@@ -69,7 +77,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Verbesserung: Popup-Chart-UX mit klarerer Skalierung und optionalem Dev-Debug.
 
 ## Stability notice
-- v0.2.6 is untested and provided as a community preview. Use at your own risk.
+- v0.2.7 is untested and provided as a community preview. Use at your own risk.
 
 ## ESPHome option
 - You can also flash the ESP32 with ESPHome to use the sensors directly in ESPHome. See ESPHome documentation and configure the sensors accordingly.

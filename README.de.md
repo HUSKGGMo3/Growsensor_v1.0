@@ -1,9 +1,11 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.2.6 (ungetestet / Community-Preview)**
+**Aktuelle Version: v0.2.7 (ungetestet / Community-Preview)**
 
-### Hotfix v0.2.6
-- Build-Fehler durch mehrdeutigen `String(float, decimals)`-Konstruktor behoben; Dezimalstellen jetzt korrekt typisiert/gecastet.
+### Hotfix v0.2.7
+- NTP-Sync (pool.ntp.org, time.google.com, time.cloudflare.com) mit Zeitzonen-Auswahl im Header; Badge „Zeit nicht synchron“ bis zur erfolgreichen Synchronisation.
+- `/api/telemetry` und `/api/history` liefern nun Epoch-Millisekunden; alle Charts (auch Hover/Detail) zeigen lokale Uhrzeit, live mit HH:MM:SS wenn synchronisiert.
+- Zeitzonen-Wahl (Europe/Berlin, UTC, America/New_York, Asia/Tokyo u.a.) wird in NVS gespeichert; Fallback auf relative Zeit (mm:ss) bei fehlender Zeitsynchronisation.
 
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
@@ -15,6 +17,7 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Sensor-Monitoring: Temperatur, Luftfeuchte, CO₂, Lux → PPFD, Blatt-Temperatur.
 - VPD-Berechnung mit Wachstumsphasen (Steckling/Veg/Blüte/Späte Blüte) und Status (unter / im / über Ziel).
 - Webbasierte UI mit Captive Portal, Live-Dashboard, 24h-Chart, Mittelwerten und Logs.
+- Zeitbasierte Charts mit SNTP-Zeit (Epoch Millisekunden), zeitzonenabhängigen Achsen (z.B. Europe/Berlin, UTC, America/New_York, Asia/Tokyo) und Header-Uhr/Badge für den Sync-Status.
 - Authentifizierung mit Pflicht-Passwortwechsel beim ersten Login.
 - Partner-/Supporter-Modul (lokal gespeichert, in der UI sichtbar).
 
@@ -49,6 +52,11 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
    pio device monitor -b 115200
    ```
 
+## v0.2.7 Changes
+- NTP-Synchronisation nach Wi-Fi-Verbindung mit periodischem Refresh, drei Zeitservern und persistenter Zeitzone (Preferences/NVS).
+- `/api/telemetry` und `/api/history` geben Epoch-Millisekunden zurück; Haupt-/Hover-/Detail-Charts zeigen lokale Uhrzeit (HH:MM bzw. HH:MM:SS) und fallen bei fehlender Synchronisation auf relative Zeiten zurück.
+- Zeitzonen-Dropdown im Header + Live-Uhranzeige; unsynced-Status klar sichtbar per Badge.
+
 ## v0.2.6 Changes
 - 6h-Verlauf wird für alle Metriken konsequent in 1-Minuten-Buckets verdichtet; einheitliche Ranges `live` / `6h` vermeiden leere Charts.
 - Mini- und Detail-Charts zeigen sinnvolle Zeit-/Wert-Achsen mit korrekten Units und rendern `/api/history` Daten zuverlässig.
@@ -69,7 +77,7 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Verbesserung: Popup-Graph-UX mit klarerer Skalierung und optionalem Dev-Debug.
 
 ## Stabilitätshinweis
-- v0.2.6 ist ungetestet und als Community-Preview gedacht. Nutzung auf eigenes Risiko.
+- v0.2.7 ist ungetestet und als Community-Preview gedacht. Nutzung auf eigenes Risiko.
 
 ## Lizenz
 - Nicht-kommerzielle Open-Source-Lizenz (siehe `LICENSE`). Nutzung, Ansicht, Modifikation und Pull Requests sind erlaubt.

@@ -11,6 +11,8 @@
 #include <math.h>
 #include <ArduinoJson.h>
 #include <cstring>
+#include <time.h>
+#include <sys/time.h>
 #include <vector>
 #include <esp_system.h>
 
@@ -48,7 +50,19 @@ static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log
 static constexpr size_t LOG_JSON_LIMIT = 180;                   // cap JSON output to latest entries
 static constexpr size_t LOG_HEAP_THRESHOLD = 24000;             // prune logs when free heap drops below ~24KB
 static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4h stall watchdog
+static constexpr unsigned long TIME_SYNC_RETRY_MS = 60000;      // retry NTP every 60s until synced
+static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offset every 5 minutes
+static constexpr time_t TIME_VALID_AFTER = 1672531200;          // 2023-01-01 UTC safeguard
 
+static const char *NTP_SERVER_1 = "pool.ntp.org";
+static const char *NTP_SERVER_2 = "time.google.com";
+static const char *NTP_SERVER_3 = "time.cloudflare.com";
+
+String timezoneName = "Europe/Berlin";
+bool timeSynced = false;
+uint64_t epochOffsetMs = 0; // epoch_ms - millis() for stable mapping
+unsigned long lastTimeSyncAttempt = 0;
+unsigned long lastTimeSyncOk = 0;
 // Auth
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
@@ -536,6 +550,59 @@ void logEvent(const String &msg) {
   appendLogLine(line);
 }
 
+void applyTimezoneEnv() {
+  const String tz = timezoneName.length() > 0 ? timezoneName : "UTC";
+  setenv("TZ", tz.c_str(), 1);
+  tzset();
+}
+
+bool captureTimeOffset() {
+  struct timeval tv;
+  if (gettimeofday(&tv, nullptr) != 0) return false;
+  if (tv.tv_sec < TIME_VALID_AFTER) return false;
+  uint64_t nowMs = (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
+  uint64_t mono = millis();
+  epochOffsetMs = nowMs > mono ? (nowMs - mono) : 0;
+  timeSynced = true;
+  lastTimeSyncOk = millis();
+  return true;
+}
+
+void startNtpSync() {
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+  applyTimezoneEnv();
+  configTzTime(timezoneName.c_str(), NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+  lastTimeSyncAttempt = millis();
+}
+
+void maintainTimeSync() {
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+  unsigned long now = millis();
+  bool needKick = (!timeSynced && (now - lastTimeSyncAttempt >= TIME_SYNC_RETRY_MS)) || lastTimeSyncAttempt == 0;
+  if (needKick) {
+    startNtpSync();
+  }
+  bool shouldRefresh = (!timeSynced && now - lastTimeSyncAttempt >= 1500) || (timeSynced && (now - lastTimeSyncOk >= TIME_SYNC_REFRESH_MS));
+  if (shouldRefresh) {
+    bool wasSynced = timeSynced;
+    bool ok = captureTimeOffset();
+    if (ok && !wasSynced) {
+      logEvent("Time synced via NTP");
+    }
+  }
+}
+
+uint64_t mapTimestampToEpochMs(uint64_t monotonicTs) {
+  if (!timeSynced) return monotonicTs;
+  return epochOffsetMs + monotonicTs;
+}
+
+uint64_t currentEpochMs() {
+  return mapTimestampToEpochMs(millis());
+}
+
 void loadPartners() {
   partners.clear();
   prefs.begin("grow-sensor", true);
@@ -709,6 +776,7 @@ bool connectToWiFi() {
   staticIp.fromString(prefs.getString("ip", ""));
   staticGateway.fromString(prefs.getString("gw", ""));
   staticSubnet.fromString(prefs.getString("sn", ""));
+  timezoneName = prefs.getString("timezone", timezoneName);
   enableLight = prefs.getBool("en_light", true);
   enableClimate = prefs.getBool("en_climate", true);
   enableLeaf = prefs.getBool("en_leaf", true);
@@ -720,6 +788,7 @@ bool connectToWiFi() {
     prefs.putString("wifi_pass", savedWifiPass);
   }
   prefs.end();
+  applyTimezoneEnv();
   loadPartners();
   loadSensorConfigs();
   rebuildSensorList();
@@ -748,6 +817,7 @@ bool connectToWiFi() {
     apMode = false;
     Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
     logEvent("WiFi connected: " + WiFi.localIP().toString());
+    startNtpSync();
     return true;
   }
 
@@ -1012,7 +1082,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.2.6</title>
+    <title>GrowSensor v0.2.7</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
@@ -1024,6 +1094,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .led { width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,0.25); display:inline-block; }
       .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:0.8rem; background:#1f2937; color:#cbd5e1; }
       .badge-dev { background:#10b981; color:#0f172a; }
+      .badge-warn { background:#f59e0b; color:#0f172a; }
       .ghost { background:transparent; border:1px solid #1f2937; color:#e2e8f0; }
       main { padding: 16px; display: grid; gap: 12px; }
       .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); position: relative; overflow:hidden; }
@@ -1104,13 +1175,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
       .error-banner ul { margin: 0; padding-left: 18px; }
       .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+      .time-row { margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+      .tz-select { width:auto; min-width:160px; }
+      .time-text { font-size:0.9rem; color:#cbd5e1; }
     </style>
   </head>
   <body>
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.2.6</h1>
+          <h1>GrowSensor – v0.2.7</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1122,6 +1196,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           <button id="openDev" class="ghost" style="width:auto;">Dev-Modus</button>
           <span id="devStatus" class="badge badge-dev" style="display:none;">Dev aktiv</span>
         </div>
+      </div>
+      <div class="time-row">
+        <label for="timezoneSelect" style="width:auto;">Zeitzone</label>
+        <select id="timezoneSelect" class="tz-select">
+          <option value="Europe/Berlin">Europe/Berlin</option>
+          <option value="UTC">UTC</option>
+          <option value="America/New_York">America/New_York</option>
+          <option value="Asia/Tokyo">Asia/Tokyo</option>
+        </select>
+        <span class="badge badge-warn" id="timeBadge">Zeit nicht synchron</span>
+        <span class="time-text" id="localTimeText">–</span>
       </div>
       <nav>
         <button id="navDashboard" class="menu-btn">Dashboard</button>
@@ -1304,7 +1389,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.2.6 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.2.7 • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1460,11 +1545,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const metrics = ['lux','ppfd','co2','temp','humidity','leaf','vpd'];
       const HISTORY_BUCKET_MS = 60000;
       const historyStore = {};
-      metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 } });
+      metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 }, synced:false });
       const maxLivePoints = 240; // ~10 minutes @2.5s
       const maxLongPoints = 384; // ~6h @1min (+small buffer)
       let lastTelemetryAt = 0;
-      let deviceTimeOffset = 0;
+      const clockState = { synced:false, timezone:'Europe/Berlin', epochRef:null, epochCapturedAt:null };
       let devMode = false;
       const DEV_CODE = "Test1234#";
       const hoverCanvases = {};
@@ -1479,6 +1564,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const xAxisLabel = getEl('xAxisLabel');
       const yAxisLabel = getEl('yAxisLabel');
       const wifiBars = getEl('wifiBars');
+      const timezoneSelect = getEl('timezoneSelect');
+      const timeBadge = getEl('timeBadge');
+      const localTimeText = getEl('localTimeText');
       let detailMetric = null;
       let detailMode = 'live';
       let detailVpdView = 'heatmap';
@@ -1496,6 +1584,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         leaf:{ unit:'°C', label:'Leaf-Temp', decimals:1 },
         vpd:{ unit:'kPa', label:'VPD', decimals:3 },
       };
+      const KNOWN_TIMEZONES = ['Europe/Berlin','UTC','Europe/London','America/New_York','Asia/Tokyo','Australia/Sydney'];
 
       function authedFetch(url, options = {}) { return fetch(url, options); }
       function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
@@ -1527,6 +1616,83 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           pushError(`JSON parse failed (${url}): ${err.message}`);
           throw err;
         }
+      }
+
+      function populateTimezoneSelect() {
+        if (!timezoneSelect) return;
+        const current = timezoneSelect.value || clockState.timezone;
+        timezoneSelect.innerHTML = '';
+        KNOWN_TIMEZONES.forEach(tz => {
+          const opt = document.createElement('option');
+          opt.value = tz;
+          opt.textContent = tz;
+          timezoneSelect.appendChild(opt);
+        });
+        if (current && !KNOWN_TIMEZONES.includes(current)) {
+          const opt = document.createElement('option');
+          opt.value = current;
+          opt.textContent = current;
+          timezoneSelect.appendChild(opt);
+        }
+        if (current) timezoneSelect.value = current;
+        if (timezoneSelect.value) clockState.timezone = timezoneSelect.value;
+      }
+
+      function parseMs(val) {
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return Number.isFinite(num) ? num : null;
+        }
+        return null;
+      }
+
+      function getApproxEpochMs() {
+        if (clockState.synced && clockState.epochRef !== null && clockState.epochCapturedAt !== null) {
+          return clockState.epochRef + (Date.now() - clockState.epochCapturedAt);
+        }
+        return null;
+      }
+
+      function renderTimeStatus() {
+        if (timeBadge) {
+          if (clockState.synced) {
+            timeBadge.textContent = 'Zeit synchron';
+            timeBadge.classList.remove('badge-warn');
+          } else {
+            timeBadge.textContent = 'Zeit nicht synchron';
+            timeBadge.classList.add('badge-warn');
+          }
+        }
+        if (localTimeText) {
+          const nowMs = getApproxEpochMs();
+          if (clockState.synced && nowMs !== null) {
+            localTimeText.textContent = new Intl.DateTimeFormat(undefined, { hour:'2-digit', minute:'2-digit', second:'2-digit', timeZone: clockState.timezone }).format(new Date(nowMs));
+          } else {
+            localTimeText.textContent = 'Zeitquelle unsynchron';
+          }
+        }
+      }
+
+      function updateClockState(payload = {}) {
+        if (payload.timezone) {
+          clockState.timezone = payload.timezone;
+          if (timezoneSelect) timezoneSelect.value = payload.timezone;
+        }
+        const epochMs = parseMs(payload.epoch_ms ?? payload.now_epoch_ms);
+        const syncedFlag = flag(payload.time_synced);
+        if (syncedFlag && epochMs !== null) {
+          clockState.synced = true;
+          clockState.epochRef = epochMs;
+          clockState.epochCapturedAt = Date.now();
+        } else if (payload.time_synced !== undefined && !syncedFlag) {
+          clockState.synced = false;
+          if (payload.time_synced === 0) {
+            clockState.epochRef = null;
+            clockState.epochCapturedAt = null;
+          }
+        }
+        renderTimeStatus();
       }
 
       function setModalVisible(el, visible) {
@@ -1607,14 +1773,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return mode === '6h' ? '6h' : 'live';
       }
 
-      function recordMetric(metric, value) {
-        if (!historyStore[metric]) return;
-        const now = Date.now() - deviceTimeOffset;
-        const entry = (typeof value === 'number' && !Number.isNaN(value)) ? value : null;
+      function recordMetric(metric, value, ts, syncedFlag = clockState.synced) {
         const store = historyStore[metric];
-        store.live.push({ t: now, v: entry });
+        if (!store) return;
+        const tsMs = parseMs(ts);
+        const nowTs = tsMs !== null ? tsMs : (clockState.synced ? (getApproxEpochMs() ?? Date.now()) : Date.now());
+        const entry = (typeof value === 'number' && !Number.isNaN(value)) ? value : null;
+        store.synced = syncedFlag ? true : store.synced;
+        store.live.push({ t: nowTs, v: entry });
         if (store.live.length > maxLivePoints) store.live.shift();
-        const bucket = Math.floor(now / HISTORY_BUCKET_MS);
+        const bucket = Math.floor(nowTs / HISTORY_BUCKET_MS);
         if (store.agg.bucket !== bucket) {
           if (store.agg.count > 0) {
             store.long.push({ t: store.agg.bucket * HISTORY_BUCKET_MS, v: store.agg.sum / store.agg.count });
@@ -1650,9 +1818,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return source.slice(-cap);
       }
 
-      function mergeHistory(metric, points, mode) {
+      function mergeHistory(metric, points, mode, syncedFlag = clockState.synced) {
         const store = historyStore[metric];
         if (!store) return;
+        store.synced = syncedFlag ? true : store.synced;
         const normalized = normalizeMode(mode);
         const sanitized = points.map(p => ({ t: p.t, v: (p && typeof p.v === 'number' && !Number.isNaN(p.v)) ? p.v : null }));
         if (normalized === '6h') {
@@ -1680,19 +1849,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return out.filter(p => p.temp !== null && p.hum !== null && p.vpd !== null);
       }
 
-      function formatTimeLabel(ts, mode, firstTs, lastTs) {
+      function formatTimeLabel(ts, mode, firstTs, lastTs, synced = clockState.synced, tz = clockState.timezone) {
         const normalized = normalizeMode(mode);
-        if (normalized === 'live') {
+        if (!synced) {
           const delta = Math.max(0, ts - firstTs);
+          if (normalized === '6h') {
+            const hh = Math.floor(delta / 3600000);
+            const mm = Math.floor((delta % 3600000) / 60000);
+            return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+          }
           const mm = Math.floor(delta / 60000);
           const ss = Math.floor((delta % 60000) / 1000);
           return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
         }
-        const wallTs = ts + deviceTimeOffset;
-        const anchor = (lastTs || ts) + deviceTimeOffset;
-        const shifted = wallTs > 0 ? wallTs : anchor;
-        const d = new Date(shifted);
-        return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        const opts = { hour:'2-digit', minute:'2-digit', timeZone: tz || 'UTC' };
+        if (normalized === 'live') opts.second = '2-digit';
+        const d = new Date(ts);
+        return new Intl.DateTimeFormat(undefined, opts).format(d);
       }
 
       function drawLineChart(canvas, ctxDraw, points, mode, meta, opts = {}) {
@@ -1702,6 +1875,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const xTicks = opts.xTicks ?? 4;
         const yTicks = opts.yTicks ?? 4;
         const fontSize = opts.fontSize || 12;
+        const synced = opts.synced ?? clockState.synced;
+        const tz = opts.timezone || clockState.timezone;
         resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
         const valid = points.filter(p => p && p.v !== null && !Number.isNaN(p.v));
@@ -1726,7 +1901,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         for (let i=0;i<=xTicks;i++) {
           const x = (canvas.width/xTicks)*i;
           const ts = firstTs + (timeSpan * (i/xTicks));
-          const label = formatTimeLabel(ts, normalized, firstTs, lastTs);
+          const label = formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz);
           const labelWidth = ctxDraw.measureText(label).width;
           const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, canvas.width - labelWidth));
           ctxDraw.fillText(label, xPos, canvas.height-4);
@@ -1760,12 +1935,33 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const y = (height / 5) * i;
           ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
         }
+        const axisTicks = 4;
+        const allTimes = [];
         const series = [
           { metric: 'lux', color: '#22d3ee' },
           { metric: 'co2', color: '#f59e0b' },
           { metric: 'temp', color: '#34d399' },
           { metric: 'vpd', color: '#a855f7' },
         ];
+        const syncedAxis = series.some(s => historyStore[s.metric]?.synced) ? true : clockState.synced;
+        series.forEach((serie) => {
+          const data = getSeriesData(serie.metric, '6h');
+          data.forEach(p => { if (p && typeof p.t === 'number') allTimes.push(p.t); });
+        });
+        if (allTimes.length === 0) return;
+        const firstTs = Math.min(...allTimes);
+        const lastTs = Math.max(...allTimes);
+        const timeSpan = Math.max(1, lastTs - firstTs);
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '12px system-ui';
+        for (let i = 0; i <= axisTicks; i++) {
+          const x = (width / axisTicks) * i;
+          const ts = firstTs + (timeSpan * (i / axisTicks));
+          const label = formatTimeLabel(ts, '6h', firstTs, lastTs, syncedAxis, clockState.timezone);
+          const labelWidth = ctx.measureText(label).width;
+          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, width - labelWidth));
+          ctx.fillText(label, xPos, height - 4);
+        }
         series.forEach((serie) => {
           const data = getSeriesData(serie.metric, '6h');
           const values = data.map(p => p.v).filter(v => v !== null);
@@ -1775,9 +1971,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const span = Math.max(maxVal - minVal, 0.0001);
           ctx.beginPath();
           let started = false;
-          data.forEach((p, i) => {
-            if (p.v === null) { started=false; return; }
-            const x = (i / Math.max(data.length - 1, 1)) * width;
+          data.forEach((p) => {
+            if (p.v === null || typeof p.t !== 'number') { started=false; return; }
+            const x = ((p.t - firstTs) / timeSpan) * width;
             const y = height - ((p.v - minVal) / span) * height;
             if (!started) { ctx.moveTo(x, y); started=true; } else ctx.lineTo(x, y);
           });
@@ -1793,7 +1989,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const canvas = ctxHover.canvas;
         const data = getSeriesData(metric, '6h');
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
-        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:2, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit });
+        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:2, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
         if (!ok) {
           resizeCanvas(canvas, ctxHover);
           ctxHover.clearRect(0,0,canvas.width, canvas.height);
@@ -1802,7 +1998,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1 });
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
         const debugBox = getEl('chartDebugText');
         if (devMode) {
           const values = points.map(p => p.v).filter(v => v !== null);
@@ -1830,10 +2026,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized === '6h' ? '6h' : 'live'}`);
           const mapped = (data.points || []).map(p => {
             const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
-            return { t: p[0], v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+            const ts = parseMs(p[0]);
+            return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
           });
           detailCache[key] = mapped;
-          if (normalized === '6h') mergeHistory(metric, mapped, normalized);
+          const syncedFlag = flag(data.time_synced);
+          if (normalized === '6h') mergeHistory(metric, mapped, normalized, syncedFlag);
           clearErrors('API /api/history');
         } catch (err) {
           console.warn('history error', err);
@@ -1849,12 +2047,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             const data = await fetchJson(`/api/history?metric=${metric}&range=6h`);
             const mapped = (data.points || []).map(p => {
               const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
-              return { t: p[0], v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+              const ts = parseMs(p[0]);
+              return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
             });
-            if (deviceTimeOffset === 0 && mapped.length) {
-              deviceTimeOffset = Date.now() - mapped[mapped.length - 1].t;
-            }
-            mergeHistory(metric, mapped, '6h');
+            const syncedFlag = flag(data.time_synced);
+            updateClockState({ timezone: data.timezone, time_synced: data.time_synced });
+            mergeHistory(metric, mapped, '6h', syncedFlag);
             detailCache[`${metric}-6h`] = mapped;
           } catch (err) {
             pushError(`API /api/history failed: ${err.message}`);
@@ -2007,9 +2205,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         try {
           const data = await fetchJson('/api/telemetry');
           lastTelemetryAt = Date.now();
-          if (typeof data.now === 'number') {
-            deviceTimeOffset = Date.now() - data.now;
-          }
+          updateClockState(data);
+          const epochMs = parseMs(data.epoch_ms);
+          const monoMs = parseMs(data.monotonic_ms ?? data.now);
+          const synced = flag(data.time_synced) && epochMs !== null;
+          const tsForSample = synced ? epochMs : (monoMs !== null ? monoMs : Date.now());
           updateConnectionStatus(data.ap_mode === 1, data.wifi_connected === 1);
           setText('lux', (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–');
           setText('ppfd', (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–');
@@ -2039,7 +2239,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           setDot('humidityDot', flag(data.climate_ok), flag(data.climate_present), flag(data.climate_enabled, true));
           setDot('leafDot', flag(data.leaf_ok), flag(data.leaf_present), flag(data.leaf_enabled, true));
           setDot('vpdDot', flag(data.vpd_ok), flag(data.climate_present) && flag(data.leaf_present), flag(data.climate_enabled) || flag(data.leaf_enabled));
-          metrics.forEach(m => recordMetric(m, data[m]));
+          metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
           drawChart();
           updateAverages();
           ['lux','co2','temp','humidity','leaf','vpd'].forEach(drawHover);
@@ -2056,9 +2256,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       async function loadSettings() {
         try {
           const data = await fetchJson('/api/settings');
+          updateClockState(data);
           setValue('channel', data.channel ?? '');
           setValue('vpdStage', data.vpd_stage ?? '');
           setText('vpdStageStatus', '');
+          if (timezoneSelect && data.timezone) timezoneSelect.value = data.timezone;
           const wifiStatus = getEl('wifiStatus');
           if (wifiStatus) {
             wifiStatus.textContent = data.wifi ?? '';
@@ -2361,6 +2563,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         });
       }
 
+      if (timezoneSelect) {
+        timezoneSelect.addEventListener('change', async () => {
+          const tz = timezoneSelect.value;
+          try {
+            const res = await authedFetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`timezone=${encodeURIComponent(tz)}` });
+            if (!res.ok) {
+              const text = await res.text().catch(() => '');
+              throw new Error(`status ${res.status} ${text}`);
+            }
+            clockState.timezone = tz;
+            updateClockState({ timezone: tz, time_synced: clockState.synced, epoch_ms: getApproxEpochMs() });
+          } catch (err) {
+            pushError(`API /api/settings failed: ${err.message}`);
+          }
+        });
+      }
+
       const saveChannelBtn = getEl('saveChannel');
       if (saveChannelBtn) saveChannelBtn.addEventListener('click', async () => {
         const channel = getEl('channel')?.value || '';
@@ -2646,7 +2865,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!detailMetric) return;
         const meta = METRIC_META[detailMetric] || { unit:'', label: detailMetric.toUpperCase(), decimals:1 };
         if (yAxisLabel) yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
-        if (xAxisLabel) xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss)' : 'Zeit (HH:MM)';
+        if (xAxisLabel) {
+          if (clockState.synced) {
+            xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (HH:MM:SS lokal)' : 'Zeit (HH:MM lokal)';
+          } else {
+            xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss seit Start)' : 'Zeit (relativ)';
+          }
+        }
         const showHeatmap = detailMetric === 'vpd' && detailVpdView === 'heatmap';
         if (vpdHeatmapCanvas) vpdHeatmapCanvas.style.display = showHeatmap ? 'block' : 'none';
         if (detailChartCanvas) detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
@@ -2683,7 +2908,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       setInterval(fetchData, 2500);
+      setInterval(renderTimeStatus, 1000);
+      populateTimezoneSelect();
       setDevVisible();
+      renderTimeStatus();
       loadSettings();
       scanNetworks();
       loadLogs();
@@ -2779,8 +3007,9 @@ void handleTelemetry() {
   bool co2Ok = enableCo2 && co2Health.present && co2Health.healthy && latest.co2ppm > 0 && latest.co2ppm < 5000;
   bool vpdOk = !isnan(latest.vpd);
   unsigned long now = millis();
+  uint64_t epochMs = mapTimestampToEpochMs(now);
   auto ageMs = [&](unsigned long t) -> unsigned long { return t == 0 ? 0UL : (now - t); };
-  char json[1024];
+  char json[1200];
   snprintf(json, sizeof(json),
            "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,"
            "\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d,"
@@ -2789,7 +3018,7 @@ void handleTelemetry() {
            "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
            "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d,"
            "\"lux_age_ms\":%lu,\"co2_age_ms\":%lu,\"climate_age_ms\":%lu,\"leaf_age_ms\":%lu,"
-           "\"now\":%lu}",
+           "\"now\":%lu,\"monotonic_ms\":%lu,\"epoch_ms\":%llu,\"time_synced\":%d,\"timezone\":\"%s\"}",
            safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
            safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
@@ -2798,7 +3027,7 @@ void handleTelemetry() {
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
            ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate),
-           now);
+           now, now, (unsigned long long)epochMs, timeSynced ? 1 : 0, timezoneName.c_str());
   server.send(200, "application/json", json);
 }
 
@@ -2818,16 +3047,19 @@ void handleHistory() {
   flushBucketsUpTo(def->series, now);
 
   size_t pointCount = liveRange ? def->series.liveCount : def->series.longCount + (def->series.aggBucketStart != 0 ? 1 : 0);
+  bool synced = timeSynced;
+  uint64_t offsetSnapshot = epochOffsetMs;
   pruneLogsIfLowMemory(false);
   String json;
-  json.reserve(64 + pointCount * 24);
+  json.reserve(96 + pointCount * 32);
   json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
   bool first = true;
   auto appendPoint = [&](unsigned long ts, float v) {
+    uint64_t mapped = synced ? (offsetSnapshot + (uint64_t)ts) : (uint64_t)ts;
     if (!first)
       json += ",";
     first = false;
-    json += "[" + String(ts) + ",";
+    json += "[" + String((unsigned long long)mapped) + ",";
     if (isnan(v)) {
       json += "null";
     } else {
@@ -2854,7 +3086,7 @@ void handleHistory() {
     }
   }
 
-  json += "]}";
+  json += "],\"time_synced\":" + String(synced ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(synced ? offsetSnapshot : 0)) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -2926,6 +3158,9 @@ void handleSettings() {
     json += "\"ssid_active\":\"" + ssidActive + "\",";
     json += "\"rssi\":" + String(rssi) + ",";
     json += "\"ip_active\":\"" + activeIp.toString() + "\",";
+    json += "\"timezone\":\"" + timezoneName + "\",";
+    json += "\"time_synced\":" + String(timeSynced ? 1 : 0) + ",";
+    json += "\"epoch_ms\":" + String((unsigned long long)currentEpochMs()) + ",";
     json += "\"static\":" + String(staticIpEnabled ? 1 : 0) + ",";
     json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";
     json += "\"gw\":\"" + (staticIpEnabled ? staticGateway.toString() : WiFi.gatewayIP().toString()) + "\",";
@@ -2937,8 +3172,9 @@ void handleSettings() {
 
   bool hasChannel = server.hasArg("channel");
   bool hasVpdStage = server.hasArg("vpd_stage");
-  if (!hasChannel && !hasVpdStage) {
-    server.send(400, "text/plain", "channel or vpd_stage missing");
+  bool hasTimezone = server.hasArg("timezone");
+  if (!hasChannel && !hasVpdStage && !hasTimezone) {
+    server.send(400, "text/plain", "channel, timezone or vpd_stage missing");
     return;
   }
   if (hasChannel) {
@@ -2948,9 +3184,17 @@ void handleSettings() {
   if (hasVpdStage) {
     vpdStageId = server.arg("vpd_stage");
   }
+  if (hasTimezone) {
+    timezoneName = server.arg("timezone");
+    applyTimezoneEnv();
+    timeSynced = false; // force refresh
+    lastTimeSyncAttempt = 0;
+    startNtpSync();
+  }
   prefs.begin("grow-sensor", false);
   if (hasChannel) prefs.putString("channel", lightChannelName());
   if (hasVpdStage) prefs.putString("vpd_stage", vpdStageId);
+  if (hasTimezone) prefs.putString("timezone", timezoneName);
   prefs.end();
   server.send(200, "text/plain", "saved");
 }
@@ -3323,6 +3567,7 @@ void loop() {
   }
   pruneLogsIfLowMemory(false);
   server.handleClient();
+  maintainTimeSync();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
     lastSensorMillis = millis();
