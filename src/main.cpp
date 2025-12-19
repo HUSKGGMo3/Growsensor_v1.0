@@ -166,6 +166,8 @@ SensorHealth leafHealth;
 SensorHealth co2Health;
 std::vector<SensorSlot> sensors;
 std::vector<Partner> partners;
+ codex/await-first-patch-request-3z4789
+std::vector<Partner> partners;
 
 // Logging buffer
 String logBuffer[LOG_CAPACITY];

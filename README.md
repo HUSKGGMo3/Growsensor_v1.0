@@ -5,12 +5,32 @@
 Growsensor is an all-in-one ESP32 monitoring node for indoor grows. It solves basic telemetry and visibility: reads multiple sensors, estimates PPFD, computes VPD per growth stage, and shows everything in a web UI with Wi-Fi setup and simple partner/supporter info. It does **not** drive any actuators.
 
 Growsensor (monitoring) vs. future Growcontroller (control): this project only collects and visualizes data. A separate future Growcontroller project will handle automation and device control once ready.
+# ESP32 Grow Sensor / Monitoring Node
+
+**Current release: v0.2.0 (untested / community preview)**
+
+Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provides sensor telemetry, PPFD/VPD insights, Wi-Fi setup, and a partner/supporter module. No actuator control is implemented yet.
+
 
 ## What this project is / is not
 - Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
 - No actuator control yet: no relays or automation are driven by this firmware.
 
 ## Current Features (v0.2.0)
+=======
+=======
+
+# ESP32 Grow Sensor / Monitoring Node
+
+**Current release: v0.2.0 (untested / community preview)**
+
+Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provides sensor telemetry, PPFD/VPD insights, Wi-Fi setup, and a partner/supporter module. No actuator control is implemented yet.
+
+
+## What this project is / is not
+- Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
+- No actuator control yet: no relays or automation are driven by this firmware.
+
 - Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
 - VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
 - Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
@@ -21,6 +41,24 @@ Growsensor (monitoring) vs. future Growcontroller (control): this project only c
 - Growcontroller (automation and device control)
 - Stabilization, long-term testing, and production readiness
 - Additional sensor/driver coverage and usability improvements
+
+**Current release: v0.2.0 (untested / community preview)**
+
+Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provides sensor telemetry, PPFD/VPD insights, Wi-Fi setup, and a partner/supporter module. No actuator control is implemented yet.
+
+## What this project is / is not
+- Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
+- No actuator control yet: no relays or automation are driven by this firmware.
+
+
+## Features (as of v0.2.0)
+- Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
+- VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
+- Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
+- Authentication with forced password change on first login.
+- Partner / Supporter module stored locally and shown in the UI.
+
+
 
 ## Supported Hardware
 - ESP32 (classic, Arduino framework)
@@ -59,3 +97,13 @@ Growsensor (monitoring) vs. future Growcontroller (control): this project only c
 ## Contributing
 - Contributions via pull requests are welcome (see `CONTRIBUTING.md`). Please respect the non-commercial license.
 - Experimental hardware/software: see `DISCLAIMER.md` before deploying.
+
+
+## Contributing
+- Contributions via pull requests are welcome (see `CONTRIBUTING.md`). Please respect the non-commercial license.
+- Experimental hardware/software: see `DISCLAIMER.md` before deploying.
+
+## License
+- Non-commercial open source license (see `LICENSE`). You may view, use, and modify the code and contribute via pull requests.
+- Commercial use (including selling devices or services, or paid products) requires explicit permission.
+- Contributions are welcome; modified versions must keep the same license and attribution.
