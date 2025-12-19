@@ -1,4 +1,4 @@
-# Aufrüstung / Umrüstung von Sensoren (ESP32 Growcontroller v0.1.2)
+# Aufrüstung / Umrüstung von Sensoren (ESP32 Growcontroller v0.2, untested)
 
 Dieses Dokument beschreibt, wie man Sensoren austauscht bzw. alternative, ESP32-kompatible Sensoren auswählt. Die Auswahl erfolgt in der Weboberfläche unter **Sensoren**.
 
