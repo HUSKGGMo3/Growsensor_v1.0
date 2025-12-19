@@ -957,8 +957,7 @@ void readSensors() {
 // ----------------------------
 // Web server and API
 // ----------------------------
-String htmlPage() {
-  String page = R"HTML(
+static const char INDEX_HTML[] PROGMEM = R"HTML(
   <!doctype html>
   <html lang="de">
   <head>
@@ -2576,10 +2575,12 @@ String htmlPage() {
   </body>
   </html>
   )HTML";
-  return page;
-}
 
-void handleRoot() { server.send(200, "text/html", htmlPage()); }
+
+void handleRoot() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "text/html", INDEX_HTML);
+}
 
 void handleNotFound() {
   if (apMode) {
@@ -2624,7 +2625,14 @@ void handlePartners() {
     return;
   }
 
-  String json = "{\"partners\":[";
+  size_t enabledCount = 0;
+  for (const auto &p : partners) {
+    if (p.enabled)
+      enabledCount++;
+  }
+  String json;
+  json.reserve(48 + enabledCount * 160);
+  json = "{\"partners\":[";
   size_t count = 0;
   for (size_t i = 0; i < partners.size(); i++) {
     const auto &p = partners[i];
@@ -2687,7 +2695,10 @@ void handleHistory() {
   unsigned long now = millis();
   flushBucketsUpTo(def->series, now);
 
-  String json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
+  size_t pointCount = liveRange ? def->series.liveCount : def->series.longCount + (def->series.aggBucketStart != 0 ? 1 : 0);
+  String json;
+  json.reserve(64 + pointCount * 24);
+  json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
   bool first = true;
   auto appendPoint = [&](unsigned long ts, float v) {
     if (!first)
@@ -3029,7 +3040,11 @@ void handleSensorsConfig() {
   if (!enforceAuth())
     return;
   if (server.method() == HTTP_GET) {
-    String json = "{\"active\":[";
+    size_t activeCount = sensorConfigs.size();
+    size_t tplCount = SENSOR_TEMPLATE_COUNT;
+    String json;
+    json.reserve(64 + activeCount * 200 + tplCount * 200);
+    json = "{\"active\":[";
     for (size_t i = 0; i < sensorConfigs.size(); i++) {
       const auto &cfg = sensorConfigs[i];
       if (i) json += ",";
