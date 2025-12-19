@@ -2,6 +2,9 @@
 
 **Current release: v0.2.6 (untested / community preview)**
 
+### Hotfix v0.2.6
+- Fix build error caused by ambiguous `String(float, decimals)` overload; decimals now correctly typed/cast.
+
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
 ## What this project is / is not
