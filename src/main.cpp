@@ -39,7 +39,9 @@ static constexpr unsigned long WIFI_TIMEOUT = 15000;
 
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
-static constexpr unsigned long HISTORY_PUSH_INTERVAL = 300000; // 5 minutes for 24h window (288 points)
+static constexpr unsigned long HISTORY_LIVE_CAPACITY = 512;   // ~17 minutes @2s
+static constexpr unsigned long HISTORY_LONG_CAPACITY = 384;   // ~6h @1/min
+static constexpr unsigned long HISTORY_BUCKET_MS = 60000;     // 1-minute buckets for long-term series
 static constexpr unsigned long LEAF_STALE_MS = 300000;         // 5 minutes stale threshold
 static constexpr float LEAF_DIFF_THRESHOLD = 5.0f;              // °C difference to mark IR sensor unhealthy
 static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log every 30s
@@ -183,9 +185,25 @@ struct Partner {
 struct VpdProfile {
   const char *id;
   const char *label;
-  float factor;      // scaling factor for VPD (stage-specific tolerance)
   float targetLow;   // recommended lower bound (kPa)
   float targetHigh;  // recommended upper bound (kPa)
+};
+
+struct HistoryPoint {
+  unsigned long ts;
+  float value;
+};
+
+struct HistorySeries {
+  HistoryPoint live[HISTORY_LIVE_CAPACITY];
+  size_t liveStart = 0;
+  size_t liveCount = 0;
+  HistoryPoint longTerm[HISTORY_LONG_CAPACITY];
+  size_t longStart = 0;
+  size_t longCount = 0;
+  unsigned long aggBucketStart = 0;
+  float aggSum = 0.0f;
+  uint16_t aggCount = 0;
 };
 
 // Globals
@@ -207,7 +225,6 @@ ClimateSensorType climateType = ClimateSensorType::SHT31;
 Co2SensorType co2Type = Co2SensorType::MHZ19;
 Telemetry latest;
 unsigned long lastSensorMillis = 0;
-unsigned long lastHistoryPush = 0;
 
 bool staticIpEnabled = false;
 IPAddress staticIp;
@@ -246,11 +263,28 @@ SensorStall stallLeaf;
 SensorStall stallCo2;
 
 const VpdProfile VPD_PROFILES[] = {
-    {"seedling", "Steckling/Sämling", 0.65f, 0.4f, 0.8f},
-    {"veg", "Vegitativ", 1.0f, 0.8f, 1.2f},
-    {"bloom", "Blütephase", 1.1f, 1.0f, 1.4f},
-    {"late_bloom", "Späteblüte", 0.95f, 0.8f, 1.2f},
+    {"seedling", "Steckling/Sämling", 0.4f, 0.8f},
+    {"veg", "Vegitativ", 0.8f, 1.2f},
+    {"bloom", "Blütephase", 1.0f, 1.4f},       // early flower
+    {"late_bloom", "Späteblüte", 1.2f, 1.6f},  // late flower
 };
+
+struct MetricDef {
+  const char *id;
+  const char *unit;
+  HistorySeries series;
+};
+
+MetricDef HISTORY_METRICS[] = {
+    {"lux", "Lux", HistorySeries()},
+    {"ppfd", "µmol/m²/s", HistorySeries()},
+    {"co2", "ppm", HistorySeries()},
+    {"temp", "°C", HistorySeries()},
+    {"humidity", "%", HistorySeries()},
+    {"leaf", "°C", HistorySeries()},
+    {"vpd", "kPa", HistorySeries()},
+};
+const size_t HISTORY_METRIC_COUNT = sizeof(HISTORY_METRICS) / sizeof(HISTORY_METRICS[0]);
 
 // ----------------------------
 // Helpers
@@ -335,6 +369,69 @@ const VpdProfile &vpdProfileById(const String &id) {
       return p;
   }
   return VPD_PROFILES[0];
+}
+
+MetricDef *historyById(const String &id) {
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    if (id == HISTORY_METRICS[i].id)
+      return &HISTORY_METRICS[i];
+  }
+  return nullptr;
+}
+
+void appendLivePoint(HistorySeries &series, unsigned long ts, float value) {
+  if (series.liveCount < HISTORY_LIVE_CAPACITY) {
+    size_t idx = (series.liveStart + series.liveCount) % HISTORY_LIVE_CAPACITY;
+    series.live[idx].ts = ts;
+    series.live[idx].value = value;
+    series.liveCount++;
+  } else {
+    series.live[series.liveStart].ts = ts;
+    series.live[series.liveStart].value = value;
+    series.liveStart = (series.liveStart + 1) % HISTORY_LIVE_CAPACITY;
+  }
+}
+
+void addLongPoint(HistorySeries &series, unsigned long ts, float value) {
+  if (series.longCount < HISTORY_LONG_CAPACITY) {
+    size_t idx = (series.longStart + series.longCount) % HISTORY_LONG_CAPACITY;
+    series.longTerm[idx].ts = ts;
+    series.longTerm[idx].value = value;
+    series.longCount++;
+  } else {
+    series.longTerm[series.longStart].ts = ts;
+    series.longTerm[series.longStart].value = value;
+    series.longStart = (series.longStart + 1) % HISTORY_LONG_CAPACITY;
+  }
+}
+
+void flushBucketsUpTo(HistorySeries &series, unsigned long ts) {
+  if (series.aggBucketStart == 0)
+    return;
+  while (ts >= series.aggBucketStart + HISTORY_BUCKET_MS) {
+    float avg = series.aggCount > 0 ? (series.aggSum / series.aggCount) : NAN;
+    addLongPoint(series, series.aggBucketStart, avg);
+    series.aggBucketStart += HISTORY_BUCKET_MS;
+    series.aggSum = 0.0f;
+    series.aggCount = 0;
+  }
+}
+
+void pushHistoryValue(const char *metric, float value) {
+  MetricDef *def = historyById(metric);
+  if (!def)
+    return;
+  float normalized = (!isnan(value) && value != -1.0f) ? value : NAN;
+  unsigned long now = millis();
+  appendLivePoint(def->series, now, normalized);
+  if (def->series.aggBucketStart == 0) {
+    def->series.aggBucketStart = (now / HISTORY_BUCKET_MS) * HISTORY_BUCKET_MS;
+  }
+  flushBucketsUpTo(def->series, now);
+  if (!isnan(normalized)) {
+    def->series.aggSum += normalized;
+    def->series.aggCount++;
+  }
 }
 
 float safeFloat(float v, float fallback = 0.0f) { return isnan(v) ? fallback : v; }
@@ -818,9 +915,6 @@ void readSensors() {
   }
 
   const VpdProfile &profile = vpdProfileById(vpdStageId);
-  if (!isnan(latest.vpd)) {
-    latest.vpd = latest.vpd * profile.factor;
-  }
   latest.vpdTargetLow = profile.targetLow;
   latest.vpdTargetHigh = profile.targetHigh;
   if (isnan(latest.vpd)) {
@@ -832,6 +926,14 @@ void readSensors() {
   } else {
     latest.vpdStatus = 0;
   }
+
+  pushHistoryValue("lux", latest.lux);
+  pushHistoryValue("ppfd", latest.ppfd);
+  pushHistoryValue("co2", static_cast<float>(latest.co2ppm));
+  pushHistoryValue("temp", latest.ambientTempC);
+  pushHistoryValue("humidity", latest.humidity);
+  pushHistoryValue("leaf", latest.leafTempC);
+  pushHistoryValue("vpd", latest.vpd);
 
   unsigned long now = millis();
   auto stallCheck = [&](SensorStall &stall, SensorHealth &health, bool &enabled, const char *name) {
@@ -2130,6 +2232,12 @@ void handlePartners() {
 
 void handleTelemetry() {
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
+  String ipStr = activeIp.toString();
+  String gwStr = WiFi.gatewayIP().toString();
+  String snStr = WiFi.subnetMask().toString();
+  int rssi = wifiConnected ? WiFi.RSSI() : 0;
+  String ssid = wifiConnected ? WiFi.SSID() : (apMode ? String(AP_SSID) : savedSsid);
   bool luxOk = enableLight && lightHealth.present && lightHealth.healthy && !isnan(latest.lux);
   bool climateOk = enableClimate && climateHealth.present && climateHealth.healthy && !isnan(latest.ambientTempC) && !isnan(latest.humidity);
   bool leafOk = enableLeaf && leafHealth.present && leafHealth.healthy && !isnan(latest.leafTempC);
@@ -2137,14 +2245,11 @@ void handleTelemetry() {
   bool vpdOk = !isnan(latest.vpd);
   unsigned long now = millis();
   auto ageMs = [&](unsigned long t) -> unsigned long { return t == 0 ? 0UL : (now - t); };
-  String ipStr = WiFi.localIP().toString();
-  String gwStr = WiFi.gatewayIP().toString();
-  String snStr = WiFi.subnetMask().toString();
-  char json[768];
+  char json[1024];
   snprintf(json, sizeof(json),
            "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,"
            "\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d,"
-           "\"wifi_connected\":%d,\"ap_mode\":%d,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\","
+           "\"wifi_connected\":%d,\"ap_mode\":%d,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"rssi\":%d,\"ssid\":\"%s\","
            "\"lux_ok\":%d,\"co2_ok\":%d,\"climate_ok\":%d,\"leaf_ok\":%d,\"vpd_ok\":%d,"
            "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
            "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d,"
@@ -2152,11 +2257,63 @@ void handleTelemetry() {
            safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
            safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
-           wifiConnected ? 1 : 0, apMode ? 1 : 0, ipStr.c_str(), gwStr.c_str(), snStr.c_str(),
+           wifiConnected ? 1 : 0, apMode ? 1 : 0, ipStr.c_str(), gwStr.c_str(), snStr.c_str(), rssi, ssid.c_str(),
            luxOk ? 1 : 0, co2Ok ? 1 : 0, climateOk ? 1 : 0, leafOk ? 1 : 0, vpdOk ? 1 : 0,
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
            ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate));
+  server.send(200, "application/json", json);
+}
+
+void handleHistory() {
+  if (!enforceAuth())
+    return;
+  String metric = server.hasArg("metric") ? server.arg("metric") : "";
+  String range = server.hasArg("range") ? server.arg("range") : "live";
+  MetricDef *def = historyById(metric);
+  if (!def) {
+    server.send(400, "text/plain", "invalid metric");
+    return;
+  }
+
+  bool liveRange = range != "6h";
+  unsigned long now = millis();
+  flushBucketsUpTo(def->series, now);
+
+  String json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
+  bool first = true;
+  auto appendPoint = [&](unsigned long ts, float v) {
+    if (!first)
+      json += ",";
+    first = false;
+    json += "[" + String(ts) + ",";
+    if (isnan(v)) {
+      json += "null";
+    } else {
+      json += String(v, 2);
+    }
+    json += "]";
+  };
+
+  if (liveRange) {
+    for (size_t i = 0; i < def->series.liveCount; i++) {
+      size_t idx = (def->series.liveStart + i) % HISTORY_LIVE_CAPACITY;
+      const HistoryPoint &p = def->series.live[idx];
+      appendPoint(p.ts, p.value);
+    }
+  } else {
+    for (size_t i = 0; i < def->series.longCount; i++) {
+      size_t idx = (def->series.longStart + i) % HISTORY_LONG_CAPACITY;
+      const HistoryPoint &p = def->series.longTerm[idx];
+      appendPoint(p.ts, p.value);
+    }
+    if (def->series.aggBucketStart != 0) {
+      float pending = def->series.aggCount > 0 ? (def->series.aggSum / def->series.aggCount) : NAN;
+      appendPoint(def->series.aggBucketStart, pending);
+    }
+  }
+
+  json += "]}";
   server.send(200, "application/json", json);
 }
 
@@ -2214,13 +2371,20 @@ void handleSettings() {
   if (!enforceAuth())
     return;
   if (server.method() == HTTP_GET) {
+    bool wifiConnected = WiFi.status() == WL_CONNECTED;
+    int rssi = wifiConnected ? WiFi.RSSI() : 0;
+    String ssidActive = wifiConnected ? WiFi.SSID() : (apMode ? String(AP_SSID) : savedSsid);
+    IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
     String json = "{";
     json += "\"channel\":\"" + lightChannelName() + "\",";
     json += "\"vpd_stage\":\"" + vpdStageId + "\",";
     json += "\"wifi\":\"" + String(apMode ? "Access Point aktiv" : "Verbunden: " + WiFi.SSID()) + "\",";
-    json += "\"connected\":" + String(WiFi.status() == WL_CONNECTED ? 1 : 0) + ",";
+    json += "\"connected\":" + String(wifiConnected ? 1 : 0) + ",";
     json += "\"ap_mode\":" + String(apMode ? 1 : 0) + ",";
     json += "\"ssid\":\"" + savedSsid + "\",";
+    json += "\"ssid_active\":\"" + ssidActive + "\",";
+    json += "\"rssi\":" + String(rssi) + ",";
+    json += "\"ip_active\":\"" + activeIp.toString() + "\",";
     json += "\"static\":" + String(staticIpEnabled ? 1 : 0) + ",";
     json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";
     json += "\"gw\":\"" + (staticIpEnabled ? staticGateway.toString() : WiFi.gatewayIP().toString()) + "\",";
@@ -2230,20 +2394,22 @@ void handleSettings() {
     return;
   }
 
-  if (!server.hasArg("channel")) {
-    server.send(400, "text/plain", "channel missing");
+  bool hasChannel = server.hasArg("channel");
+  bool hasVpdStage = server.hasArg("vpd_stage");
+  if (!hasChannel && !hasVpdStage) {
+    server.send(400, "text/plain", "channel or vpd_stage missing");
     return;
   }
-  if (!server.hasArg("vpd_stage")) {
-    server.send(400, "text/plain", "vpd_stage missing");
-    return;
+  if (hasChannel) {
+    LightChannel next = lightChannelFromString(server.arg("channel"));
+    channel = next;
   }
-  LightChannel next = lightChannelFromString(server.arg("channel"));
-  channel = next;
-  vpdStageId = server.arg("vpd_stage");
+  if (hasVpdStage) {
+    vpdStageId = server.arg("vpd_stage");
+  }
   prefs.begin("grow-sensor", false);
-  prefs.putString("channel", lightChannelName());
-  prefs.putString("vpd_stage", vpdStageId);
+  if (hasChannel) prefs.putString("channel", lightChannelName());
+  if (hasVpdStage) prefs.putString("vpd_stage", vpdStageId);
   prefs.end();
   server.send(200, "text/plain", "saved");
 }
@@ -2579,6 +2745,7 @@ void setupServer() {
   server.on("/api/pins", HTTP_GET, handlePins);
   server.on("/api/pins", HTTP_POST, handlePins);
   server.on("/api/logs", HTTP_GET, handleLogs);
+  server.on("/api/history", HTTP_GET, handleHistory);
    server.on("/api/partners", HTTP_GET, handlePartners);
    server.on("/api/partners", HTTP_POST, handlePartners);
   server.onNotFound(handleNotFound);
