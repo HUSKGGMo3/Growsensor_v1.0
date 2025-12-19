@@ -1302,6 +1302,7 @@ void handleAuth() {
     server.send(400, "text/plain", "missing user/pass");
     return;
   }
+
   String user = server.arg("user");
   String pass = server.arg("pass");
 
@@ -1331,7 +1332,7 @@ void handleAuth() {
 }
 
 void handleAuthChange() {
-  if (!enforceAuth())
+  if (!enforceAuth()) {
     return;
   if (!mustChangePassword) {
     server.send(403, "text/plain", "password change not required");
@@ -1354,6 +1355,7 @@ void handleAuthChange() {
     server.send(403, "text/plain", "wrong password");
     return;
   }
+
   String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
   String newPass = server.arg("new_pass");
   adminUser = newUser;
@@ -1365,6 +1367,7 @@ void handleAuthChange() {
   prefs.putString("pass", adminPass);
   prefs.putBool("must_change", mustChangePassword);
   prefs.end();
+
   String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
   server.send(200, "application/json", json);
 }
