@@ -967,7 +967,8 @@ String htmlPage() {
     <title>GrowSensor v0.2.5</title>
     <style>
       :root { color-scheme: light dark; }
-      body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
+      html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 0; }
       header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 10; }
       h1 { margin: 0; font-size: 1.2rem; position:relative; }
       .header-row { display:flex; justify-content: space-between; align-items: center; gap:12px; flex-wrap: wrap; }
@@ -1048,6 +1049,9 @@ String htmlPage() {
       .wifi-bars { display:flex; gap:4px; align-items:flex-end; height:16px; }
       .wifi-bar { width:4px; background:#334155; border-radius:2px; }
       .wifi-bar.active { background:#22c55e; }
+      .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
+      .error-banner ul { margin: 0; padding-left: 18px; }
+      .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
     </style>
   </head>
   <body>
@@ -1072,6 +1076,11 @@ String htmlPage() {
         <button id="navSensors" class="menu-btn">Sensoren</button>
       </nav>
     </header>
+    <div id="errorBanner" class="error-banner">
+      <strong>Fehler</strong>
+      <ul id="errorList"></ul>
+      <button id="clearErrors">Schließen</button>
+    </div>
     <main>
       <div id="view-dashboard" class="view active">
         <section class="grid metrics">
@@ -1333,8 +1342,69 @@ String htmlPage() {
     </div>
 
     <script>
-      const chartCanvas = document.getElementById('chart');
-      const ctx = chartCanvas.getContext('2d');
+      const errorMessages = new Set();
+      const errorBanner = document.getElementById('errorBanner');
+      const errorList = document.getElementById('errorList');
+      const clearErrorsBtn = document.getElementById('clearErrors');
+
+      function renderErrors() {
+        if (!errorBanner || !errorList) return;
+        errorList.innerHTML = '';
+        errorMessages.forEach(msg => {
+          const li = document.createElement('li');
+          li.textContent = msg;
+          errorList.appendChild(li);
+        });
+        errorBanner.style.display = errorMessages.size ? 'flex' : 'none';
+      }
+
+      function pushError(message) {
+        if (!message) return;
+        errorMessages.add(message);
+        console.warn(message);
+        renderErrors();
+      }
+
+      function clearErrors(matchPrefix = null) {
+        if (matchPrefix === null) {
+          errorMessages.clear();
+        } else {
+          Array.from(errorMessages).forEach(msg => {
+            if (msg.startsWith(matchPrefix)) errorMessages.delete(msg);
+          });
+        }
+        renderErrors();
+      }
+
+      if (clearErrorsBtn) {
+        clearErrorsBtn.addEventListener('click', () => clearErrors());
+      } else {
+        pushError('Missing DOM element: clearErrors');
+      }
+
+      function getEl(id) {
+        const el = document.getElementById(id);
+        if (!el) pushError(`Missing DOM element: ${id}`);
+        return el;
+      }
+
+      function setText(id, value) {
+        const el = getEl(id);
+        if (el) el.textContent = value;
+      }
+
+      function setValue(id, value) {
+        const el = getEl(id);
+        if (el) el.value = value;
+      }
+
+      function setDisplay(id, visible, displayStyle = 'block') {
+        const el = getEl(id);
+        if (el) el.style.display = visible ? displayStyle : 'none';
+      }
+
+      const chartCanvas = getEl('chart');
+      const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
       const metrics = ['lux','ppfd','co2','temp','humidity','leaf','vpd'];
       const historyStore = {};
       metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 } });
@@ -1344,17 +1414,17 @@ String htmlPage() {
       let devMode = false;
       const DEV_CODE = "Test1234#";
       const hoverCanvases = {};
-      document.querySelectorAll('.hover-canvas').forEach(c => hoverCanvases[c.dataset.metric] = c.getContext('2d'));
-      const detailChartCanvas = document.getElementById('detailChart');
-      const detailCtx = detailChartCanvas.getContext('2d');
-      const vpdHeatmapCanvas = document.getElementById('vpdHeatmap');
-      const vpdHeatmapCtx = vpdHeatmapCanvas.getContext('2d');
-      const vpdTileCanvas = document.getElementById('vpdTileCanvas');
-      const vpdTileCtx = vpdTileCanvas.getContext('2d');
-      const chartEmpty = document.getElementById('chartEmpty');
-      const xAxisLabel = document.getElementById('xAxisLabel');
-      const yAxisLabel = document.getElementById('yAxisLabel');
-      const wifiBars = document.getElementById('wifiBars');
+      document.querySelectorAll('.hover-canvas').forEach(c => hoverCanvases[c.dataset.metric] = c.getContext ? c.getContext('2d') : null);
+      const detailChartCanvas = getEl('detailChart');
+      const detailCtx = detailChartCanvas && detailChartCanvas.getContext ? detailChartCanvas.getContext('2d') : null;
+      const vpdHeatmapCanvas = getEl('vpdHeatmap');
+      const vpdHeatmapCtx = vpdHeatmapCanvas && vpdHeatmapCanvas.getContext ? vpdHeatmapCanvas.getContext('2d') : null;
+      const vpdTileCanvas = getEl('vpdTileCanvas');
+      const vpdTileCtx = vpdTileCanvas && vpdTileCanvas.getContext ? vpdTileCanvas.getContext('2d') : null;
+      const chartEmpty = getEl('chartEmpty');
+      const xAxisLabel = getEl('xAxisLabel');
+      const yAxisLabel = getEl('yAxisLabel');
+      const wifiBars = getEl('wifiBars');
       let detailMetric = null;
       let detailMode = 'live';
       let detailVpdView = 'heatmap';
@@ -1375,6 +1445,35 @@ String htmlPage() {
       function authedFetch(url, options = {}) { return fetch(url, options); }
       function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
 
+      async function fetchJson(url, options = {}) {
+        let res;
+        try {
+          res = await authedFetch(url, options);
+        } catch (err) {
+          pushError(`API ${url} failed: ${err.message}`);
+          throw err;
+        }
+        let text = '';
+        try {
+          text = await res.text();
+        } catch (err) {
+          pushError(`API ${url} failed: ${err.message}`);
+          throw err;
+        }
+        if (!res.ok) {
+          const msg = `API ${url} failed: ${res.status}${text ? ` ${text}` : ''}`;
+          pushError(msg);
+          throw new Error(msg);
+        }
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (err) {
+          pushError(`JSON parse failed (${url}): ${err.message}`);
+          throw err;
+        }
+      }
+
       function setModalVisible(el, visible) {
         if (!el) return;
         el.style.display = visible ? 'flex' : 'none';
@@ -1385,14 +1484,14 @@ String htmlPage() {
         if (clickDebug || devMode) {
           console.log('CLICK', e.target, getComputedStyle(e.target).pointerEvents);
           ['devModal','chartModal','sensorWizard'].forEach(id => {
-            const el = document.getElementById(id);
+            const el = getEl(id);
             if (el) console.log(id, 'display', getComputedStyle(el).display, 'pointer', getComputedStyle(el).pointerEvents, 'z', getComputedStyle(el).zIndex);
           });
         }
       }, true);
 
       function setDot(id, ok, present, enabled) {
-        const el = document.getElementById(id);
+        const el = getEl(id);
         if (!el) return;
         let color = '#6b7280';
         if (enabled && present) color = ok ? '#34d399' : '#fbbf24';
@@ -1403,15 +1502,19 @@ String htmlPage() {
 
       function updateConnectionStatus(apMode = false, wifiConnected = false) {
         const online = (Date.now() - lastTelemetryAt) < 10000;
-        const dot = document.getElementById('connLed');
-        const text = document.getElementById('connText');
-        dot.style.background = online ? '#34d399' : '#ef4444';
-        dot.style.boxShadow = online ? '0 0 0 3px rgba(52,211,153,0.25)' : '0 0 0 3px rgba(239,68,68,0.25)';
-        text.textContent = online ? 'online' : 'offline';
-        const badge = document.getElementById('wifiMode');
-        badge.textContent = apMode ? 'AP' : (wifiConnected ? 'WLAN' : 'Offline');
-        badge.style.background = apMode ? '#f59e0b' : (wifiConnected ? '#22c55e' : '#ef4444');
-        badge.style.color = '#0f172a';
+        const dot = getEl('connLed');
+        const text = getEl('connText');
+        const badge = getEl('wifiMode');
+        if (dot) {
+          dot.style.background = online ? '#34d399' : '#ef4444';
+          dot.style.boxShadow = online ? '0 0 0 3px rgba(52,211,153,0.25)' : '0 0 0 3px rgba(239,68,68,0.25)';
+        }
+        if (text) text.textContent = online ? 'online' : 'offline';
+        if (badge) {
+          badge.textContent = apMode ? 'AP' : (wifiConnected ? 'WLAN' : 'Offline');
+          badge.style.background = apMode ? '#f59e0b' : (wifiConnected ? '#22c55e' : '#ef4444');
+          badge.style.color = '#0f172a';
+        }
       }
 
       function resizeCanvas(canvas, ctxTarget) {
@@ -1497,6 +1600,7 @@ String htmlPage() {
       }
 
       function drawLineChart(canvas, ctxDraw, points, mode, unit) {
+        if (!canvas || !ctxDraw) return false;
         resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
         const valid = points.map(p => p.v).filter(v => v !== null);
@@ -1538,6 +1642,7 @@ String htmlPage() {
       }
 
       function drawChart() {
+        if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
         resizeCanvas(chartCanvas, ctx);
         ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
         const width = chartCanvas.width;
@@ -1576,7 +1681,7 @@ String htmlPage() {
 
       function drawHover(metric) {
         const ctxHover = hoverCanvases[metric];
-        if (!ctxHover) return;
+        if (!ctxHover || !ctxHover.canvas) { pushError(`Missing DOM element: hover canvas for ${metric}`); return; }
         const canvas = ctxHover.canvas;
         const data = getSeriesData(metric, '6h');
         const mapped = data.map(p => p.v);
@@ -1612,9 +1717,9 @@ String htmlPage() {
       }
 
       function drawDetailChart(metric, mode, points, unit) {
-        if (!detailCtx || !metric) return false;
+        if (!detailCtx || !metric || !detailChartCanvas) return false;
         const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, unit);
-        const debugBox = document.getElementById('chartDebugText');
+        const debugBox = getEl('chartDebugText');
         if (devMode) {
           const values = points.map(p => p.v).filter(v => v !== null);
           const min = values.length ? Math.min(...values).toFixed(2) : '–';
@@ -1637,13 +1742,13 @@ String htmlPage() {
         const key = `${metric}-${mode}`;
         if (!detailCache[key]) detailCache[key] = [];
         try {
-          const res = await authedFetch(`/api/history?metric=${metric}&range=${mode === '6h' ? '6h' : 'live'}`);
-          if (!res.ok) throw new Error('history failed');
-          const data = await res.json();
+          const data = await fetchJson(`/api/history?metric=${metric}&range=${mode === '6h' ? '6h' : 'live'}`);
           const mapped = (data.points || []).map(p => ({ t: p[0], v: p[1] === null ? null : parseFloat(p[1]) }));
           detailCache[key] = mapped;
+          clearErrors('API /api/history');
         } catch (err) {
           console.warn('history error', err);
+          pushError(`API /api/history failed: ${err.message}`);
           detailCache[key] = [];
         }
         return detailCache[key];
@@ -1651,7 +1756,8 @@ String htmlPage() {
 
       function updateAverages() {
         const set = (id, val, digits=1) => {
-          document.getElementById(id).textContent = Number.isNaN(val) ? '–' : val.toFixed(digits);
+          const el = getEl(id);
+          if (el) el.textContent = Number.isNaN(val) ? '–' : val.toFixed(digits);
         };
         set('avgLux', avg(getSeriesData('lux','6h')));
         set('avgCo2', avg(getSeriesData('co2','6h')), 0);
@@ -1763,45 +1869,52 @@ String htmlPage() {
         detailMode = 'live';
         detailVpdView = 'heatmap';
         const meta = METRIC_META[metric] || { label: metric.toUpperCase(), unit:'' };
-        document.getElementById('chartModalTitle').textContent = `Detailansicht: ${meta.label}`;
-        document.getElementById('chartModalBadge').textContent = meta.unit || metric;
-        document.getElementById('tabLive').classList.add('active');
-        document.getElementById('tabLast6h').classList.remove('active');
+        setText('chartModalTitle', `Detailansicht: ${meta.label}`);
+        const badge = getEl('chartModalBadge');
+        if (badge) badge.textContent = meta.unit || metric;
+        const tabLive = getEl('tabLive');
+        const tabLast6h = getEl('tabLast6h');
+        if (tabLive && tabLast6h) {
+          tabLive.classList.add('active');
+          tabLast6h.classList.remove('active');
+        }
         const showVpd = metric === 'vpd';
-        document.getElementById('vpdViewTabs').style.display = showVpd ? 'flex' : 'none';
-        detailChartCanvas.style.display = showVpd ? 'none' : 'block';
-        vpdHeatmapCanvas.style.display = showVpd ? 'block' : 'none';
-        setModalVisible(document.getElementById('chartModal'), true);
+        setDisplay('vpdViewTabs', showVpd, 'flex');
+        if (detailChartCanvas) detailChartCanvas.style.display = showVpd ? 'none' : 'block';
+        if (vpdHeatmapCanvas) vpdHeatmapCanvas.style.display = showVpd ? 'block' : 'none';
+        setModalVisible(getEl('chartModal'), true);
         renderDetail();
       }
 
       function closeDetailModal() {
-        setModalVisible(document.getElementById('chartModal'), false);
+        setModalVisible(getEl('chartModal'), false);
       }
 
       async function fetchData() {
         try {
-          const res = await authedFetch('/api/telemetry');
-          const data = await res.json();
+          const data = await fetchJson('/api/telemetry');
           lastTelemetryAt = Date.now();
           updateConnectionStatus(data.ap_mode === 1, data.wifi_connected === 1);
-          document.getElementById('lux').textContent = (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–';
-          document.getElementById('ppfd').textContent = (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–';
-          document.getElementById('ppfdFactor').textContent = (typeof data.ppfd_factor === 'number' && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–';
-          document.getElementById('ppfdSpectrum').textContent = document.getElementById('channel').selectedOptions[0]?.textContent || '–';
-          document.getElementById('co2').textContent = (typeof data.co2 === 'number' && data.co2 > 0) ? data.co2.toFixed(0) : '–';
-          document.getElementById('temp').textContent = (typeof data.temp === 'number' && !Number.isNaN(data.temp)) ? data.temp.toFixed(1) : '–';
-          document.getElementById('humidity').textContent = (typeof data.humidity === 'number' && !Number.isNaN(data.humidity)) ? data.humidity.toFixed(1) : '–';
-          document.getElementById('leaf').textContent = (typeof data.leaf === 'number' && !Number.isNaN(data.leaf)) ? data.leaf.toFixed(1) : '–';
+          setText('lux', (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–');
+          setText('ppfd', (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–');
+          setText('ppfdFactor', (typeof data.ppfd_factor === 'number' && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–');
+          const channelSelect = getEl('channel');
+          setText('ppfdSpectrum', channelSelect && channelSelect.selectedOptions[0] ? channelSelect.selectedOptions[0].textContent : '–');
+          setText('co2', (typeof data.co2 === 'number' && data.co2 > 0) ? data.co2.toFixed(0) : '–');
+          setText('temp', (typeof data.temp === 'number' && !Number.isNaN(data.temp)) ? data.temp.toFixed(1) : '–');
+          setText('humidity', (typeof data.humidity === 'number' && !Number.isNaN(data.humidity)) ? data.humidity.toFixed(1) : '–');
+          setText('leaf', (typeof data.leaf === 'number' && !Number.isNaN(data.leaf)) ? data.leaf.toFixed(1) : '–');
           const vpdOk = flag(data.vpd_ok) && typeof data.vpd === 'number' && !Number.isNaN(data.vpd);
-          document.getElementById('vpd').textContent = vpdOk ? data.vpd.toFixed(3) : '–';
-          document.getElementById('vpdTarget').textContent = `Ziel: ${typeof data.vpd_low === 'number' ? data.vpd_low.toFixed(2) : '–'} – ${typeof data.vpd_high === 'number' ? data.vpd_high.toFixed(2) : '–'} kPa`;
-          const statusEl = document.getElementById('vpdStatus');
+          setText('vpd', vpdOk ? data.vpd.toFixed(3) : '–');
+          setText('vpdTarget', `Ziel: ${typeof data.vpd_low === 'number' ? data.vpd_low.toFixed(2) : '–'} – ${typeof data.vpd_high === 'number' ? data.vpd_high.toFixed(2) : '–'} kPa`);
+          const statusEl = getEl('vpdStatus');
           const status = data.vpd_status ?? 0;
-          if (!vpdOk) { statusEl.textContent = 'keine Daten'; statusEl.style.color = '#9ca3af'; }
-          else if (status < 0) { statusEl.textContent = 'unter Ziel'; statusEl.style.color = '#f59e0b'; }
-          else if (status > 0) { statusEl.textContent = 'über Ziel'; statusEl.style.color = '#f87171'; }
-          else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
+          if (statusEl) {
+            if (!vpdOk) { statusEl.textContent = 'keine Daten'; statusEl.style.color = '#9ca3af'; }
+            else if (status < 0) { statusEl.textContent = 'unter Ziel'; statusEl.style.color = '#f59e0b'; }
+            else if (status > 0) { statusEl.textContent = 'über Ziel'; statusEl.style.color = '#f87171'; }
+            else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
+          }
           lastVpdTargets = { low: data.vpd_low ?? null, high: data.vpd_high ?? null };
           setDot('luxDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
           setDot('ppfdDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
@@ -1819,25 +1932,34 @@ String htmlPage() {
           applyWifiState(data);
         } catch (err) {
           console.warn('telemetry failed', err);
+          pushError(`API /api/telemetry failed: ${err.message}`);
           updateConnectionStatus(false, false);
         }
       }
 
       async function loadSettings() {
-        const res = await authedFetch('/api/settings');
-        const data = await res.json();
-        document.getElementById('channel').value = data.channel;
-        document.getElementById('vpdStage').value = data.vpd_stage;
-        document.getElementById('vpdStageStatus').textContent = '';
-        document.getElementById('wifiStatus').textContent = data.wifi;
-        document.getElementById('wifiStatus').className = 'status ' + (data.connected ? 'ok' : 'err');
-        document.getElementById('ip').value = data.ip || '';
-        document.getElementById('gw').value = data.gw || '';
-        document.getElementById('sn').value = data.sn || '';
-        document.getElementById('staticIpToggle').checked = data.static || false;
-        updateStaticIpVisibility();
-        applyWifiState({ wifi_connected: data.connected ? 1 : 0, ap_mode: data.ap_mode ? 1 : 0, ip: data.ip, gw: data.gw, sn: data.sn });
-        await loadSensors();
+        try {
+          const data = await fetchJson('/api/settings');
+          setValue('channel', data.channel ?? '');
+          setValue('vpdStage', data.vpd_stage ?? '');
+          setText('vpdStageStatus', '');
+          const wifiStatus = getEl('wifiStatus');
+          if (wifiStatus) {
+            wifiStatus.textContent = data.wifi ?? '';
+            wifiStatus.className = 'status ' + (data.connected ? 'ok' : 'err');
+          }
+          setValue('ip', data.ip || '');
+          setValue('gw', data.gw || '');
+          setValue('sn', data.sn || '');
+          const staticToggle = getEl('staticIpToggle');
+          if (staticToggle) staticToggle.checked = data.static || false;
+          updateStaticIpVisibility();
+          applyWifiState({ wifi_connected: data.connected ? 1 : 0, ap_mode: data.ap_mode ? 1 : 0, ip: data.ip, gw: data.gw, sn: data.sn });
+          await loadSensors();
+          clearErrors('API /api/settings');
+        } catch (err) {
+          pushError(`API /api/settings failed: ${err.message}`);
+        }
       }
 
       const SENSOR_TEMPLATES = [
@@ -1852,8 +1974,8 @@ String htmlPage() {
       ];
 
       function renderSensors(active, templates) {
-        const activeBox = document.getElementById('activeSensors');
-        const availBox = document.getElementById('availableSensors');
+        const activeBox = getEl('activeSensors');
+        const availBox = getEl('availableSensors');
         if (!activeBox || !availBox) return;
         activeBox.innerHTML = '';
         availBox.innerHTML = '';
@@ -1902,12 +2024,15 @@ String htmlPage() {
       }
 
       async function loadSensors() {
-        const resActive = await authedFetch('/api/sensors/config');
-        if (!resActive.ok) return;
-        const data = await resActive.json();
-        const active = data.active || [];
-        const templates = data.templates || SENSOR_TEMPLATES;
-        renderSensors(active, templates);
+        try {
+          const data = await fetchJson('/api/sensors/config');
+          const active = data.active || [];
+          const templates = data.templates || SENSOR_TEMPLATES;
+          renderSensors(active, templates);
+          clearErrors('API /api/sensors/config');
+        } catch (err) {
+          pushError(`API /api/sensors/config failed: ${err.message}`);
+        }
       }
 
       let wizardStep = 1;
@@ -1919,13 +2044,16 @@ String htmlPage() {
         document.querySelectorAll('#sensorWizard .wizard-step').forEach(el => el.classList.remove('active'));
         const target = document.querySelector(`#sensorWizard .wizard-step[data-step=\"${step}\"]`);
         if (target) target.classList.add('active');
-        document.getElementById('wizNext').style.display = step < 3 ? 'inline-block' : 'none';
-        document.getElementById('wizSave').style.display = step === 3 ? 'inline-block' : 'none';
+        const wizNext = getEl('wizNext');
+        const wizSave = getEl('wizSave');
+        if (wizNext) wizNext.style.display = step < 3 ? 'inline-block' : 'none';
+        if (wizSave) wizSave.style.display = step === 3 ? 'inline-block' : 'none';
       }
 
       function fillWizardSelectors() {
-        const catSelect = document.getElementById('sensorCategorySelect');
-        const typeSelect = document.getElementById('sensorTypeSelect');
+        const catSelect = getEl('sensorCategorySelect');
+        const typeSelect = getEl('sensorTypeSelect');
+        if (!catSelect || !typeSelect) return;
         catSelect.innerHTML = '';
         typeSelect.innerHTML = '';
         const categories = Array.from(new Set(SENSOR_TEMPLATES.map(t => t.category)));
@@ -1936,6 +2064,7 @@ String htmlPage() {
           catSelect.appendChild(opt);
         });
         const updateTypeOptions = (cat) => {
+          if (!typeSelect) return;
           typeSelect.innerHTML = '';
           SENSOR_TEMPLATES.filter(t => t.category === cat).forEach(tpl => {
             const opt = document.createElement('option');
@@ -1948,230 +2077,312 @@ String htmlPage() {
       }
 
       function populateWizardPins(tpl) {
-        document.getElementById('wizSda').value = tpl.sda ?? '';
-        document.getElementById('wizScl').value = tpl.scl ?? '';
-        document.getElementById('wizRx').value = tpl.rx ?? '';
-        document.getElementById('wizTx').value = tpl.tx ?? '';
+        setValue('wizSda', tpl.sda ?? '');
+        setValue('wizScl', tpl.scl ?? '');
+        setValue('wizRx', tpl.rx ?? '');
+        setValue('wizTx', tpl.tx ?? '');
       }
 
       function startWizard(tpl) {
         wizardTemplate = tpl || SENSOR_TEMPLATES[0];
         wizardAdvanced = false;
         fillWizardSelectors();
-        document.getElementById('sensorCategorySelect').value = wizardTemplate.category;
-        const typeSelect = document.getElementById('sensorTypeSelect');
-        typeSelect.innerHTML = '';
-        SENSOR_TEMPLATES.filter(t => t.category === wizardTemplate.category).forEach(item => {
-          const opt = document.createElement('option');
-          opt.value = item.type;
-          opt.textContent = `${item.name}`;
-          typeSelect.appendChild(opt);
-        });
-        document.getElementById('sensorTypeSelect').value = wizardTemplate.type;
+        setValue('sensorCategorySelect', wizardTemplate.category);
+        const typeSelect = getEl('sensorTypeSelect');
+        if (typeSelect) {
+          typeSelect.innerHTML = '';
+          SENSOR_TEMPLATES.filter(t => t.category === wizardTemplate.category).forEach(item => {
+            const opt = document.createElement('option');
+            opt.value = item.type;
+            opt.textContent = `${item.name}`;
+            typeSelect.appendChild(opt);
+          });
+          typeSelect.value = wizardTemplate.type;
+        }
         populateWizardPins(wizardTemplate);
-        document.getElementById('defaultPinsInfo').textContent = 'Standardpins werden genutzt.';
-        ['wizSda','wizScl','wizRx','wizTx'].forEach(id => document.getElementById(id).disabled = true);
-        document.getElementById('advancedPinsWarn').style.display = 'none';
+        setText('defaultPinsInfo', 'Standardpins werden genutzt.');
+        ['wizSda','wizScl','wizRx','wizTx'].forEach(id => {
+          const el = getEl(id);
+          if (el) el.disabled = true;
+        });
+        setDisplay('advancedPinsWarn', false);
         goWizardStep(1);
-        setModalVisible(document.getElementById('sensorWizard'), true);
+        setModalVisible(getEl('sensorWizard'), true);
       }
 
-      document.getElementById('sensorCategorySelect').addEventListener('change', () => {
-        const cat = document.getElementById('sensorCategorySelect').value;
-        const typeSelect = document.getElementById('sensorTypeSelect');
-        typeSelect.innerHTML = '';
-        SENSOR_TEMPLATES.filter(t => t.category === cat).forEach(tpl => {
-          const opt = document.createElement('option');
-          opt.value = tpl.type;
-          opt.textContent = `${tpl.name}`;
-          typeSelect.appendChild(opt);
+      const sensorCategorySelect = getEl('sensorCategorySelect');
+      if (sensorCategorySelect) {
+        sensorCategorySelect.addEventListener('change', () => {
+          const cat = sensorCategorySelect.value;
+          const typeSelect = getEl('sensorTypeSelect');
+          if (!typeSelect) return;
+          typeSelect.innerHTML = '';
+          SENSOR_TEMPLATES.filter(t => t.category === cat).forEach(tpl => {
+            const opt = document.createElement('option');
+            opt.value = tpl.type;
+            opt.textContent = `${tpl.name}`;
+            typeSelect.appendChild(opt);
+          });
+          const tpl = SENSOR_TEMPLATES.find(t => t.category === cat) || SENSOR_TEMPLATES[0];
+          wizardTemplate = tpl;
+          typeSelect.value = tpl.type;
+          populateWizardPins(tpl);
         });
-        const tpl = SENSOR_TEMPLATES.find(t => t.category === cat) || SENSOR_TEMPLATES[0];
-        wizardTemplate = tpl;
-        document.getElementById('sensorTypeSelect').value = tpl.type;
-        populateWizardPins(tpl);
-      });
+      }
 
-      document.getElementById('sensorTypeSelect').addEventListener('change', () => {
-        const type = document.getElementById('sensorTypeSelect').value;
-        const tpl = SENSOR_TEMPLATES.find(t => t.type === type) || wizardTemplate;
-        wizardTemplate = tpl;
-        document.getElementById('sensorCategorySelect').value = tpl.category;
-        populateWizardPins(tpl);
-      });
+      const sensorTypeSelect = getEl('sensorTypeSelect');
+      if (sensorTypeSelect) {
+        sensorTypeSelect.addEventListener('change', () => {
+          const type = sensorTypeSelect.value;
+          const tpl = SENSOR_TEMPLATES.find(t => t.type === type) || wizardTemplate;
+          wizardTemplate = tpl;
+          setValue('sensorCategorySelect', tpl.category);
+          populateWizardPins(tpl);
+        });
+      }
 
-      document.getElementById('addSensorBtn').addEventListener('click', () => startWizard(SENSOR_TEMPLATES[0]));
-      document.getElementById('sensorWizardClose').addEventListener('click', () => setModalVisible(document.getElementById('sensorWizard'), false));
-      document.getElementById('sensorWizard').addEventListener('click', (e) => {
-        if (e.target.id === 'sensorWizard') setModalVisible(document.getElementById('sensorWizard'), false);
-      });
-      document.getElementById('wizBack').addEventListener('click', () => goWizardStep(Math.max(1, wizardStep - 1)));
-      document.getElementById('wizNext').addEventListener('click', () => {
+      const addSensorBtn = getEl('addSensorBtn');
+      if (addSensorBtn) addSensorBtn.addEventListener('click', () => startWizard(SENSOR_TEMPLATES[0]));
+      const sensorWizardClose = getEl('sensorWizardClose');
+      if (sensorWizardClose) sensorWizardClose.addEventListener('click', () => setModalVisible(getEl('sensorWizard'), false));
+      const sensorWizard = getEl('sensorWizard');
+      if (sensorWizard) {
+        sensorWizard.addEventListener('click', (e) => {
+          if (e.target.id === 'sensorWizard') setModalVisible(getEl('sensorWizard'), false);
+        });
+      }
+      const wizBack = getEl('wizBack');
+      if (wizBack) wizBack.addEventListener('click', () => goWizardStep(Math.max(1, wizardStep - 1)));
+      const wizNext = getEl('wizNext');
+      if (wizNext) wizNext.addEventListener('click', () => {
         if (wizardStep === 1) {
-          const type = document.getElementById('sensorTypeSelect').value;
+          const type = sensorTypeSelect ? sensorTypeSelect.value : '';
           const tpl = SENSOR_TEMPLATES.find(t => t.type === type) || wizardTemplate;
           wizardTemplate = tpl;
           populateWizardPins(tpl);
         }
         goWizardStep(Math.min(3, wizardStep + 1));
       });
-      document.getElementById('advancedPinsBtn').addEventListener('click', () => {
+      const advancedPinsBtn = getEl('advancedPinsBtn');
+      if (advancedPinsBtn) advancedPinsBtn.addEventListener('click', () => {
         if (!confirm('Wirklich Pinbelegung ändern?')) return;
         wizardAdvanced = true;
-        document.getElementById('advancedPinsWarn').style.display = 'block';
-        ['wizSda','wizScl','wizRx','wizTx'].forEach(id => document.getElementById(id).disabled = false);
+        setDisplay('advancedPinsWarn', true, 'block');
+        ['wizSda','wizScl','wizRx','wizTx'].forEach(id => {
+          const el = getEl(id);
+          if (el) el.disabled = false;
+        });
       });
-      document.getElementById('wizSave').addEventListener('click', async () => {
+      const wizSave = getEl('wizSave');
+      if (wizSave) wizSave.addEventListener('click', async () => {
         const body = new URLSearchParams();
         body.set('action', 'add');
-        body.set('sensor_type', document.getElementById('sensorTypeSelect').value);
-        body.set('category', document.getElementById('sensorCategorySelect').value);
-        const id = document.getElementById('sensorTypeSelect').value.toLowerCase() + "_" + Date.now();
+        const typeEl = getEl('sensorTypeSelect');
+        const catEl = getEl('sensorCategorySelect');
+        const typeVal = typeEl ? typeEl.value : '';
+        const catVal = catEl ? catEl.value : '';
+        body.set('sensor_type', typeVal);
+        body.set('category', catVal);
+        const id = `${typeVal.toLowerCase()}_${Date.now()}`;
         body.set('id', id);
         await authedFetch('/api/sensors/config', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
         if (wizardAdvanced) {
           const pins = new URLSearchParams();
           pins.set('action','set_pins');
           pins.set('id', id);
-          pins.set('sda', document.getElementById('wizSda').value || '-1');
-          pins.set('scl', document.getElementById('wizScl').value || '-1');
-          pins.set('rx', document.getElementById('wizRx').value || '-1');
-          pins.set('tx', document.getElementById('wizTx').value || '-1');
+          pins.set('sda', (getEl('wizSda')?.value) || '-1');
+          pins.set('scl', (getEl('wizScl')?.value) || '-1');
+          pins.set('rx', (getEl('wizRx')?.value) || '-1');
+          pins.set('tx', (getEl('wizTx')?.value) || '-1');
           await authedFetch('/api/sensors/config', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: pins.toString() });
         }
-        document.getElementById('wizStatus').textContent = 'Gespeichert. Bitte Neustart durchführen.';
-        document.getElementById('wizStatus').className = 'status ok';
+        setText('wizStatus', 'Gespeichert. Bitte Neustart durchführen.');
+        const wizStatus = getEl('wizStatus');
+        if (wizStatus) wizStatus.className = 'status ok';
         goWizardStep(3);
         await loadSensors();
       });
-      document.getElementById('restartNow').addEventListener('click', async () => {
+      const restartNowBtn = getEl('restartNow');
+      if (restartNowBtn) restartNowBtn.addEventListener('click', async () => {
         await authedFetch('/api/reset', { method:'POST' });
       });
 
       async function scanNetworks() {
-        document.getElementById('wifiStatus').textContent = 'Suche Netzwerke...';
-        const res = await authedFetch('/api/networks');
-        const data = await res.json();
-        const ssidSelect = document.getElementById('ssid');
-        ssidSelect.innerHTML = '';
-        data.networks.forEach(n => {
-          const opt = document.createElement('option');
-          opt.value = n.ssid;
-          opt.textContent = `${n.ssid} (${n.rssi}dBm)`;
-          ssidSelect.appendChild(opt);
-        });
-        if (data.networks.length === 0) {
-          const opt = document.createElement('option');
-          opt.textContent = 'Keine Netzwerke gefunden';
-          ssidSelect.appendChild(opt);
+        setText('wifiStatus', 'Suche Netzwerke...');
+        try {
+          const data = await fetchJson('/api/networks');
+          const ssidSelect = getEl('ssid');
+          if (ssidSelect) {
+            ssidSelect.innerHTML = '';
+            (data.networks || []).forEach(n => {
+              const opt = document.createElement('option');
+              opt.value = n.ssid;
+              opt.textContent = `${n.ssid} (${n.rssi}dBm)`;
+              ssidSelect.appendChild(opt);
+            });
+            if ((data.networks || []).length === 0) {
+              const opt = document.createElement('option');
+              opt.textContent = 'Keine Netzwerke gefunden';
+              ssidSelect.appendChild(opt);
+            }
+          }
+          setText('wifiStatus', 'Suche abgeschlossen');
+          clearErrors('API /api/networks');
+        } catch (err) {
+          pushError(`API /api/networks failed: ${err.message}`);
         }
-        document.getElementById('wifiStatus').textContent = 'Suche abgeschlossen';
       }
 
       function updateStaticIpVisibility() {
-        const checked = document.getElementById('staticIpToggle').checked;
+        const toggle = getEl('staticIpToggle');
+        const checked = toggle ? toggle.checked : false;
         ['ip','gw','sn'].forEach(id => {
-          const el = document.getElementById(id);
-          el.parentElement.style.display = checked ? 'flex' : 'none';
+          const el = getEl(id);
+          if (el && el.parentElement) {
+            el.parentElement.style.display = checked ? 'flex' : 'none';
+          }
         });
       }
 
-      document.getElementById('saveChannel').addEventListener('click', async () => {
-        const channel = document.getElementById('channel').value;
-        await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}` });
-        document.getElementById('wifiStatus').textContent = 'Spektrum gespeichert';
-      });
-
-      document.getElementById('applyStage').addEventListener('click', async () => {
-        const vpdStage = document.getElementById('vpdStage').value;
-        const channel = document.getElementById('channel').value;
-        const status = document.getElementById('vpdStageStatus');
-        status.textContent = 'Speichern...';
-        status.className = 'status';
-        const res = await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}&vpd_stage=${vpdStage}` });
-        if (res.ok) {
-          status.textContent = 'VPD Targets aktualisiert';
-          status.classList.add('ok');
-          await fetchData();
-        } else {
-          status.textContent = 'Speichern fehlgeschlagen';
-          status.classList.add('err');
+      const saveChannelBtn = getEl('saveChannel');
+      if (saveChannelBtn) saveChannelBtn.addEventListener('click', async () => {
+        const channel = getEl('channel')?.value || '';
+        try {
+          const res = await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}` });
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error(`status ${res.status} ${text}`);
+          }
+          setText('wifiStatus', 'Spektrum gespeichert');
+        } catch (err) {
+          pushError(`API /api/settings failed: ${err.message}`);
         }
       });
 
-      document.getElementById('saveWifi').addEventListener('click', async () => {
-        if (!devMode) { document.getElementById('wifiStatus').textContent = 'Dev-Modus erforderlich'; document.getElementById('wifiStatus').className='status err'; return; }
-        const ssid = document.getElementById('ssid').value;
-        const pass = document.getElementById('pass').value;
-        const staticIp = document.getElementById('staticIpToggle').checked;
-        const ip = document.getElementById('ip').value;
-        const gw = document.getElementById('gw').value;
-        const sn = document.getElementById('sn').value;
-        document.getElementById('wifiStatus').textContent = 'Speichern & Neustart...';
-        const res = await authedFetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}&static=${staticIp ? 1 : 0}&ip=${encodeURIComponent(ip)}&gw=${encodeURIComponent(gw)}&sn=${encodeURIComponent(sn)}` });
-        const text = await res.text();
-        if (res.ok) {
-          document.getElementById('wifiStatus').textContent = 'Verbunden mit deiner Pflanze';
-          document.getElementById('wifiStatus').className = 'status ok';
-        } else {
-          document.getElementById('wifiStatus').textContent = 'Falsches Passwort';
-          document.getElementById('wifiStatus').className = 'status err';
+      const applyStageBtn = getEl('applyStage');
+      if (applyStageBtn) applyStageBtn.addEventListener('click', async () => {
+        const vpdStage = getEl('vpdStage')?.value || '';
+        const channel = getEl('channel')?.value || '';
+        const status = getEl('vpdStageStatus');
+        if (status) {
+          status.textContent = 'Speichern...';
+          status.className = 'status';
+        }
+        try {
+          const res = await authedFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `channel=${channel}&vpd_stage=${vpdStage}` });
+          const text = await res.text().catch(() => '');
+          if (res.ok) {
+            if (status) { status.textContent = 'VPD Targets aktualisiert'; status.classList.add('ok'); }
+            await fetchData();
+          } else {
+            if (status) { status.textContent = 'Speichern fehlgeschlagen'; status.classList.add('err'); }
+            pushError(`API /api/settings failed: ${res.status} ${text}`);
+          }
+        } catch (err) {
+          pushError(`API /api/settings failed: ${err.message}`);
+          if (status) { status.textContent = 'Speichern fehlgeschlagen'; status.classList.add('err'); }
         }
       });
 
-      document.getElementById('resetWifi').addEventListener('click', async () => {
-        if (!devMode) { document.getElementById('wifiStatus').textContent = 'Dev-Modus erforderlich'; document.getElementById('wifiStatus').className='status err'; return; }
-        document.getElementById('wifiStatus').textContent = 'Werkseinstellungen...';
+      const saveWifiBtn = getEl('saveWifi');
+      if (saveWifiBtn) saveWifiBtn.addEventListener('click', async () => {
+        const wifiStatus = getEl('wifiStatus');
+        if (!devMode) { if (wifiStatus) { wifiStatus.textContent = 'Dev-Modus erforderlich'; wifiStatus.className='status err'; } return; }
+        const ssid = getEl('ssid')?.value || '';
+        const pass = getEl('pass')?.value || '';
+        const staticIp = getEl('staticIpToggle')?.checked || false;
+        const ip = getEl('ip')?.value || '';
+        const gw = getEl('gw')?.value || '';
+        const sn = getEl('sn')?.value || '';
+        if (wifiStatus) wifiStatus.textContent = 'Speichern & Neustart...';
+        try {
+          const res = await authedFetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}&static=${staticIp ? 1 : 0}&ip=${encodeURIComponent(ip)}&gw=${encodeURIComponent(gw)}&sn=${encodeURIComponent(sn)}` });
+          const text = await res.text().catch(() => '');
+          if (res.ok) {
+            if (wifiStatus) { wifiStatus.textContent = 'Verbunden mit deiner Pflanze'; wifiStatus.className = 'status ok'; }
+          } else {
+            if (wifiStatus) { wifiStatus.textContent = 'Falsches Passwort'; wifiStatus.className = 'status err'; }
+            pushError(`API /api/wifi failed: ${res.status} ${text}`);
+          }
+        } catch (err) {
+          pushError(`API /api/wifi failed: ${err.message}`);
+          if (wifiStatus) { wifiStatus.textContent = 'Speichern fehlgeschlagen'; wifiStatus.className = 'status err'; }
+        }
+      });
+
+      const resetWifiBtn = getEl('resetWifi');
+      if (resetWifiBtn) resetWifiBtn.addEventListener('click', async () => {
+        const wifiStatus = getEl('wifiStatus');
+        if (!devMode) { if (wifiStatus) { wifiStatus.textContent = 'Dev-Modus erforderlich'; wifiStatus.className='status err'; } return; }
+        if (wifiStatus) wifiStatus.textContent = 'Werkseinstellungen...';
         await authedFetch('/api/reset', { method: 'POST' });
         setTimeout(() => location.reload(), 1500);
       });
 
-      document.getElementById('staticIpToggle').addEventListener('change', updateStaticIpVisibility);
+      const staticToggle = getEl('staticIpToggle');
+      if (staticToggle) staticToggle.addEventListener('change', updateStaticIpVisibility);
 
       async function loadLogs() {
-        const res = await authedFetch('/api/logs');
-        const data = await res.json();
-        document.getElementById('logBox').textContent = data.join('\n');
+        try {
+          const data = await fetchJson('/api/logs');
+          setText('logBox', (data || []).join('\n'));
+          clearErrors('API /api/logs');
+        } catch (err) {
+          pushError(`API /api/logs failed: ${err.message}`);
+        }
       }
 
       async function downloadLogs() {
-        const res = await authedFetch('/api/logs');
-        const data = await res.json();
-        const blob = new Blob([data.join('\n')], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'growsensor-log.txt';
-        a.click();
-        URL.revokeObjectURL(url);
+        try {
+          const data = await fetchJson('/api/logs');
+          const blob = new Blob([(data || []).join('\n')], { type: 'text/plain' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'growsensor-log.txt';
+          a.click();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          pushError(`API /api/logs failed: ${err.message}`);
+        }
       }
 
-      document.getElementById('scanWifi').addEventListener('click', scanNetworks);
-      document.getElementById('refreshLogs').addEventListener('click', loadLogs);
-      document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
+      const scanWifiBtn = getEl('scanWifi');
+      if (scanWifiBtn) scanWifiBtn.addEventListener('click', scanNetworks);
+      const refreshLogsBtn = getEl('refreshLogs');
+      if (refreshLogsBtn) refreshLogsBtn.addEventListener('click', loadLogs);
+      const downloadLogsBtn = getEl('downloadLogs');
+      if (downloadLogsBtn) downloadLogsBtn.addEventListener('click', downloadLogs);
       async function loadPartners() {
-        const res = await authedFetch('/api/partners');
-        const data = await res.json();
-        const list = document.getElementById('partnerList');
-        list.innerHTML = '';
-        data.partners.forEach(p => {
-          const card = document.createElement('div');
-          card.className = 'card';
-          card.style.marginTop = '8px';
-          card.innerHTML = `<strong>${p.name}</strong><br/><span style=\"color:#9ca3af;\">${p.description}</span>` + (p.url ? `<br/><a href=\"${p.url}\" target=\"_blank\">Link</a>` : '');
-          list.appendChild(card);
-        });
+        try {
+          const data = await fetchJson('/api/partners');
+          const list = getEl('partnerList');
+          if (list) {
+            list.innerHTML = '';
+            (data.partners || []).forEach(p => {
+              const card = document.createElement('div');
+              card.className = 'card';
+              card.style.marginTop = '8px';
+              card.innerHTML = `<strong>${p.name}</strong><br/><span style=\"color:#9ca3af;\">${p.description}</span>` + (p.url ? `<br/><a href=\"${p.url}\" target=\"_blank\">Link</a>` : '');
+              list.appendChild(card);
+            });
+          }
+          clearErrors('API /api/partners');
+        } catch (err) {
+          pushError(`API /api/partners failed: ${err.message}`);
+        }
       }
 
-      document.getElementById('savePartner').addEventListener('click', async () => {
+      const savePartnerBtn = getEl('savePartner');
+      if (savePartnerBtn) savePartnerBtn.addEventListener('click', async () => {
         if (!devMode) { return; }
         const body = new URLSearchParams();
-        body.set('id', document.getElementById('partnerId').value);
-        body.set('name', document.getElementById('partnerName').value);
-        body.set('description', document.getElementById('partnerDesc').value);
-        body.set('url', document.getElementById('partnerUrl').value);
-        body.set('logo', document.getElementById('partnerLogo').value);
-        body.set('enabled', document.getElementById('partnerEnabled').checked ? '1' : '0');
+        body.set('id', getEl('partnerId')?.value || '');
+        body.set('name', getEl('partnerName')?.value || '');
+        body.set('description', getEl('partnerDesc')?.value || '');
+        body.set('url', getEl('partnerUrl')?.value || '');
+        body.set('logo', getEl('partnerLogo')?.value || '');
+        body.set('enabled', getEl('partnerEnabled')?.checked ? '1' : '0');
         await authedFetch('/api/partners', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
         await loadPartners();
       });
@@ -2189,52 +2400,66 @@ String htmlPage() {
         }
       });
 
-      document.getElementById('chartModal').addEventListener('click', (e) => {
+      const chartModalEl = getEl('chartModal');
+      if (chartModalEl) chartModalEl.addEventListener('click', (e) => {
         if (e.target.id === 'chartModal') closeDetailModal();
       });
-      document.getElementById('chartClose').addEventListener('click', closeDetailModal);
-      document.getElementById('tabLive').addEventListener('click', () => {
+      const chartClose = getEl('chartClose');
+      if (chartClose) chartClose.addEventListener('click', closeDetailModal);
+      const tabLiveBtn = getEl('tabLive');
+      if (tabLiveBtn) tabLiveBtn.addEventListener('click', () => {
         detailMode = 'live';
-        document.getElementById('tabLive').classList.add('active');
-        document.getElementById('tabLast6h').classList.remove('active');
+        if (tabLiveBtn) tabLiveBtn.classList.add('active');
+        const tabLast6h = getEl('tabLast6h');
+        if (tabLast6h) tabLast6h.classList.remove('active');
         renderDetail();
       });
-      document.getElementById('tabLast6h').addEventListener('click', () => {
+      const tabLast6hBtn = getEl('tabLast6h');
+      if (tabLast6hBtn) tabLast6hBtn.addEventListener('click', () => {
         detailMode = '6h';
-        document.getElementById('tabLast6h').classList.add('active');
-        document.getElementById('tabLive').classList.remove('active');
+        tabLast6hBtn.classList.add('active');
+        const tabLiveEl = getEl('tabLive');
+        if (tabLiveEl) tabLiveEl.classList.remove('active');
         renderDetail();
       });
-      document.getElementById('tabHeatmap').addEventListener('click', () => {
+      const tabHeatmapBtn = getEl('tabHeatmap');
+      if (tabHeatmapBtn) tabHeatmapBtn.addEventListener('click', () => {
         detailVpdView = 'heatmap';
-        document.getElementById('tabHeatmap').classList.add('active');
-        document.getElementById('tabTimeline').classList.remove('active');
+        tabHeatmapBtn.classList.add('active');
+        const tabTimeline = getEl('tabTimeline');
+        if (tabTimeline) tabTimeline.classList.remove('active');
         renderDetail();
       });
-      document.getElementById('tabTimeline').addEventListener('click', () => {
+      const tabTimelineBtn = getEl('tabTimeline');
+      if (tabTimelineBtn) tabTimelineBtn.addEventListener('click', () => {
         detailVpdView = 'timeline';
-        document.getElementById('tabTimeline').classList.add('active');
-        document.getElementById('tabHeatmap').classList.remove('active');
+        tabTimelineBtn.classList.add('active');
+        const tabHeatmap = getEl('tabHeatmap');
+        if (tabHeatmap) tabHeatmap.classList.remove('active');
         renderDetail();
       });
 
       function switchView(target) {
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-        document.getElementById(target).classList.add('active');
+        const viewEl = getEl(target);
+        if (viewEl) viewEl.classList.add('active');
       }
-      document.getElementById('navDashboard').addEventListener('click', () => switchView('view-dashboard'));
-      document.getElementById('navSensors').addEventListener('click', () => switchView('view-sensors'));
+      const navDashboard = getEl('navDashboard');
+      if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
+      const navSensors = getEl('navSensors');
+      if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
 
       function applyWifiState(data) {
         const connected = flag(data.wifi_connected);
         const ap = flag(data.ap_mode);
-        const form = document.getElementById('wifiForm');
-        const block = document.getElementById('wifiConnectedBlock');
+        const form = getEl('wifiForm');
+        const block = getEl('wifiConnectedBlock');
+        if (!form || !block) return;
         if (connected && !ap && !wifiFormOpen) {
           block.classList.remove('hidden');
           form.classList.add('hidden');
-          document.getElementById('wifiIp').textContent = data.ip || '–';
-          document.getElementById('wifiSsid').textContent = data.ssid || '–';
+          setText('wifiIp', data.ip || '–');
+          setText('wifiSsid', data.ssid || '–');
           updateWifiBars(data.rssi);
         } else {
           block.classList.toggle('hidden', !(connected && !ap));
@@ -2255,34 +2480,44 @@ String htmlPage() {
         }
       }
 
-      document.getElementById('toggleWifiForm').addEventListener('click', () => {
+      const toggleWifiFormBtn = getEl('toggleWifiForm');
+      if (toggleWifiFormBtn) toggleWifiFormBtn.addEventListener('click', () => {
         wifiFormOpen = !wifiFormOpen;
-        const form = document.getElementById('wifiForm');
-        if (wifiFormOpen) form.classList.remove('hidden'); else form.classList.add('hidden');
-        document.getElementById('toggleWifiForm').textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
+        const form = getEl('wifiForm');
+        if (form) {
+          if (wifiFormOpen) form.classList.remove('hidden'); else form.classList.add('hidden');
+        }
+        toggleWifiFormBtn.textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
       });
 
       function setDevVisible() {
         document.querySelectorAll('.dev-only').forEach(el => el.disabled = !devMode);
-        document.getElementById('wifiDevNote').style.display = devMode ? 'none' : 'block';
-        document.getElementById('partnerCard').style.display = devMode ? 'block' : 'none';
-        document.getElementById('devStatus').style.display = devMode ? 'inline-block' : 'none';
+        const wifiDevNote = getEl('wifiDevNote');
+        const partnerCard = getEl('partnerCard');
+        const devStatus = getEl('devStatus');
+        if (wifiDevNote) wifiDevNote.style.display = devMode ? 'none' : 'block';
+        if (partnerCard) partnerCard.style.display = devMode ? 'block' : 'none';
+        if (devStatus) devStatus.style.display = devMode ? 'inline-block' : 'none';
       }
 
-      document.getElementById('openDev').addEventListener('click', () => {
-        setModalVisible(document.getElementById('devModal'), true);
-        document.getElementById('devStatusMsg').textContent = '';
-        document.getElementById('devCode').value = '';
+      const openDevBtn = getEl('openDev');
+      if (openDevBtn) openDevBtn.addEventListener('click', () => {
+        setModalVisible(getEl('devModal'), true);
+        setText('devStatusMsg', '');
+        setValue('devCode', '');
       });
-      document.getElementById('cancelDev').addEventListener('click', () => setModalVisible(document.getElementById('devModal'), false));
-      document.getElementById('activateDev').addEventListener('click', () => {
-        const code = document.getElementById('devCode').value;
-        const status = document.getElementById('devStatusMsg');
+      const cancelDevBtn = getEl('cancelDev');
+      if (cancelDevBtn) cancelDevBtn.addEventListener('click', () => setModalVisible(getEl('devModal'), false));
+      const activateDevBtn = getEl('activateDev');
+      if (activateDevBtn) activateDevBtn.addEventListener('click', () => {
+        const code = getEl('devCode')?.value || '';
+        const status = getEl('devStatusMsg');
+        if (!status) return;
         if (code === DEV_CODE) {
           devMode = true;
           status.textContent = 'Dev aktiviert';
           status.className = 'status ok';
-          setModalVisible(document.getElementById('devModal'), false);
+          setModalVisible(getEl('devModal'), false);
           setDevVisible();
         } else {
           status.textContent = 'Falscher Code';
@@ -2293,19 +2528,19 @@ String htmlPage() {
       async function renderDetail() {
         if (!detailMetric) return;
         const meta = METRIC_META[detailMetric] || { unit:'', label: detailMetric.toUpperCase() };
-        yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
-        xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss)' : 'Zeit (HH:MM)';
+        if (yAxisLabel) yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
+        if (xAxisLabel) xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss)' : 'Zeit (HH:MM)';
         const showHeatmap = detailMetric === 'vpd' && detailVpdView === 'heatmap';
-        vpdHeatmapCanvas.style.display = showHeatmap ? 'block' : 'none';
-        detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
-        chartEmpty.style.display = 'none';
+        if (vpdHeatmapCanvas) vpdHeatmapCanvas.style.display = showHeatmap ? 'block' : 'none';
+        if (detailChartCanvas) detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
+        if (chartEmpty) chartEmpty.style.display = 'none';
         if (showHeatmap) {
           const points = collectPaired(detailMode);
-          drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, document.getElementById('chartModalCard'), points);
+          drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points);
         } else {
           const historyPoints = await loadDetailHistory(detailMetric, detailMode);
           const ok = drawDetailChart(detailMetric, detailMode, historyPoints, meta.unit);
-          chartEmpty.style.display = ok ? 'none' : 'flex';
+          if (chartEmpty) chartEmpty.style.display = ok ? 'none' : 'flex';
         }
       }
 
@@ -2313,9 +2548,10 @@ String htmlPage() {
         const temp = typeof data.temp === 'number' ? data.temp : null;
         const hum = typeof data.humidity === 'number' ? data.humidity : null;
         const vpd = typeof data.vpd === 'number' && !Number.isNaN(data.vpd) ? data.vpd : null;
-        const tileStatus = document.getElementById('vpdTileStatus');
-        const tileNoData = document.getElementById('vpdTileNoData');
+        const tileStatus = getEl('vpdTileStatus');
+        const tileNoData = getEl('vpdTileNoData');
         const points = collectPaired('live').slice(-60);
+        if (!tileStatus || !tileNoData) return;
         if (temp === null || hum === null || vpd === null || Number.isNaN(temp) || Number.isNaN(hum) || points.length === 0) {
           tileNoData.style.display = 'flex';
           tileStatus.textContent = 'keine Daten';
@@ -2323,9 +2559,10 @@ String htmlPage() {
         }
         tileNoData.style.display = 'none';
         tileStatus.textContent = `VPD ${vpd.toFixed(2)} kPa`;
-        drawVpdHeatmap(vpdTileCtx, vpdTileCanvas, 'live', lastVpdTargets, document.getElementById('vpdTileChart'), points);
+        drawVpdHeatmap(vpdTileCtx, vpdTileCanvas, 'live', lastVpdTargets, getEl('vpdTileChart'), points);
         const targetText = lastVpdTargets.low && lastVpdTargets.high ? `${lastVpdTargets.low.toFixed(2)}–${lastVpdTargets.high.toFixed(2)} kPa` : '–';
-        document.getElementById('vpdTileTarget').innerHTML = `<span class=\"legend-swatch\" style=\"background:${vpdColor(lastVpdTargets.low || 0.8)}\"></span> Ziel ${targetText}`;
+        const vpdTileTarget = getEl('vpdTileTarget');
+        if (vpdTileTarget) vpdTileTarget.innerHTML = `<span class=\"legend-swatch\" style=\"background:${vpdColor(lastVpdTargets.low || 0.8)}\"></span> Ziel ${targetText}`;
       }
 
       setInterval(fetchData, 2500);
