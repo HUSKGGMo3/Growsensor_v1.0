@@ -9,6 +9,9 @@
 #include <Adafruit_MLX90614.h>
 #include <MHZ19.h>
 #include <math.h>
+#include <ArduinoJson.h>
+#include <cstring>
+#include <vector>
 #include <esp_system.h>
 
 // ----------------------------
@@ -38,7 +41,9 @@ static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4
 // Auth
 static const char *DEFAULT_USER = "Admin";
 static const char *DEFAULT_PASS = "admin";
-static const char *SUPPORT_MASTER_PASS = "GROW-SUPPORT-RESET-2024";
+#ifndef SUPPORT_MASTER_PASS
+#define SUPPORT_MASTER_PASS ""
+#endif
 
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
@@ -81,6 +86,7 @@ float luxToPPFD(float lux, LightChannel channel) {
 struct Telemetry {
   float lux = NAN;
   float ppfd = NAN;
+  float ppfdFactor = NAN;
   float ambientTempC = NAN;
   float humidity = NAN;
   float leafTempC = NAN;
@@ -88,6 +94,7 @@ struct Telemetry {
   float vpd = NAN;
   float vpdTargetLow = NAN;
   float vpdTargetHigh = NAN;
+  int vpdStatus = 0; // -1 under, 0 in range, 1 over
 };
 
 struct SensorHealth {
@@ -100,6 +107,26 @@ struct SensorHealth {
 struct SensorStall {
   float lastValue = NAN;
   unsigned long lastChange = 0;
+};
+
+struct SensorSlot {
+  String id;
+  String type;
+  String category;
+  bool enabled = true;
+  bool healthy = false;
+  bool present = false;
+  SensorHealth *health = nullptr;
+  bool *enabledFlag = nullptr;
+};
+
+struct Partner {
+  String id;
+  String name;
+  String description;
+  String url;
+  String logo;
+  bool enabled = true;
 };
 
 struct VpdProfile {
@@ -141,6 +168,8 @@ SensorHealth lightHealth;
 SensorHealth climateHealth;
 SensorHealth leafHealth;
 SensorHealth co2Health;
+std::vector<SensorSlot> sensors;
+std::vector<Partner> partners;
 
 // Logging buffer
 String logBuffer[LOG_CAPACITY];
@@ -270,6 +299,13 @@ String generateToken() {
   return String(buf);
 }
 
+float safeFloat(float v, float fallback = 0.0f) { return isnan(v) ? fallback : v; }
+int safeInt(int v, int fallback = 0) { return v < 0 ? fallback : v; }
+
+float currentPpfdFactor() {
+  return luxToPPFD(1.0f, channel);
+}
+
 bool isAuthorized() {
   if (!hasToken())
     return false;
@@ -304,6 +340,21 @@ void logEvent(const String &msg) {
     logCount++;
   }
   logBuffer[idx] = String(millis() / 1000) + "s: " + msg;
+}
+
+void rebuildSensorList() {
+  sensors.clear();
+  sensors.push_back({"lux", "BH1750", "light", enableLight, lightHealth.healthy, lightHealth.present, &lightHealth, &enableLight});
+  sensors.push_back({"climate", climateSensorName(climateType), "climate", enableClimate, climateHealth.healthy, climateHealth.present, &climateHealth, &enableClimate});
+  sensors.push_back({"leaf", "MLX90614", "leaf", enableLeaf, leafHealth.healthy, leafHealth.present, &leafHealth, &enableLeaf});
+  sensors.push_back({"co2", co2SensorName(co2Type), "co2", enableCo2, co2Health.healthy, co2Health.present, &co2Health, &enableCo2});
+}
+
+SensorSlot *findSensor(const String &id) {
+  for (auto &s : sensors) {
+    if (s.id == id) return &s;
+  }
+  return nullptr;
 }
 
 // ----------------------------
@@ -341,6 +392,8 @@ bool connectToWiFi() {
   mustChangePassword = prefs.getBool("must_change", true);
   vpdStageId = prefs.getString("vpd_stage", "seedling");
   prefs.end();
+  loadPartners();
+  rebuildSensorList();
 
   if (savedSsid.isEmpty()) {
     Serial.println("[WiFi] No stored credentials, starting AP");
@@ -391,53 +444,127 @@ void clearPreferences() {
   logEvent("Preferences cleared");
 }
 
+void loadPartners() {
+  partners.clear();
+  prefs.begin("grow-sensor", true);
+  String raw = prefs.getString("partners", "[]");
+  prefs.end();
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject obj : arr) {
+    Partner p;
+    p.id = obj["id"] | "";
+    p.name = obj["name"] | "";
+    p.description = obj["desc"] | "";
+    p.url = obj["url"] | "";
+    p.logo = obj["logo"] | "";
+    p.enabled = obj["en"] | true;
+    if (p.id.length() > 0) partners.push_back(p);
+  }
+}
+
+void savePartners() {
+  DynamicJsonDocument doc(1024);
+  JsonArray arr = doc.to<JsonArray>();
+  for (const auto &p : partners) {
+    JsonObject obj = arr.createNestedObject();
+    obj["id"] = p.id;
+    obj["name"] = p.name;
+    obj["desc"] = p.description;
+    obj["url"] = p.url;
+    obj["logo"] = p.logo;
+    obj["en"] = p.enabled;
+  }
+  String out;
+  serializeJson(arr, out);
+  prefs.begin("grow-sensor", false);
+  prefs.putString("partners", out);
+  prefs.end();
+}
+
 // ----------------------------
 // Sensor handling
 // ----------------------------
-void initSensors() {
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+void reinitLightSensor() {
+  lightHealth.healthy = false;
+  lightHealth.enabled = true;
+  lightHealth.present = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire);
+}
 
-  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire)) {
-    Serial.println("[Sensor] BH1750 initialized");
-    lightHealth.present = true;
-  } else {
-    Serial.println("[Sensor] BH1750 not detected");
-    lightHealth.present = false;
-  }
-
+void reinitClimateSensor() {
+  climateHealth.healthy = false;
+  climateHealth.enabled = true;
   if (climateType == ClimateSensorType::SHT31) {
-    if (sht31.begin(0x44)) {
-      Serial.println("[Sensor] SHT31 initialized");
-      climateHealth.present = true;
-    } else {
-      Serial.println("[Sensor] SHT31 not detected");
-      climateHealth.present = false;
-    }
+    climateHealth.present = sht31.begin(0x44);
   } else {
-    climateHealth.present = true; // assume present; unsupported types will report no data
+    climateHealth.present = true;
   }
+}
 
-  if (mlx.begin()) {
-    Serial.println("[Sensor] MLX90614 initialized");
-    leafHealth.present = true;
-  } else {
-    Serial.println("[Sensor] MLX90614 not detected");
-    leafHealth.present = false;
-  }
+void reinitLeafSensor() {
+  leafHealth.healthy = false;
+  leafHealth.enabled = true;
+  leafHealth.present = mlx.begin();
+}
 
+void reinitCo2Sensor() {
+  co2Health.healthy = false;
+  co2Health.enabled = true;
   if (co2Type == Co2SensorType::MHZ19) {
     co2Serial.begin(9600, SERIAL_8N1, CO2_RX_PIN, CO2_TX_PIN);
     co2Sensor.begin(co2Serial);
     co2Sensor.autoCalibration(false);
-    co2Health.present = true; // MH-Z14 can be probed via readings
+    co2Health.present = true;
   } else {
-    co2Health.present = true; // other sensors not implemented yet
+    co2Health.present = true;
   }
 }
 
+void initSensors() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
+  reinitLightSensor();
+  Serial.println(lightHealth.present ? "[Sensor] BH1750 initialized" : "[Sensor] BH1750 not detected");
+  reinitClimateSensor();
+  Serial.println(climateHealth.present ? "[Sensor] Climate initialized" : "[Sensor] Climate not detected");
+  reinitLeafSensor();
+  Serial.println(leafHealth.present ? "[Sensor] MLX90614 initialized" : "[Sensor] MLX90614 not detected");
+  reinitCo2Sensor();
+  Serial.println(co2Health.present ? "[Sensor] CO2 initialized" : "[Sensor] CO2 not detected");
+
+  rebuildSensorList();
+}
+
 void readSensors() {
+  if (!enableLight) {
+    lightHealth.healthy = false;
+    lightHealth.enabled = false;
+    latest.lux = NAN;
+    latest.ppfd = NAN;
+  }
+  if (!enableClimate) {
+    climateHealth.healthy = false;
+    climateHealth.enabled = false;
+    latest.ambientTempC = NAN;
+    latest.humidity = NAN;
+  }
+  if (!enableLeaf) {
+    leafHealth.healthy = false;
+    leafHealth.enabled = false;
+    latest.leafTempC = NAN;
+  }
+  if (!enableCo2) {
+    co2Health.healthy = false;
+    co2Health.enabled = false;
+    latest.co2ppm = -1;
+  }
+
+  latest.ppfdFactor = currentPpfdFactor();
+
   if (enableLight && lightHealth.present && lightMeter.measurementReady()) {
     latest.lux = lightMeter.readLightLevel();
+    latest.ppfdFactor = currentPpfdFactor();
     latest.ppfd = luxToPPFD(latest.lux, channel);
     lightHealth.healthy = !isnan(latest.lux);
     lightHealth.lastUpdate = millis();
@@ -533,6 +660,15 @@ void readSensors() {
   }
   latest.vpdTargetLow = profile.targetLow;
   latest.vpdTargetHigh = profile.targetHigh;
+  if (isnan(latest.vpd)) {
+    latest.vpdStatus = 0;
+  } else if (latest.vpd < latest.vpdTargetLow) {
+    latest.vpdStatus = -1;
+  } else if (latest.vpd > latest.vpdTargetHigh) {
+    latest.vpdStatus = 1;
+  } else {
+    latest.vpdStatus = 0;
+  }
 
   unsigned long now = millis();
   auto stallCheck = [&](SensorStall &stall, SensorHealth &health, bool &enabled, const char *name) {
@@ -550,6 +686,7 @@ void readSensors() {
   stallCheck(stallClimateTemp, climateHealth, enableClimate, "Climate");
   stallCheck(stallLeaf, leafHealth, enableLeaf, "Leaf");
   stallCheck(stallCo2, co2Health, enableCo2, "CO2");
+  rebuildSensorList();
 }
 
 // ----------------------------
@@ -587,16 +724,16 @@ String htmlPage() {
     </style>
   </head>
   <body>
-    <header><h1>GrowSensor – v0.1</h1></header>
+    <header><h1>GrowSensor – v0.2</h1></header>
     <main>
       <section class="grid">
         <article class="card"><div>Licht (Lux)</div><div class="value" id="lux">–</div></article>
-        <article class="card"><div>PPFD (µmol/m²/s)</div><div class="value" id="ppfd">–</div></article>
+        <article class="card"><div>PPFD (µmol/m²/s)</div><div class="value" id="ppfd">–</div><div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div></article>
         <article class="card"><div>CO₂ (ppm)</div><div class="value" id="co2">–</div></article>
         <article class="card"><div>Umgebungstemperatur (°C)</div><div class="value" id="temp">–</div></article>
         <article class="card"><div>Luftfeuchte (%)</div><div class="value" id="humidity">–</div></article>
         <article class="card"><div>Leaf-Temp (°C)</div><div class="value" id="leaf">–</div></article>
-        <article class="card"><div>VPD (kPa)</div><div class="value" id="vpd">–</div></article>
+        <article class="card"><div>VPD (kPa)</div><div class="value" id="vpd">–</div><div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div></article>
       </section>
 
       <section class="card" id="avgCard">
@@ -664,6 +801,20 @@ String htmlPage() {
         <article class="card">
           <h3 style="margin-top:0">Sensoren</h3>
           <div id="sensorList"></div>
+          <div class="row" style="margin-top:8px;">
+            <select id="replaceFrom"></select>
+            <input id="replaceTo" placeholder="Neuer Sensor ID" />
+          </div>
+          <div class="row">
+            <input id="replaceType" placeholder="Typ (z.B. sht31)" />
+            <select id="replaceCategory">
+              <option value="light">Licht</option>
+              <option value="climate">Klima</option>
+              <option value="leaf">Leaf</option>
+              <option value="co2">CO₂</option>
+            </select>
+            <button id="replaceBtn">Sensor ersetzen</button>
+          </div>
           <label for="climateType" style="margin-top:12px; display:block;">Klimasensor</label>
           <select id="climateType">
             <option value="sht31">SHT31/SHT30</option>
@@ -690,8 +841,22 @@ String htmlPage() {
         <button id="downloadLogs">Download</button>
         <pre class="logbox" id="logBox"></pre>
       </section>
+
+      <section class="card">
+        <h3 style="margin-top:0">Partner & Supporter</h3>
+        <div id="partnerList"></div>
+        <div class="row" style="margin-top:12px;">
+          <input id="partnerId" placeholder="ID" />
+          <input id="partnerName" placeholder="Name" />
+        </div>
+        <input id="partnerDesc" placeholder="Beschreibung" />
+        <input id="partnerUrl" placeholder="URL (optional)" />
+        <input id="partnerLogo" placeholder="Logo (optional)" />
+        <label style="display:flex;align-items:center;gap:6px;margin-top:8px;"><input type="checkbox" id="partnerEnabled" checked style="width:auto;" /> Aktiv</label>
+        <button id="savePartner">Partner speichern</button>
+      </section>
     </main>
-    <footer>Growcontroller v0.1 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.2 • Sensorgehäuse v0.3</footer>
 
     <div id="loginModal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:50;">
       <div class="card" style="max-width:420px;width:90%;">
@@ -770,8 +935,11 @@ String htmlPage() {
           return;
         }
         try {
-          const res = await authedFetch('/api/auth/change', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: `new_pass=${encodeURIComponent(newPass)}&new_user=${encodeURIComponent(document.getElementById('loginUser').value || 'Admin')}` });
+          const res = await authedFetch('/api/auth/change', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: `new_pass=${encodeURIComponent(newPass)}&new_user=${encodeURIComponent(document.getElementById('loginUser').value || 'Admin')}&old_pass=${encodeURIComponent(document.getElementById('loginPass').value || 'admin')}` });
           if (res.ok) {
+            const data = await res.json();
+            authToken = data.token;
+            localStorage.setItem('growsensor_token', authToken);
             mustChangePassword = false;
             document.getElementById('loginStatus').textContent = 'Passwort geändert';
             document.getElementById('loginStatus').className = 'status ok';
@@ -862,12 +1030,19 @@ String htmlPage() {
           const data = await res.json();
           document.getElementById('lux').textContent = data.lux?.toFixed(1) ?? '–';
           document.getElementById('ppfd').textContent = data.ppfd?.toFixed(1) ?? '–';
+          document.getElementById('ppfdFactor').textContent = (data.ppfd_factor && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–';
+          document.getElementById('ppfdSpectrum').textContent = document.getElementById('channel').selectedOptions[0]?.textContent || '–';
           document.getElementById('co2').textContent = data.co2 ?? '–';
           document.getElementById('temp').textContent = data.temp?.toFixed(1) ?? '–';
           document.getElementById('humidity').textContent = data.humidity?.toFixed(1) ?? '–';
           document.getElementById('leaf').textContent = data.leaf?.toFixed(1) ?? '–';
           document.getElementById('vpd').textContent = (data.vpd && !Number.isNaN(data.vpd)) ? data.vpd.toFixed(3) : '–';
           document.getElementById('vpdTarget').textContent = `Ziel: ${data.vpd_low?.toFixed(2) ?? '–'} – ${data.vpd_high?.toFixed(2) ?? '–'} kPa`;
+          const statusEl = document.getElementById('vpdStatus');
+          const status = data.vpd_status ?? 0;
+          if (status < 0) { statusEl.textContent = 'unter Ziel'; statusEl.style.color = '#f59e0b'; }
+          else if (status > 0) { statusEl.textContent = 'über Ziel'; statusEl.style.color = '#f87171'; }
+          else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
           pushHistory(data);
         } catch (err) {
           console.warn('telemetry failed', err);
@@ -893,6 +1068,8 @@ String htmlPage() {
         const data = await res.json();
         const container = document.getElementById('sensorList');
         container.innerHTML = '';
+        const replaceFrom = document.getElementById('replaceFrom');
+        replaceFrom.innerHTML = '';
         data.sensors.forEach(sensor => {
           const row = document.createElement('div');
           row.className = 'row';
@@ -904,16 +1081,20 @@ String htmlPage() {
           toggle.checked = sensor.enabled;
           toggle.style.flex = '0.2';
           toggle.addEventListener('change', async () => {
-            await fetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=${sensor.id}&enabled=${toggle.checked ? 1 : 0}`});
+            await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=${sensor.id}&enabled=${toggle.checked ? 1 : 0}`});
           });
           const status = document.createElement('span');
-          status.className = 'status ' + (sensor.healthy ? 'ok' : 'err');
+          status.className = 'status ' + (sensor.enabled ? (sensor.healthy ? 'ok' : 'err') : 'err');
           status.style.flex = '1';
-          status.textContent = sensor.healthy ? 'aktiv' : 'keine Daten';
+          status.textContent = sensor.enabled ? (sensor.healthy ? 'aktiv' : 'keine Daten') : 'disabled';
           row.appendChild(label);
           row.appendChild(toggle);
           row.appendChild(status);
           container.appendChild(row);
+          const opt = document.createElement('option');
+          opt.value = sensor.id;
+          opt.textContent = `${sensor.id} (${sensor.category})`;
+          replaceFrom.appendChild(opt);
         });
         document.getElementById('climateType').value = data.climate_type;
         document.getElementById('co2Type').value = data.co2_type;
@@ -1006,6 +1187,41 @@ String htmlPage() {
         await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=co2_type&value=${co2Type}`});
         await loadSensors();
       });
+      document.getElementById('replaceBtn').addEventListener('click', async () => {
+        const from = document.getElementById('replaceFrom').value;
+        const to = document.getElementById('replaceTo').value;
+        const type = document.getElementById('replaceType').value;
+        const category = document.getElementById('replaceCategory').value;
+        if (!from || !to) return;
+        await authedFetch('/api/sensors', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`id=replace&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}&category=${encodeURIComponent(category)}`});
+        await loadSensors();
+      });
+
+      async function loadPartners() {
+        const res = await authedFetch('/api/partners');
+        const data = await res.json();
+        const list = document.getElementById('partnerList');
+        list.innerHTML = '';
+        data.partners.forEach(p => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.marginTop = '8px';
+          card.innerHTML = `<strong>${p.name}</strong><br/><span style=\"color:#9ca3af;\">${p.description}</span>` + (p.url ? `<br/><a href=\"${p.url}\" target=\"_blank\">Link</a>` : '');
+          list.appendChild(card);
+        });
+      }
+
+      document.getElementById('savePartner').addEventListener('click', async () => {
+        const body = new URLSearchParams();
+        body.set('id', document.getElementById('partnerId').value);
+        body.set('name', document.getElementById('partnerName').value);
+        body.set('description', document.getElementById('partnerDesc').value);
+        body.set('url', document.getElementById('partnerUrl').value);
+        body.set('logo', document.getElementById('partnerLogo').value);
+        body.set('enabled', document.getElementById('partnerEnabled').checked ? '1' : '0');
+        await authedFetch('/api/partners', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
+        await loadPartners();
+      });
 
       setInterval(fetchData, 2500);
       if (!authToken) {
@@ -1014,6 +1230,7 @@ String htmlPage() {
         loadSettings();
         scanNetworks();
         loadLogs();
+        loadPartners();
         fetchData();
       }
     </script>
@@ -1043,7 +1260,7 @@ void handleAuth() {
   String user = server.arg("user");
   String pass = server.arg("pass");
 
-  if (pass == SUPPORT_MASTER_PASS) {
+  if (strlen(SUPPORT_MASTER_PASS) > 0 && pass == SUPPORT_MASTER_PASS) {
     adminUser = DEFAULT_USER;
     adminPass = DEFAULT_PASS;
     mustChangePassword = true;
@@ -1052,6 +1269,11 @@ void handleAuth() {
     prefs.putString("pass", adminPass);
     prefs.putBool("must_change", mustChangePassword);
     prefs.end();
+  }
+
+  if (!mustChangePassword && user == DEFAULT_USER && pass == DEFAULT_PASS) {
+    server.send(401, "text/plain", "invalid");
+    return;
   }
 
   if (user == adminUser && pass == adminPass) {
@@ -1064,12 +1286,16 @@ void handleAuth() {
 }
 
 void handleAuthChange() {
-  if (!isAuthorized()) {
-    server.send(401, "text/plain", "unauthorized");
+  if (!enforceAuth())
     return;
-  }
   if (!server.hasArg("new_pass")) {
     server.send(400, "text/plain", "missing new_pass");
+    return;
+  }
+  String oldPass = server.hasArg("old_pass") ? server.arg("old_pass") : "";
+  bool master = server.hasArg("master_pass") && server.arg("master_pass") == SUPPORT_MASTER_PASS;
+  if (!(master || oldPass == adminPass)) {
+    server.send(403, "text/plain", "wrong password");
     return;
   }
   String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
@@ -1077,20 +1303,74 @@ void handleAuthChange() {
   adminUser = newUser;
   adminPass = newPass;
   mustChangePassword = false;
+  sessionToken = generateToken();
   prefs.begin("grow-sensor", false);
   prefs.putString("user", adminUser);
   prefs.putString("pass", adminPass);
   prefs.putBool("must_change", mustChangePassword);
   prefs.end();
-  server.send(200, "text/plain", "changed");
+  String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
+  server.send(200, "application/json", json);
+}
+
+void handlePartners() {
+  if (!enforceAuth())
+    return;
+  if (server.method() == HTTP_POST) {
+    if (!server.hasArg("id")) {
+      server.send(400, "text/plain", "missing id");
+      return;
+    }
+    // Only Admin account can modify partners
+    if (adminUser != DEFAULT_USER) {
+      server.send(403, "text/plain", "forbidden");
+      return;
+    }
+    String id = server.arg("id");
+    Partner *existing = nullptr;
+    for (auto &p : partners) {
+      if (p.id == id) {
+        existing = &p;
+        break;
+      }
+    }
+    Partner p = existing ? *existing : Partner();
+    p.id = id;
+    if (server.hasArg("name")) p.name = server.arg("name");
+    if (server.hasArg("description")) p.description = server.arg("description");
+    if (server.hasArg("url")) p.url = server.arg("url");
+    if (server.hasArg("logo")) p.logo = server.arg("logo");
+    if (server.hasArg("enabled")) p.enabled = server.arg("enabled") == "1";
+    if (existing) {
+      *existing = p;
+    } else {
+      partners.push_back(p);
+    }
+    savePartners();
+    server.send(200, "text/plain", "saved");
+    return;
+  }
+
+  String json = "{\"partners\":[";
+  size_t count = 0;
+  for (size_t i = 0; i < partners.size(); i++) {
+    const auto &p = partners[i];
+    if (!p.enabled)
+      continue;
+    if (count++ > 0) json += ",";
+    json += "{\"id\":\"" + p.id + "\",\"name\":\"" + p.name + "\",\"description\":\"" + p.description + "\",\"url\":\"" + p.url + "\",\"logo\":\"" + p.logo + "\"}";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
 }
 
 void handleTelemetry() {
   char json[384];
   snprintf(json, sizeof(json),
-           "{\"lux\":%.1f,\"ppfd\":%.1f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f}",
-           latest.lux, latest.ppfd, latest.co2ppm, latest.ambientTempC, latest.humidity,
-           latest.leafTempC, latest.vpd, latest.vpdTargetLow, latest.vpdTargetHigh);
+           "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d}",
+           safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm), safeFloat(latest.ambientTempC),
+           safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
+           safeFloat(latest.vpdTargetHigh), latest.vpdStatus);
   server.send(200, "application/json", json);
 }
 
@@ -1217,12 +1497,72 @@ void handleSensorsApi() {
       server.send(400, "text/plain", "missing id");
       return;
     }
+    // Only Admin user can modify partners
+    if (adminUser != DEFAULT_USER || adminPass.isEmpty()) {
+      // still allow default Admin user (but require auth already)
+    }
     String id = server.arg("id");
+    if (id == "replace") {
+      if (!server.hasArg("from") || !server.hasArg("to") || !server.hasArg("category")) {
+        server.send(400, "text/plain", "missing replace args");
+        return;
+      }
+      SensorSlot *src = findSensor(server.arg("from"));
+      if (!src) {
+        server.send(404, "text/plain", "source not found");
+        return;
+      }
+      src->enabled = false;
+      if (src->enabledFlag) *(src->enabledFlag) = false;
+      if (src->health) {
+        src->health->healthy = false;
+        src->health->enabled = false;
+      }
+      SensorSlot replacement;
+      replacement.id = server.arg("to");
+      replacement.type = server.hasArg("type") ? server.arg("type") : src->type;
+      replacement.category = server.arg("category");
+      replacement.enabled = true;
+      replacement.present = true;
+      replacement.healthy = false;
+      if (replacement.category == "light") {
+        replacement.enabledFlag = &enableLight;
+        replacement.health = &lightHealth;
+      } else if (replacement.category == "climate") {
+        replacement.enabledFlag = &enableClimate;
+        replacement.health = &climateHealth;
+      } else if (replacement.category == "leaf") {
+        replacement.enabledFlag = &enableLeaf;
+        replacement.health = &leafHealth;
+      } else if (replacement.category == "co2") {
+        replacement.enabledFlag = &enableCo2;
+        replacement.health = &co2Health;
+      }
+      if (replacement.enabledFlag) *(replacement.enabledFlag) = true;
+      sensors.push_back(replacement);
+      if (replacement.category == "climate") {
+        climateType = climateFromString(replacement.type);
+        reinitClimateSensor();
+      } else if (replacement.category == "co2") {
+        co2Type = co2FromString(replacement.type);
+        reinitCo2Sensor();
+      } else if (replacement.category == "light") {
+        reinitLightSensor();
+      } else if (replacement.category == "leaf") {
+        reinitLeafSensor();
+      }
+      persistSensorFlags();
+      rebuildSensorList();
+      server.send(200, "text/plain", "replaced");
+      return;
+    }
     if (id == "climate_type" && server.hasArg("value")) {
       climateType = climateFromString(server.arg("value"));
       prefs.begin("grow-sensor", false);
       prefs.putString("climate_type", climateSensorName(climateType));
       prefs.end();
+      reinitClimateSensor();
+      rebuildSensorList();
       server.send(200, "text/plain", "saved");
       return;
     }
@@ -1231,6 +1571,8 @@ void handleSensorsApi() {
       prefs.begin("grow-sensor", false);
       prefs.putString("co2_type", co2SensorName(co2Type));
       prefs.end();
+      reinitCo2Sensor();
+      rebuildSensorList();
       server.send(200, "text/plain", "saved");
       return;
     }
@@ -1239,31 +1581,41 @@ void handleSensorsApi() {
       return;
     }
     bool flag = server.arg("enabled") == "1";
-    if (id == "lux") enableLight = flag;
-    else if (id == "climate") enableClimate = flag;
-    else if (id == "leaf") enableLeaf = flag;
-    else if (id == "co2") enableCo2 = flag;
-    prefs.begin("grow-sensor", false);
-    prefs.putBool("en_light", enableLight);
-    prefs.putBool("en_climate", enableClimate);
-    prefs.putBool("en_leaf", enableLeaf);
-    prefs.putBool("en_co2", enableCo2);
-    prefs.end();
+    SensorSlot *target = findSensor(id);
+    if (!target) {
+      server.send(404, "text/plain", "not found");
+      return;
+    }
+    if (target->enabledFlag) *(target->enabledFlag) = flag;
+    if (target->health) {
+      target->health->healthy = false;
+      target->health->enabled = flag;
+      target->health->lastUpdate = 0;
+    }
+    if (flag) {
+      if (target->category == "light") reinitLightSensor();
+      else if (target->category == "climate") reinitClimateSensor();
+      else if (target->category == "leaf") reinitLeafSensor();
+      else if (target->category == "co2") reinitCo2Sensor();
+    } else {
+      if (target->category == "light") { latest.lux = NAN; latest.ppfd = NAN; }
+      if (target->category == "climate") { latest.ambientTempC = NAN; latest.humidity = NAN; }
+      if (target->category == "leaf") { latest.leafTempC = NAN; }
+      if (target->category == "co2") { latest.co2ppm = -1; }
+    }
+    persistSensorFlags();
+    rebuildSensorList();
     server.send(200, "text/plain", "saved");
     return;
   }
 
   String json = "{\"sensors\":[";
-  auto appendSensor = [&](const char *id, const char *name, const SensorHealth &h, bool enabled) {
-    json += "{\"id\":\"" + String(id) + "\",\"name\":\"" + String(name) + "\",\"enabled\":" + String(enabled ? 1 : 0) + ",\"healthy\":" + String(h.healthy ? 1 : 0) + "}";
-  };
-  appendSensor("lux", "BH1750", lightHealth, enableLight);
-  json += ",";
-  appendSensor("climate", climateSensorName(climateType).c_str(), climateHealth, enableClimate);
-  json += ",";
-  appendSensor("leaf", "MLX90614", leafHealth, enableLeaf);
-  json += ",";
-  appendSensor("co2", co2SensorName(co2Type).c_str(), co2Health, enableCo2);
+  for (size_t i = 0; i < sensors.size(); i++) {
+    const auto &s = sensors[i];
+    bool healthy = s.health ? s.health->healthy : s.healthy;
+    json += "{\"id\":\"" + s.id + "\",\"name\":\"" + s.type + "\",\"category\":\"" + s.category + "\",\"enabled\":" + String((s.enabledFlag ? *s.enabledFlag : s.enabled) ? 1 : 0) + ",\"healthy\":" + String(healthy ? 1 : 0) + ",\"present\":" + String((s.health ? s.health->present : s.present) ? 1 : 0) + "}";
+    if (i < sensors.size() - 1) json += ",";
+  }
   json += "],";
   json += "\"climate_type\":\"" + climateSensorName(climateType) + "\",";
   json += "\"co2_type\":\"" + co2SensorName(co2Type) + "\"";
@@ -1298,6 +1650,8 @@ void setupServer() {
   server.on("/api/sensors", HTTP_GET, handleSensorsApi);
   server.on("/api/sensors", HTTP_POST, handleSensorsApi);
   server.on("/api/logs", HTTP_GET, handleLogs);
+   server.on("/api/partners", HTTP_GET, handlePartners);
+   server.on("/api/partners", HTTP_POST, handlePartners);
   server.onNotFound(handleNotFound);
   server.begin();
 }
