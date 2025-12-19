@@ -41,9 +41,7 @@ static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4
 // Auth
 static const char *DEFAULT_USER = "Admin";
 static const char *DEFAULT_PASS = "admin";
-#ifndef SUPPORT_MASTER_PASS
-#define SUPPORT_MASTER_PASS ""
-#endif
+static const char *SUPPORT_MASTER_PASS = "";
 
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
