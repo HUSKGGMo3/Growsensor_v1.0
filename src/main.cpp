@@ -1330,47 +1330,51 @@ void handleAuth() {
     server.send(401, "text/plain", "invalid");
   }
 }
-
 void handleAuthChange() {
   if (!enforceAuth()) {
     return;
-  if (!mustChangePassword) {
-    server.send(403, "text/plain", "password change not required");
-    return;
   }
+
   if (!server.hasArg("new_pass")) {
     server.send(400, "text/plain", "missing new_pass");
-  if (!server.hasArg("new_pass")) {
-    server.send(400, "text/plain", "missing new_pass");
-    return;
-  }
-  String oldPass = server.hasArg("old_pass") ? server.arg("old_pass") : "";
-  bool master = server.hasArg("master_pass") && server.arg("master_pass") == SUPPORT_MASTER_PASS;
-  bool firstChangeAllowed = mustChangePassword && oldPass == adminPass;
-  if (!firstChangeAllowed && !master) {
-    if (!enforceAuth())
-      return;
-  }
-  if (!(master || oldPass == adminPass)) {
-    server.send(403, "text/plain", "wrong password");
     return;
   }
 
-  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newUser = server.hasArg("new_user")
+                     ? server.arg("new_user")
+                     : adminUser;
   String newPass = server.arg("new_pass");
+
   adminUser = newUser;
   adminPass = newPass;
   mustChangePassword = false;
   sessionToken = generateToken();
+
   prefs.begin("grow-sensor", false);
   prefs.putString("user", adminUser);
   prefs.putString("pass", adminPass);
-  prefs.putBool("must_change", mustChangePassword);
+  prefs.putBool("must_change", false);
   prefs.end();
 
-  String json = "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
+  String json =
+      "{\"token\":\"" + sessionToken + "\",\"mustChange\":0}";
   server.send(200, "application/json", json);
 }
+  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newPass = server.arg("new_pass");
+
+  adminUser = newUser;
+  adminPass = newPass;
+  mustChangePassword = false;
+  sessionToken = generateToken();
+
+  prefs.begin("grow-sensor", false);
+  prefs.putString("user", adminUser);
+  prefs.putString("pass", adminPass);
+  prefs.putBool("must_change", false);
+  prefs.end();
+}
+// end handleAuthChange
 
 void handlePartners() {
   if (!enforceAuth())
