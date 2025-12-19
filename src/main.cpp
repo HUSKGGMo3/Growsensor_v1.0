@@ -1341,19 +1341,7 @@ void handleAuthChange() {
     return;
   }
 
-  String oldPass = server.hasArg("old_pass") ? server.arg("old_pass") : "";
-  bool master =
-      strlen(SUPPORT_MASTER_PASS) > 0 &&
-      server.hasArg("master_pass") &&
-      server.arg("master_pass") == SUPPORT_MASTER_PASS;
-
-  if (!(master || oldPass == adminPass)) {
-    server.send(403, "text/plain", "wrong password");
-    return;
-  }
-
-  String newUser =
-      server.hasArg("new_user") ? server.arg("new_user") : adminUser;
+  String newUser = server.hasArg("new_user") ? server.arg("new_user") : adminUser;
   String newPass = server.arg("new_pass");
 
   adminUser = newUser;
