@@ -2,6 +2,9 @@
 
 **Aktuelle Version: v0.2.6 (ungetestet / Community-Preview)**
 
+### Hotfix v0.2.6
+- Build-Fehler durch mehrdeutigen `String(float, decimals)`-Konstruktor behoben; Dezimalstellen jetzt korrekt typisiert/gecastet.
+
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
 ## Was dieses Projekt ist / nicht ist

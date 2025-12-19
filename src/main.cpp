@@ -2831,7 +2831,7 @@ void handleHistory() {
     if (isnan(v)) {
       json += "null";
     } else {
-      json += String(v, def->decimals);
+      json += String((double)v, (unsigned int)def->decimals);
     }
     json += "]";
   };
