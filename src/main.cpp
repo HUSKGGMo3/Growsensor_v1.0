@@ -415,8 +415,15 @@ void readSensors() {
   }
 
   // Compute VPD when data is valid and IR sensor is not drifting excessively
-  bool leafFresh = leafHealth.lastUpdate != 0 && (millis() - leafHealth.lastUpdate) < LEAF_STALE_MS;
-  bool leafAligned = !isnan(latest.leafTempC) && !isnan(latest.ambientTempC) && fabs(latest.leafTempC - latest.ambientTempC) <= LEAF_DIFF_THRESHOLD;
+  float leafForVpd = latest.leafTempC;
+  if (!leafHealth.healthy && !isnan(latest.ambientTempC)) {
+    // Fallback: approximate leaf temp as ambient -2°C if IR sensor failed
+    leafForVpd = latest.ambientTempC - 2.0f;
+    latest.leafTempC = leafForVpd;
+  }
+
+  bool leafFresh = leafHealth.healthy || (!isnan(leafForVpd) && !isnan(latest.ambientTempC));
+  bool leafAligned = !isnan(leafForVpd) && !isnan(latest.ambientTempC) && fabs(leafForVpd - latest.ambientTempC) <= LEAF_DIFF_THRESHOLD;
   if (leafFresh && leafAligned && !isnan(latest.humidity) && !isnan(latest.ambientTempC)) {
     float satVP = 0.6108f * expf((17.27f * latest.ambientTempC) / (latest.ambientTempC + 237.3f)); // kPa
     latest.vpd = (1.0f - (latest.humidity / 100.0f)) * satVP;
