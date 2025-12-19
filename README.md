@@ -9,6 +9,18 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provid
 - Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
 - No actuator control yet: no relays or automation are driven by this firmware.
 
+=======
+
+# ESP32 Grow Sensor / Monitoring Node
+
+**Current release: v0.2.0 (untested / community preview)**
+
+Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provides sensor telemetry, PPFD/VPD insights, Wi-Fi setup, and a partner/supporter module. No actuator control is implemented yet.
+
+## What this project is / is not
+- Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
+- No actuator control yet: no relays or automation are driven by this firmware.
+
 ## Features (as of v0.2.0)
 - Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
 - VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
@@ -24,6 +36,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provid
 ## What this project is / is not
 - Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
 - No actuator control yet: no relays or automation are driven by this firmware.
+
 
 ## Features (as of v0.2.0)
 - Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
@@ -57,6 +70,15 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. Provid
 ## Stability notice
 - v0.2.0 is untested and provided as a community preview. Use at your own risk.
 
+## ESPHome option
+- Du kannst den ESP32 auch mit ESPHome flashen, um die Sensoren direkt in ESPHome zu nutzen. Lies dazu die ESPHome-Dokumentation und hinterlege die Sensoren korrekt in deiner ESPHome-Konfiguration.
+
+## License
+- Non-commercial open source license (see `LICENSE`). You may view, use, and modify the code and contribute via pull requests.
+- Commercial use (including selling devices or services, or paid products) requires explicit permission.
+- Contributions are welcome; modified versions must keep the same license and attribution.
+- Deutsche Version: siehe `README.de.md` für eine vollständige Zusammenfassung auf Deutsch.
+=======
 ## License
 - Non-commercial open source license (see `LICENSE`). You may view, use, and modify the code and contribute via pull requests.
 - Commercial use (including selling devices or services, or paid products) requires explicit permission.
