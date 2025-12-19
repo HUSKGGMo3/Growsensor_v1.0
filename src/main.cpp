@@ -375,6 +375,7 @@ void rebuildSensorList() {
     s.enabledFlag = &flag;
     sensors.push_back(s);
   };
+
   addSensor("lux", "BH1750", "light", enableLight, lightHealth, enableLight);
   addSensor("climate", climateSensorName(climateType), "climate", enableClimate, climateHealth, enableClimate);
   addSensor("leaf", "MLX90614", "leaf", enableLeaf, leafHealth, enableLeaf);
