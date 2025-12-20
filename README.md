@@ -1,13 +1,13 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.3 (experimental / untested)**
+**Current release: v0.3.3 (Stability Restoration)**
 
-### Patch v0.3.3 (experimental, Cloud archive-only + cloud-gated long charts)
-- Cloud UI now exposes connected/enabled/recording states, last upload/error timestamps, and wraps credentials in an accordion that auto-collapses when connected + stored. Optional “Login-Daten dauerhaft speichern” keeps base URL/user/app password across reboots; “Forget credentials” clears only cloud keys.
-- WebDAV base URL must end with a slash (`http://host/remote.php/dav/files/<user>/`). Uploads land in `/GrowSensor/<deviceId>/daily/YYYY-MM/YYYY-MM-DD.json` plus `/GrowSensor/<deviceId>/meta/TestCloud_<timestamp>.txt` for the test upload.
-- Cloud usage is archive-only: live/1h/6h/24h buffers stay local in RAM, no cloud logs/samples are uploaded, and daily aggregates upload once per day (only while recording is active).
-- Long-range charts (1–4 months) are cloud-gated in both UI and API; `/api/cloud/daily` pulls daily aggregates from the WebDAV archive and avoids live polling when cloud is offline.
-- HTTP-only builds disable TLS to save flash; Nextcloud WebDAV uses plain `http://` URLs in trusted LANs. Low-flash builds may disable mDNS (use the device IP).
+### Patch v0.3.3 (Stability Restoration)
+- Sensor system restored: BH1750, climate (SHT), CO₂ (MH-Z19/MH-Z14), VPD calculation, and telemetry status fields behave like pre-refactor.
+- Cloud stabilized: archive stays available but no longer blocks WebUI or range requests; failures populate `cloudStatus.lastError` without spamming.
+- Refactor fixes: core helpers restored and API ranges no longer depend on cloud HEAD probes.
+- Reports repaired: `dayKeysBetween()` restored to deterministic date ranges; report generation uses the repaired day list.
+- Acceptance checklist: firmware builds, WebUI stays responsive, live tiles + charts update, cloud upload stable, no reset loops or timeout spam.
 
 ### Patch v0.3.2 (experimental, Cloud Primary mode)
 - Storage modes (`LOCAL_ONLY`, `CLOUD_PRIMARY`, `LOCAL_FALLBACK`) gate persistence: when the cloud is online the ESP keeps only RAM ring buffers (live/6h/24h) and blocks local history writes, while 15-minute checkpoints upload the active day and daily rollovers queue JSON for the cloud.

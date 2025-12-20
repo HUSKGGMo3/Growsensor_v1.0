@@ -1,13 +1,13 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.3.3 (experimentell / ungetestet)**
+**Aktuelle Version: v0.3.3 (Stability Restoration)**
 
-### Patch v0.3.3 (experimentell, Cloud-Archiv + Long-Range-Cloud-Gating)
-- Cloud-UI zeigt Connected/Enabled/Recording, letzte Uploads/Errors und nutzt ein Credentials-Accordion, das bei „connected + gespeichert“ automatisch einklappt. Optionales „Login-Daten dauerhaft speichern“ hält Base-URL/User/App-Passwort über Reboots; „Forget credentials“ löscht nur Cloud-Keys.
-- WebDAV-Base-URL muss mit Slash enden (`http://host/remote.php/dav/files/<user>/`). Uploads landen in `/GrowSensor/<deviceId>/daily/YYYY-MM/YYYY-MM-DD.json` plus `/GrowSensor/<deviceId>/meta/TestCloud_<timestamp>.txt` für den Test-Upload.
-- Cloud ist nur Archiv: Live/1h/6h/24h bleiben lokal im RAM, keine Cloud-Logs/Samples, und Tages-Aggregate werden max. einmal pro Tag hochgeladen (nur bei aktivem Recording).
-- Long-Range-Charts (1–4 Monate) sind in UI und API hart an Cloud gebunden; `/api/cloud/daily` holt Daily-Aggregates aus dem WebDAV-Archiv, ohne Live-Polling bei Offline-Cloud.
-- HTTP-only Build deaktiviert TLS zum Flash-Sparen; Nextcloud-WebDAV nutzt `http://` im vertrauenswürdigen LAN. Low-Flash-Builds können mDNS deaktivieren (nutze die IP).
+### Patch v0.3.3 (Stability Restoration)
+- Sensor-System wiederhergestellt: BH1750, Klima (SHT), CO₂ (MH-Z19/MH-Z14), VPD-Berechnung und Telemetrie-Status wie vor dem Refactor.
+- Cloud stabilisiert: Archiv bleibt verfügbar, blockiert aber keine WebUI/Range-Requests; Fehler landen in `cloudStatus.lastError` ohne Log-Spam.
+- Refactor-Fixes: zentrale Helper wiederhergestellt, API-Ranges hängen nicht mehr von Cloud-HEAD-Checks ab.
+- Reports repariert: `dayKeysBetween()` liefert wieder deterministische Tageslisten; Report-Generierung nutzt die reparierte Range.
+- Akzeptanztest: Firmware kompiliert, WebUI bleibt schnell, Tiles/Charts live, Cloud-Upload stabil, keine Reset-Loops oder Timeout-Spam.
 
 ### Patch v0.3.2 (experimentell, Cloud Primary)
 - Speicher-Modi (`LOCAL_ONLY`, `CLOUD_PRIMARY`, `LOCAL_FALLBACK`) steuern die Persistenz: Ist die Cloud online, hält der ESP nur RAM-Ringpuffer (Live/6h/24h) vor und blockiert lokale History-Schreibzugriffe; 15-Minuten-Checkpoints sowie Tageswechsel laden die aktuellen JSONs in die Cloud.

@@ -3025,22 +3025,16 @@ String formatDayKey(time_t ts) {
 
 std::vector<String> dayKeysBetween(const String &from, const String &to) {
   std::vector<String> keys;
-  if (!isTimeSynced()) return keys;
   time_t start = parseDayKey(from);
   time_t end = parseDayKey(to);
   if (start == 0 || end == 0 || start > end) return keys;
   const time_t daySec = 24 * 60 * 60;
+  int totalDays = (int)((end - start) / daySec) + 1;
+  if (totalDays > 0) keys.reserve(totalDays);
   for (time_t t = start; t <= end; t += daySec) {
     String key = formatDayKey(t);
     if (key.length() == 0) continue;
-    String path = cloudDailyPath(key);
-    if (path.length() == 0) continue;
-    int code = 0;
-    String url = buildWebDavUrl(path);
-    if (!webdavRequest("HEAD", url, "", nullptr, code, nullptr, CLOUD_TEST_TIMEOUT_MS)) continue;
-    if (code >= 200 && code < 300) {
-      keys.push_back(key);
-    }
+    keys.push_back(key);
   }
   return keys;
 }
@@ -3135,6 +3129,10 @@ void handleCloudDaily() {
   std::vector<String> keys;
   if (from.length() > 0 && to.length() > 0) {
     keys = dayKeysBetween(from, to);
+    size_t maxDays = retentionDays();
+    if (maxDays > 0 && keys.size() > maxDays) {
+      keys.erase(keys.begin(), keys.end() - maxDays);
+    }
   } else {
     keys = recentDayKeys((int)retentionDays());
   }
