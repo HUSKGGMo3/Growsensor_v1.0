@@ -7,6 +7,7 @@
 - History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels; hover overlays now show full axes with start/mid/end labels instead of cropped canvases.
 - Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.nist.gov, time.google.com) and graceful fallback to relative time until synced.
 - New bucketed charting: Live/6h views aggregate into 5-minute buckets, 24h charts aggregate into 15-minute buckets (stored on-device to avoid RAM spikes). The dashboard’s large chart is now a 24h/15m view with a metric dropdown.
+- Hotfix v0.2.6 (untested): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 

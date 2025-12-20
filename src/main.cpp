@@ -1143,7 +1143,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; pointer-events:none; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:stretch; justify-content:stretch; pointer-events:none; }
       .metric-tile:hover .hover-chart { display:flex; }
       .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
@@ -1152,7 +1152,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tile-eye .eye-closed { display:none; }
       .metric-tile.collapsed .tile-eye .eye-open { display:none; }
       .metric-tile.collapsed .tile-eye .eye-closed { display:block; }
-      .hover-chart canvas { width:100%; height:140px; }
+      .hover-chart canvas { width:100%; height:100%; display:block; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
       .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
@@ -2125,7 +2125,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!canvas || !ctxDraw) return false;
         const normalized = normalizeMode(mode);
         const decimals = opts.decimals ?? meta?.decimals ?? 1;
-        const xTicks = opts.xTicks ?? 3;
         const yTicks = opts.yTicks ?? 4;
         const fontSize = opts.fontSize || 12;
         const synced = opts.synced ?? clockState.synced;
@@ -2144,33 +2143,95 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         ctxDraw.strokeStyle = '#1f2937';
         ctxDraw.fillStyle = '#94a3b8';
         ctxDraw.font = `${fontSize}px system-ui`;
-        ctxDraw.textBaseline = 'bottom';
+
+        const yLabels = [];
         for (let i=0;i<=yTicks;i++){
-          const y=(height/yTicks)*i;
-          ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(width,y); ctxDraw.stroke();
           const val = (maxVal - (span*(i/yTicks))).toFixed(decimals);
-          ctxDraw.fillText(val, 6, Math.min(height-4,y+fontSize));
+          yLabels.push(val);
         }
-        for (let i=0;i<=xTicks;i++) {
-          const x = (width/xTicks)*i;
-          const ts = firstTs + (timeSpan * (i/xTicks));
-          const label = formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz);
-          const labelWidth = ctxDraw.measureText(label).width;
-          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, width - labelWidth));
-          ctxDraw.fillText(label, xPos, height-4);
+        const maxYLabelWidth = yLabels.reduce((m,l) => Math.max(m, ctxDraw.measureText(l).width), 0);
+        const paddingLeft = Math.max(opts.paddingLeft ?? 44, Math.ceil(maxYLabelWidth + 12));
+        const paddingRight = opts.paddingRight ?? 12;
+        const paddingTop = opts.paddingTop ?? 12;
+        let paddingBottom = opts.paddingBottom ?? 28;
+        const labelPadding = opts.labelPadding ?? 14;
+        let rotateLabels = opts.rotateXLabels ?? false;
+
+        const sampleTs = Array.from(new Set([firstTs, firstTs + timeSpan / 2, lastTs].map(v => Math.round(v)))).filter(v => Number.isFinite(v));
+        const sampleLabels = sampleTs.map(ts => formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz));
+        const maxXLabelWidth = sampleLabels.reduce((m,l) => Math.max(m, ctxDraw.measureText(l).width), 0);
+
+        let plotWidth = Math.max(1, width - paddingLeft - paddingRight);
+        let plotHeight = Math.max(1, height - paddingTop - paddingBottom);
+        const widthLimited = Math.max(2, Math.floor(plotWidth / Math.max(40, maxXLabelWidth + labelPadding)));
+        const preferredLabels = opts.xTicks ? Math.max(2, opts.xTicks + 1) : widthLimited;
+        const maxLabels = Math.max(2, Math.min(preferredLabels, widthLimited));
+        const step = Math.max(1, Math.ceil(valid.length / maxLabels));
+        const tickIndices = [];
+        for (let i=0;i<valid.length;i+=step) tickIndices.push(i);
+        if (tickIndices[tickIndices.length - 1] !== valid.length - 1) tickIndices.push(valid.length - 1);
+        if (tickIndices[0] !== 0) tickIndices.unshift(0);
+
+        const allowRotate = opts.allowRotate ?? false;
+        if (allowRotate) {
+          const estimatedWidth = tickIndices.length * (maxXLabelWidth + labelPadding);
+          if (estimatedWidth > plotWidth) rotateLabels = true;
         }
+        if (rotateLabels) paddingBottom += Math.round(fontSize * 0.8);
+        plotWidth = Math.max(1, width - paddingLeft - paddingRight);
+        plotHeight = Math.max(1, height - paddingTop - paddingBottom);
+        const plotBottom = paddingTop + plotHeight;
+
+        for (let i=0;i<=yTicks;i++){
+          const y = paddingTop + (plotHeight / yTicks) * i;
+          ctxDraw.beginPath(); ctxDraw.moveTo(paddingLeft, y); ctxDraw.lineTo(paddingLeft + plotWidth, y); ctxDraw.stroke();
+          const label = yLabels[i];
+          ctxDraw.textAlign = 'right';
+          ctxDraw.textBaseline = 'middle';
+          ctxDraw.fillText(label, paddingLeft - 8, Math.min(plotBottom - 2, y));
+        }
+
+        tickIndices.forEach(idx => {
+          const pt = valid[idx];
+          if (!pt || typeof pt.t !== 'number') return;
+          const x = paddingLeft + ((pt.t - firstTs) / timeSpan) * plotWidth;
+          ctxDraw.beginPath(); ctxDraw.moveTo(x, paddingTop); ctxDraw.lineTo(x, plotBottom); ctxDraw.stroke();
+        });
+
+        tickIndices.forEach(idx => {
+          const pt = valid[idx];
+          if (!pt || typeof pt.t !== 'number') return;
+          const x = paddingLeft + ((pt.t - firstTs) / timeSpan) * plotWidth;
+          const label = formatTimeLabel(pt.t, normalized, firstTs, lastTs, synced, tz);
+          ctxDraw.save();
+          if (rotateLabels) {
+            ctxDraw.translate(x, plotBottom + 2);
+            ctxDraw.rotate(-0.61);
+            ctxDraw.textAlign = 'right';
+            ctxDraw.textBaseline = 'middle';
+            ctxDraw.fillText(label, 0, 0);
+          } else {
+            ctxDraw.textAlign = 'center';
+            ctxDraw.textBaseline = 'top';
+            ctxDraw.fillText(label, x, plotBottom + 2);
+          }
+          ctxDraw.restore();
+        });
+
         if (opts.unitLabel) {
           const unitWidth = ctxDraw.measureText(opts.unitLabel).width;
-          ctxDraw.fillText(opts.unitLabel, width - unitWidth - 6, fontSize + 2);
+          ctxDraw.textAlign = 'right';
+          ctxDraw.textBaseline = 'top';
+          ctxDraw.fillText(opts.unitLabel, width - paddingRight, paddingTop + 2);
         }
         ctxDraw.strokeStyle = '#22d3ee';
         ctxDraw.lineWidth = opts.lineWidth || 2;
         ctxDraw.beginPath();
         let started=false;
-        points.forEach((pt)=>{
+        valid.forEach((pt)=>{
           if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
-          const x = ((pt.t - firstTs)/timeSpan)*width;
-          const y = height - ((pt.v-minVal)/span)*height;
+          const x = paddingLeft + ((pt.t - firstTs)/timeSpan)*plotWidth;
+          const y = plotBottom - ((pt.v-minVal)/span)*plotHeight;
           if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
         });
         ctxDraw.stroke();
@@ -2206,7 +2267,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone, allowRotate: true });
         const debugBox = getEl('chartDebugText');
         if (devMode) {
           const values = points.map(p => p.v).filter(v => v !== null);
@@ -2227,8 +2288,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       async function loadDetailHistory(metric, mode) {
-        const key = `${metric}-${mode}`;
         const normalized = normalizeMode(mode);
+        const key = `${metric}-${normalized}`;
         if (!detailCache[key]) detailCache[key] = [];
         try {
           const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized}`);
@@ -3287,19 +3348,22 @@ void handleHistory() {
     return;
   String metric = server.hasArg("metric") ? server.arg("metric") : "";
   String range = server.hasArg("range") ? server.arg("range") : "live";
+  range.trim();
+  range.toLowerCase();
   MetricDef *def = historyById(metric);
   if (!def) {
     server.send(400, "text/plain", "invalid metric");
     return;
   }
 
-  bool range24h = range == "24h";
-  if (range != "6h" && !range24h) range = "live";
+  bool range24h = range == "24h" || range == "24hr" || range == "24hrs" || range == "day";
+  bool range6h = range == "6h" || range == "6hr" || range == "6hrs";
+  String normalized = range24h ? "24h" : (range6h ? "6h" : "live");
   uint64_t now = currentEpochMs();
   flushBucket(def->series, true, now);
   flushBucket(def->series, false, now);
 
-  const uint64_t windowMs = range24h ? (24ULL * 60ULL * 60ULL * 1000ULL) : (range == "live" ? HISTORY_LIVE_WINDOW_MS : (6ULL * 60ULL * 60ULL * 1000ULL));
+  const uint64_t windowMs = range24h ? (24ULL * 60ULL * 60ULL * 1000ULL) : (normalized == "live" ? HISTORY_LIVE_WINDOW_MS : (6ULL * 60ULL * 60ULL * 1000ULL));
   const uint64_t minTs = now > windowMs ? now - windowMs : 0;
   pruneLogsIfLowMemory(false);
   String json;

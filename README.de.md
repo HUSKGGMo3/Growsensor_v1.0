@@ -7,6 +7,7 @@
 - `/api/telemetry` und `/api/history` liefern Epoch-Millisekunden; alle Charts (auch Hover/Detail) zeigen lokale Uhrzeit, live mit HH:MM:SS wenn synchronisiert. Hover-Mini-Charts nutzen nun die gesamte Fläche, inkl. Achsen und Start/Mitte/Ende-Zeitlabels.
 - Zeitzonen-Wahl (Europe/Berlin, UTC, America/New_York, Asia/Tokyo u.a.) wird in NVS gespeichert; Fallback auf relative Zeit (mm:ss) bei fehlender Zeitsynchronisation.
 - Neue Bucket-Strategie: Live/6h aggregiert in 5-Minuten-Buckets, 24h aggregiert in 15-Minuten-Buckets (RAM-schonend). Der große Dashboard-Chart zeigt jetzt 24h/15m mit wählbarer Metrik.
+- Hotfix v0.2.6 (ungetestet): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
 
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
