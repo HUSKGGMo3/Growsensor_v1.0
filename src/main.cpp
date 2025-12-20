@@ -41,9 +41,11 @@ static constexpr unsigned long WIFI_TIMEOUT = 15000;
 
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
-static constexpr unsigned long HISTORY_LIVE_CAPACITY = 512;   // ~17 minutes @2s
-static constexpr unsigned long HISTORY_LONG_CAPACITY = 384;   // 6h @1/min (+small buffer)
-static constexpr unsigned long HISTORY_BUCKET_MS = 60000;     // 1-minute buckets for long-term series
+static constexpr uint64_t HISTORY_BUCKET_5M_MS = 300000;      // 5-minute buckets
+static constexpr uint64_t HISTORY_BUCKET_15M_MS = 900000;     // 15-minute buckets
+static constexpr size_t HISTORY_6H_CAPACITY = 80;             // 6h @5min + buffer
+static constexpr size_t HISTORY_24H_CAPACITY = 110;           // 24h @15min + buffer
+static constexpr uint64_t HISTORY_LIVE_WINDOW_MS = 2ULL * 60ULL * 60ULL * 1000ULL; // last 2h
 static constexpr unsigned long LEAF_STALE_MS = 300000;         // 5 minutes stale threshold
 static constexpr float LEAF_DIFF_THRESHOLD = 5.0f;              // °C difference to mark IR sensor unhealthy
 static constexpr size_t LOG_CAPACITY = 720;                     // ~6h if we log every 30s
@@ -55,8 +57,8 @@ static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offse
 static constexpr time_t TIME_VALID_AFTER = 1672531200;          // 2023-01-01 UTC safeguard
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
-static const char *NTP_SERVER_2 = "time.google.com";
-static const char *NTP_SERVER_3 = "time.cloudflare.com";
+static const char *NTP_SERVER_2 = "time.nist.gov";
+static const char *NTP_SERVER_3 = "time.google.com";
 
 String timezoneName = "Europe/Berlin";
 bool timeSynced = false;
@@ -206,20 +208,23 @@ struct VpdProfile {
 };
 
 struct HistoryPoint {
-  unsigned long ts;
+  uint64_t ts;
   float value;
 };
 
 struct HistorySeries {
-  HistoryPoint live[HISTORY_LIVE_CAPACITY];
-  size_t liveStart = 0;
-  size_t liveCount = 0;
-  HistoryPoint longTerm[HISTORY_LONG_CAPACITY];
+  HistoryPoint midTerm[HISTORY_6H_CAPACITY];
+  size_t midStart = 0;
+  size_t midCount = 0;
+  HistoryPoint longTerm[HISTORY_24H_CAPACITY];
   size_t longStart = 0;
   size_t longCount = 0;
-  unsigned long aggBucketStart = 0;
-  float aggSum = 0.0f;
-  uint16_t aggCount = 0;
+  uint64_t bucket5mStart = 0;
+  float bucket5mSum = 0.0f;
+  uint16_t bucket5mCount = 0;
+  uint64_t bucket15mStart = 0;
+  float bucket15mSum = 0.0f;
+  uint16_t bucket15mCount = 0;
 };
 
 // Globals
@@ -401,58 +406,70 @@ MetricDef *historyById(const String &id) {
   return nullptr;
 }
 
-void appendLivePoint(HistorySeries &series, unsigned long ts, float value) {
-  if (series.liveCount < HISTORY_LIVE_CAPACITY) {
-    size_t idx = (series.liveStart + series.liveCount) % HISTORY_LIVE_CAPACITY;
-    series.live[idx].ts = ts;
-    series.live[idx].value = value;
-    series.liveCount++;
-  } else {
-    series.live[series.liveStart].ts = ts;
-    series.live[series.liveStart].value = value;
-    series.liveStart = (series.liveStart + 1) % HISTORY_LIVE_CAPACITY;
-  }
-}
-
-void addLongPoint(HistorySeries &series, unsigned long ts, float value) {
-  if (series.longCount < HISTORY_LONG_CAPACITY) {
-    size_t idx = (series.longStart + series.longCount) % HISTORY_LONG_CAPACITY;
-    series.longTerm[idx].ts = ts;
-    series.longTerm[idx].value = value;
-    series.longCount++;
-  } else {
-    series.longTerm[series.longStart].ts = ts;
-    series.longTerm[series.longStart].value = value;
-    series.longStart = (series.longStart + 1) % HISTORY_LONG_CAPACITY;
-  }
-}
-
-void flushBucketsUpTo(HistorySeries &series, unsigned long ts) {
-  if (series.aggBucketStart == 0)
+void addPoint(HistoryPoint *buffer, size_t capacity, size_t &start, size_t &count, uint64_t ts, float value) {
+  if (capacity == 0)
     return;
-  while (ts >= series.aggBucketStart + HISTORY_BUCKET_MS) {
-    float avg = series.aggCount > 0 ? (series.aggSum / series.aggCount) : NAN;
-    addLongPoint(series, series.aggBucketStart, avg);
-    series.aggBucketStart += HISTORY_BUCKET_MS;
-    series.aggSum = 0.0f;
-    series.aggCount = 0;
+  if (count < capacity) {
+    size_t idx = (start + count) % capacity;
+    buffer[idx].ts = ts;
+    buffer[idx].value = value;
+    count++;
+  } else {
+    buffer[start].ts = ts;
+    buffer[start].value = value;
+    start = (start + 1) % capacity;
   }
 }
 
-void pushHistoryValue(const char *metric, float value) {
+void flushBucket(HistorySeries &series, bool fiveMinuteBucket, uint64_t ts) {
+  const uint64_t bucketSize = fiveMinuteBucket ? HISTORY_BUCKET_5M_MS : HISTORY_BUCKET_15M_MS;
+  uint64_t &bucketStart = fiveMinuteBucket ? series.bucket5mStart : series.bucket15mStart;
+  float &bucketSum = fiveMinuteBucket ? series.bucket5mSum : series.bucket15mSum;
+  uint16_t &bucketCount = fiveMinuteBucket ? series.bucket5mCount : series.bucket15mCount;
+  HistoryPoint *targetBuf = fiveMinuteBucket ? series.midTerm : series.longTerm;
+  size_t &targetStart = fiveMinuteBucket ? series.midStart : series.longStart;
+  size_t &targetCount = fiveMinuteBucket ? series.midCount : series.longCount;
+  const size_t targetCapacity = fiveMinuteBucket ? HISTORY_6H_CAPACITY : HISTORY_24H_CAPACITY;
+
+  if (bucketStart == 0)
+    return;
+
+  const uint64_t maxAdvance = bucketSize * (fiveMinuteBucket ? HISTORY_6H_CAPACITY : HISTORY_24H_CAPACITY);
+  if (ts > bucketStart + maxAdvance) {
+    bucketStart = (ts / bucketSize) * bucketSize;
+    bucketSum = 0.0f;
+    bucketCount = 0;
+    return;
+  }
+
+  while (ts >= bucketStart + bucketSize) {
+    float avg = bucketCount > 0 ? (bucketSum / bucketCount) : NAN;
+    addPoint(targetBuf, targetCapacity, targetStart, targetCount, bucketStart, avg);
+    bucketStart += bucketSize;
+    bucketSum = 0.0f;
+    bucketCount = 0;
+  }
+}
+
+void pushHistoryValue(const char *metric, float value, uint64_t ts) {
   MetricDef *def = historyById(metric);
   if (!def)
     return;
   float normalized = (!isnan(value) && value != -1.0f) ? value : NAN;
-  unsigned long now = millis();
-  appendLivePoint(def->series, now, normalized);
-  if (def->series.aggBucketStart == 0) {
-    def->series.aggBucketStart = (now / HISTORY_BUCKET_MS) * HISTORY_BUCKET_MS;
+  uint64_t now = ts;
+  if (def->series.bucket5mStart == 0) {
+    def->series.bucket5mStart = (now / HISTORY_BUCKET_5M_MS) * HISTORY_BUCKET_5M_MS;
   }
-  flushBucketsUpTo(def->series, now);
+  if (def->series.bucket15mStart == 0) {
+    def->series.bucket15mStart = (now / HISTORY_BUCKET_15M_MS) * HISTORY_BUCKET_15M_MS;
+  }
+  flushBucket(def->series, true, now);
+  flushBucket(def->series, false, now);
   if (!isnan(normalized)) {
-    def->series.aggSum += normalized;
-    def->series.aggCount++;
+    def->series.bucket5mSum += normalized;
+    def->series.bucket5mCount++;
+    def->series.bucket15mSum += normalized;
+    def->series.bucket15mCount++;
   }
 }
 
@@ -1046,13 +1063,14 @@ void readSensors() {
     latest.vpdStatus = 0;
   }
 
-  pushHistoryValue("lux", latest.lux);
-  pushHistoryValue("ppfd", latest.ppfd);
-  pushHistoryValue("co2", static_cast<float>(latest.co2ppm));
-  pushHistoryValue("temp", latest.ambientTempC);
-  pushHistoryValue("humidity", latest.humidity);
-  pushHistoryValue("leaf", latest.leafTempC);
-  pushHistoryValue("vpd", latest.vpd);
+  uint64_t sampleTs = currentEpochMs();
+  pushHistoryValue("lux", latest.lux, sampleTs);
+  pushHistoryValue("ppfd", latest.ppfd, sampleTs);
+  pushHistoryValue("co2", static_cast<float>(latest.co2ppm), sampleTs);
+  pushHistoryValue("temp", latest.ambientTempC, sampleTs);
+  pushHistoryValue("humidity", latest.humidity, sampleTs);
+  pushHistoryValue("leaf", latest.leafTempC, sampleTs);
+  pushHistoryValue("vpd", latest.vpd, sampleTs);
 
   unsigned long now = millis();
   auto stallCheck = [&](SensorStall &stall, SensorHealth &health, bool &enabled, const char *name) {
@@ -1218,7 +1236,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <select id="timezoneSelect" class="tz-select">
           <option value="Europe/Berlin">Europe/Berlin</option>
           <option value="UTC">UTC</option>
+          <option value="Europe/London">Europe/London</option>
           <option value="America/New_York">America/New_York</option>
+          <option value="Australia/Sydney">Australia/Sydney</option>
           <option value="Asia/Tokyo">Asia/Tokyo</option>
         </select>
         <span class="badge badge-warn" id="timeBadge">Zeit nicht synchron</span>
@@ -1327,7 +1347,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       </section>
 
         <section class="card">
-        <h3 style="margin-top:0">Live Verlauf</h3>
+        <div class="card-header" style="padding:0; margin-bottom:8px; align-items:center; gap:10px;">
+          <h3 style="margin:0;">24h Verlauf (15m)</h3>
+          <label for="chartMetricSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
+            Metrik
+            <select id="chartMetricSelect" style="width:auto; min-width:150px;">
+              <option value="temp">Temperatur</option>
+              <option value="humidity">Luftfeuchte</option>
+              <option value="vpd">VPD</option>
+              <option value="co2">CO₂</option>
+              <option value="lux">Lux</option>
+            </select>
+          </label>
+        </div>
         <div class="chart"><canvas id="chart"></canvas></div>
       </section>
 
@@ -1449,16 +1481,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     </div>
 
     <div id="chartModal">
-      <div class="modal-card" id="chartModalCard">
-        <button class="modal-close" id="chartClose">&times;</button>
-        <div class="card-header" style="padding:0;">
-          <div id="chartModalTitle">Detailansicht</div>
-          <span class="badge" id="chartModalBadge">–</span>
-        </div>
-        <div class="modal-tabs" id="detailScopeTabs">
-          <button id="tabLive" class="active">Live</button>
-          <button id="tabLast6h">Letzte 6h</button>
-        </div>
+        <div class="modal-card" id="chartModalCard">
+          <button class="modal-close" id="chartClose">&times;</button>
+          <div class="card-header" style="padding:0;">
+            <div id="chartModalTitle">Detailansicht</div>
+            <span class="badge" id="chartModalBadge">–</span>
+          </div>
+          <div class="modal-tabs" id="detailScopeTabs">
+            <button id="tabLive" class="active">Live</button>
+            <button id="tabLast6h">Letzte 6h</button>
+            <button id="tabLast24h">Letzte 24h</button>
+          </div>
         <div style="position:relative;">
           <div class="modal-tabs" id="vpdViewTabs" style="display:none;">
             <button id="tabHeatmap" class="active">Heatmap</button>
@@ -1683,11 +1716,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
       const metrics = Array.from(new Set(tileOrder));
-      const HISTORY_BUCKET_MS = 60000;
+      const BUCKET_5M = 5 * 60 * 1000;
+      const BUCKET_15M = 15 * 60 * 1000;
+      const SIX_H_MS = 6 * 60 * 60 * 1000;
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      const LIVE_WINDOW_MS = 2 * 60 * 60 * 1000;
       const historyStore = {};
-      metrics.forEach(m => historyStore[m] = { live: [], long: [], agg:{ bucket:-1, sum:0, count:0 }, synced:false });
-      const maxLivePoints = 240; // ~10 minutes @2.5s
-      const maxLongPoints = 384; // ~6h @1min (+small buffer)
+      metrics.forEach(m => historyStore[m] = { mid: [], long: [], agg5:{ bucket:-1, sum:0, count:0 }, agg15:{ bucket:-1, sum:0, count:0 }, synced:false });
+      const MAX_6H_POINTS = 80; // 6h @5min + buffer
+      const MAX_24H_POINTS = 110; // 24h @15min + buffer
       let lastTelemetryAt = 0;
       const clockState = { synced:false, timezone:'Europe/Berlin', epochRef:null, epochCapturedAt:null };
       let devMode = false;
@@ -1705,6 +1742,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const yAxisLabel = getEl('yAxisLabel');
       const wifiBars = getEl('wifiBars');
       const timezoneSelect = getEl('timezoneSelect');
+      const chartMetricSelect = getEl('chartMetricSelect');
       const timeBadge = getEl('timeBadge');
       const localTimeText = getEl('localTimeText');
       let detailMetric = null;
@@ -1725,6 +1763,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         vpd:{ unit:'kPa', label:'VPD', decimals:3 },
       };
       const KNOWN_TIMEZONES = ['Europe/Berlin','UTC','Europe/London','America/New_York','Asia/Tokyo','Australia/Sydney'];
+      let chartMetric = 'temp';
+      if (chartMetricSelect && chartMetricSelect.value) chartMetric = chartMetricSelect.value;
 
       function authedFetch(url, options = {}) { return fetch(url, options); }
       function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
@@ -1940,21 +1980,55 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function resizeCanvas(canvas, ctxTarget) {
-        if (!canvas || !ctxTarget) return;
+        if (!canvas || !ctxTarget) return { width: 0, height: 0 };
         const ratio = window.devicePixelRatio || 1;
         const rect = canvas.getBoundingClientRect();
-        const w = Math.max(1, Math.round(rect.width * ratio));
-        const h = Math.max(1, Math.round(rect.height * ratio));
+        const cssW = Math.max(1, Math.round(rect.width));
+        const cssH = Math.max(1, Math.round(rect.height));
+        const w = Math.round(cssW * ratio);
+        const h = Math.round(cssH * ratio);
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w;
           canvas.height = h;
         }
-        ctxTarget.setTransform(ratio,0,0,ratio,0,0);
-        ctxTarget.scale(1/ratio,1/ratio);
+        ctxTarget.setTransform(1,0,0,1,0,0);
+        ctxTarget.scale(ratio,ratio);
+        return { width: cssW, height: cssH };
       }
 
       function normalizeMode(mode) {
-        return mode === '6h' ? '6h' : 'live';
+        if (mode === '24h') return '24h';
+        if (mode === '6h') return '6h';
+        return 'live';
+      }
+
+      function pushBucket(list, cap, point) {
+        if (!point) return;
+        list.push(point);
+        if (list.length > cap) list.splice(0, list.length - cap);
+      }
+
+      function addBucketSample(store, entry, ts, bucketMs, targetKey, cap) {
+        const agg = bucketMs === BUCKET_5M ? store.agg5 : store.agg15;
+        const list = targetKey === 'mid' ? store.mid : store.long;
+        const bucketIdx = Math.floor(ts / bucketMs);
+        if (agg.bucket === -1) agg.bucket = bucketIdx;
+        if (bucketIdx < agg.bucket || bucketIdx - agg.bucket > cap * 2) {
+          agg.bucket = bucketIdx;
+          agg.sum = 0;
+          agg.count = 0;
+        }
+        while (bucketIdx > agg.bucket) {
+          const value = agg.count > 0 ? agg.sum / agg.count : null;
+          pushBucket(list, cap, { t: agg.bucket * bucketMs, v: value });
+          agg.bucket += 1;
+          agg.sum = 0;
+          agg.count = 0;
+        }
+        if (entry !== null) {
+          agg.sum += entry;
+          agg.count += 1;
+        }
       }
 
       function recordMetric(metric, value, ts, syncedFlag = clockState.synced) {
@@ -1964,42 +2038,32 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const nowTs = tsMs !== null ? tsMs : (clockState.synced ? (getApproxEpochMs() ?? Date.now()) : Date.now());
         const entry = (typeof value === 'number' && !Number.isNaN(value)) ? value : null;
         store.synced = syncedFlag ? true : store.synced;
-        store.live.push({ t: nowTs, v: entry });
-        if (store.live.length > maxLivePoints) store.live.shift();
-        const bucket = Math.floor(nowTs / HISTORY_BUCKET_MS);
-        if (store.agg.bucket !== bucket) {
-          if (store.agg.count > 0) {
-            store.long.push({ t: store.agg.bucket * HISTORY_BUCKET_MS, v: store.agg.sum / store.agg.count });
-            if (store.long.length > maxLongPoints) store.long.shift();
-          }
-          store.agg.bucket = bucket;
-          store.agg.sum = 0;
-          store.agg.count = 0;
-        }
-        if (entry !== null) {
-          store.agg.sum += entry;
-          store.agg.count += 1;
-        }
+        addBucketSample(store, entry, nowTs, BUCKET_5M, 'mid', MAX_6H_POINTS);
+        addBucketSample(store, entry, nowTs, BUCKET_15M, 'long', MAX_24H_POINTS);
       }
 
-      function finalizeBucket(metric) {
-        const store = historyStore[metric];
-        if (!store || store.agg.count === 0) return;
-        const ts = store.agg.bucket * HISTORY_BUCKET_MS;
-        const lastEntry = store.long[store.long.length - 1];
-        if (!lastEntry || lastEntry.t !== ts) {
-          store.long.push({ t: ts, v: store.agg.sum / store.agg.count });
-          if (store.long.length > maxLongPoints) store.long.shift();
-        }
+      function pendingPoint(store, mode) {
+        const normalized = normalizeMode(mode);
+        const agg = normalized === '24h' ? store.agg15 : store.agg5;
+        const bucketMs = normalized === '24h' ? BUCKET_15M : BUCKET_5M;
+        if (agg.bucket === -1) return null;
+        const value = agg.count > 0 ? agg.sum / agg.count : null;
+        return { t: agg.bucket * bucketMs, v: value };
       }
 
       function getSeriesData(metric, mode) {
         const normalized = normalizeMode(mode);
-        finalizeBucket(metric);
-        const store = historyStore[metric] || { live: [], long: [] };
-        const source = normalized === 'live' ? store.live : store.long;
-        const cap = normalized === 'live' ? maxLivePoints : maxLongPoints;
-        return source.slice(-cap);
+        const store = historyStore[metric] || { mid: [], long: [] };
+        const windowMs = normalized === '24h' ? DAY_MS : (normalized === '6h' ? SIX_H_MS : LIVE_WINDOW_MS);
+        const lastPointTs = normalized === '24h' ? (store.long[store.long.length - 1]?.t) : (store.mid[store.mid.length - 1]?.t);
+        const nowTs = (clockState.synced || store.synced) ? (getApproxEpochMs() ?? Date.now()) : (lastPointTs ?? Date.now());
+        const minTs = Math.max(0, nowTs - windowMs);
+        const list = normalized === '24h' ? store.long : store.mid;
+        const cap = normalized === '24h' ? MAX_24H_POINTS : MAX_6H_POINTS;
+        const data = list.filter(p => p && typeof p.t === 'number' && p.t >= minTs).slice(-cap);
+        const pending = pendingPoint(store, normalized);
+        if (pending && pending.t >= minTs) data.push(pending);
+        return data;
       }
 
       function mergeHistory(metric, points, mode, syncedFlag = clockState.synced) {
@@ -2009,15 +2073,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const normalized = normalizeMode(mode);
         const sanitized = points.map(p => ({ t: p.t, v: (p && typeof p.v === 'number' && !Number.isNaN(p.v)) ? p.v : null }));
         if (normalized === '6h') {
-          store.long = sanitized.slice(-maxLongPoints);
-          if (store.long.length) {
-            const lastTs = store.long[store.long.length - 1].t;
-            store.agg.bucket = Math.floor(lastTs / HISTORY_BUCKET_MS);
-          }
-          store.agg.sum = 0;
-          store.agg.count = 0;
+          store.mid = sanitized.slice(-MAX_6H_POINTS);
+          store.agg5.bucket = store.mid.length ? Math.floor(store.mid[store.mid.length - 1].t / BUCKET_5M) : -1;
+          store.agg5.sum = 0;
+          store.agg5.count = 0;
+        } else if (normalized === '24h') {
+          store.long = sanitized.slice(-MAX_24H_POINTS);
+          store.agg15.bucket = store.long.length ? Math.floor(store.long[store.long.length - 1].t / BUCKET_15M) : -1;
+          store.agg15.sum = 0;
+          store.agg15.count = 0;
         } else {
-          store.live = sanitized.slice(-maxLivePoints);
+          store.mid = sanitized.slice(-MAX_6H_POINTS);
+          store.agg5.bucket = store.mid.length ? Math.floor(store.mid[store.mid.length - 1].t / BUCKET_5M) : -1;
+          store.agg5.sum = 0;
+          store.agg5.count = 0;
         }
       }
 
@@ -2037,7 +2106,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const normalized = normalizeMode(mode);
         if (!synced) {
           const delta = Math.max(0, ts - firstTs);
-          if (normalized === '6h') {
+          if (normalized === '6h' || normalized === '24h') {
             const hh = Math.floor(delta / 3600000);
             const mm = Math.floor((delta % 3600000) / 60000);
             return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
@@ -2056,12 +2125,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!canvas || !ctxDraw) return false;
         const normalized = normalizeMode(mode);
         const decimals = opts.decimals ?? meta?.decimals ?? 1;
-        const xTicks = opts.xTicks ?? 4;
+        const xTicks = opts.xTicks ?? 3;
         const yTicks = opts.yTicks ?? 4;
         const fontSize = opts.fontSize || 12;
         const synced = opts.synced ?? clockState.synced;
         const tz = opts.timezone || clockState.timezone;
-        resizeCanvas(canvas, ctxDraw);
+        const { width, height } = resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
         const valid = points.filter(p => p && p.v !== null && !Number.isNaN(p.v));
         if (!valid.length) return false;
@@ -2069,30 +2138,30 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const maxVal = Math.max(...values);
         const minVal = Math.min(...values);
         const span = Math.max(maxVal - minVal, 0.0001);
-        const firstTs = (points.find(p => p && typeof p.t === 'number')?.t) ?? 0;
-        const lastTs = (points.slice().reverse().find(p => p && typeof p.t === 'number')?.t) ?? (firstTs + 1);
+        const firstTs = valid[0]?.t ?? 0;
+        const lastTs = valid[valid.length - 1]?.t ?? (firstTs + 1);
         const timeSpan = Math.max(1, lastTs - firstTs);
         ctxDraw.strokeStyle = '#1f2937';
         ctxDraw.fillStyle = '#94a3b8';
         ctxDraw.font = `${fontSize}px system-ui`;
         ctxDraw.textBaseline = 'bottom';
         for (let i=0;i<=yTicks;i++){
-          const y=(canvas.height/yTicks)*i;
-          ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(canvas.width,y); ctxDraw.stroke();
+          const y=(height/yTicks)*i;
+          ctxDraw.beginPath(); ctxDraw.moveTo(0,y); ctxDraw.lineTo(width,y); ctxDraw.stroke();
           const val = (maxVal - (span*(i/yTicks))).toFixed(decimals);
-          ctxDraw.fillText(val, 6, Math.min(canvas.height-4,y+fontSize));
+          ctxDraw.fillText(val, 6, Math.min(height-4,y+fontSize));
         }
         for (let i=0;i<=xTicks;i++) {
-          const x = (canvas.width/xTicks)*i;
+          const x = (width/xTicks)*i;
           const ts = firstTs + (timeSpan * (i/xTicks));
           const label = formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz);
           const labelWidth = ctxDraw.measureText(label).width;
-          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, canvas.width - labelWidth));
-          ctxDraw.fillText(label, xPos, canvas.height-4);
+          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, width - labelWidth));
+          ctxDraw.fillText(label, xPos, height-4);
         }
         if (opts.unitLabel) {
           const unitWidth = ctxDraw.measureText(opts.unitLabel).width;
-          ctxDraw.fillText(opts.unitLabel, canvas.width - unitWidth - 6, fontSize + 2);
+          ctxDraw.fillText(opts.unitLabel, width - unitWidth - 6, fontSize + 2);
         }
         ctxDraw.strokeStyle = '#22d3ee';
         ctxDraw.lineWidth = opts.lineWidth || 2;
@@ -2100,8 +2169,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         let started=false;
         points.forEach((pt)=>{
           if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
-          const x = ((pt.t - firstTs)/timeSpan)*canvas.width;
-          const y = canvas.height - ((pt.v-minVal)/span)*canvas.height;
+          const x = ((pt.t - firstTs)/timeSpan)*width;
+          const y = height - ((pt.v-minVal)/span)*height;
           if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
         });
         ctxDraw.stroke();
@@ -2110,61 +2179,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawChart() {
         if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
-        resizeCanvas(chartCanvas, ctx);
-        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
-        const width = chartCanvas.width;
-        const height = chartCanvas.height;
-        ctx.strokeStyle = '#1f2937';
-        for (let i = 1; i < 5; i++) {
-          const y = (height / 5) * i;
-          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
+        const data = getSeriesData(chartMetric, '24h');
+        const ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { unitLabel: meta.unit, decimals: meta.decimals ?? 1, xTicks:4, yTicks:4, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        if (!ok) {
+          const { width } = resizeCanvas(chartCanvas, ctx);
+          ctx.clearRect(0,0,chartCanvas.width, chartCanvas.height);
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = '12px system-ui';
+          ctx.fillText('Keine Daten', 6, 18);
         }
-        const axisTicks = 4;
-        const allTimes = [];
-        const series = [
-          { metric: 'lux', color: '#22d3ee' },
-          { metric: 'co2', color: '#f59e0b' },
-          { metric: 'temp', color: '#34d399' },
-          { metric: 'vpd', color: '#a855f7' },
-        ];
-        const syncedAxis = series.some(s => historyStore[s.metric]?.synced) ? true : clockState.synced;
-        series.forEach((serie) => {
-          const data = getSeriesData(serie.metric, '6h');
-          data.forEach(p => { if (p && typeof p.t === 'number') allTimes.push(p.t); });
-        });
-        if (allTimes.length === 0) return;
-        const firstTs = Math.min(...allTimes);
-        const lastTs = Math.max(...allTimes);
-        const timeSpan = Math.max(1, lastTs - firstTs);
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '12px system-ui';
-        for (let i = 0; i <= axisTicks; i++) {
-          const x = (width / axisTicks) * i;
-          const ts = firstTs + (timeSpan * (i / axisTicks));
-          const label = formatTimeLabel(ts, '6h', firstTs, lastTs, syncedAxis, clockState.timezone);
-          const labelWidth = ctx.measureText(label).width;
-          const xPos = Math.min(Math.max(0, x - labelWidth / 2), Math.max(0, width - labelWidth));
-          ctx.fillText(label, xPos, height - 4);
-        }
-        series.forEach((serie) => {
-          const data = getSeriesData(serie.metric, '6h');
-          const values = data.map(p => p.v).filter(v => v !== null);
-          if (!values.length) return;
-          const maxVal = Math.max(...values);
-          const minVal = Math.min(...values);
-          const span = Math.max(maxVal - minVal, 0.0001);
-          ctx.beginPath();
-          let started = false;
-          data.forEach((p) => {
-            if (p.v === null || typeof p.t !== 'number') { started=false; return; }
-            const x = ((p.t - firstTs) / timeSpan) * width;
-            const y = height - ((p.v - minVal) / span) * height;
-            if (!started) { ctx.moveTo(x, y); started=true; } else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = serie.color;
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        });
       }
 
       function drawHover(metric) {
@@ -2173,7 +2197,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const canvas = ctxHover.canvas;
         const data = getSeriesData(metric, '6h');
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
-        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:2, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:3, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
         if (!ok) {
           resizeCanvas(canvas, ctxHover);
           ctxHover.clearRect(0,0,canvas.width, canvas.height);
@@ -2207,7 +2231,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const normalized = normalizeMode(mode);
         if (!detailCache[key]) detailCache[key] = [];
         try {
-          const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized === '6h' ? '6h' : 'live'}`);
+          const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized}`);
           const mapped = (data.points || []).map(p => {
             const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
             const ts = parseMs(p[0]);
@@ -2215,7 +2239,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           });
           detailCache[key] = mapped;
           const syncedFlag = flag(data.time_synced);
-          if (normalized === '6h') mergeHistory(metric, mapped, normalized, syncedFlag);
+          if (normalized === 'live' || normalized === '6h' || normalized === '24h') mergeHistory(metric, mapped, normalized, syncedFlag);
           clearErrors('API /api/history');
         } catch (err) {
           console.warn('history error', err);
@@ -2226,20 +2250,27 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       async function primeHistory() {
+        let clockPrimed = false;
         for (const metric of metrics) {
-          try {
-            const data = await fetchJson(`/api/history?metric=${metric}&range=6h`);
-            const mapped = (data.points || []).map(p => {
-              const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
-              const ts = parseMs(p[0]);
-              return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
-            });
-            const syncedFlag = flag(data.time_synced);
-            updateClockState({ timezone: data.timezone, time_synced: data.time_synced });
-            mergeHistory(metric, mapped, '6h', syncedFlag);
-            detailCache[`${metric}-6h`] = mapped;
-          } catch (err) {
-            pushError(`API /api/history failed: ${err.message}`);
+          for (const range of ['6h','24h']) {
+            try {
+              const data = await fetchJson(`/api/history?metric=${metric}&range=${range}`);
+              const mapped = (data.points || []).map(p => {
+                const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
+                const ts = parseMs(p[0]);
+                return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+              });
+              const syncedFlag = flag(data.time_synced);
+              if (!clockPrimed) {
+                const sampleTs = mapped[mapped.length - 1]?.t;
+                updateClockState({ timezone: data.timezone, time_synced: data.time_synced, epoch_ms: sampleTs });
+                clockPrimed = true;
+              }
+              mergeHistory(metric, mapped, range, syncedFlag);
+              detailCache[`${metric}-${range}`] = mapped;
+            } catch (err) {
+              pushError(`API /api/history failed: ${err.message}`);
+            }
           }
         }
         drawChart();
@@ -2251,7 +2282,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const setAvg = (id, metric) => {
           const el = getEl(id);
           const meta = METRIC_META[metric] || { decimals:1 };
-          const val = avg(getSeriesData(metric,'6h'));
+          const val = avg(getSeriesData(metric,'24h'));
           if (el) el.textContent = Number.isNaN(val) ? '–' : val.toFixed(meta.decimals ?? 1);
         };
         setAvg('avgLux', 'lux');
@@ -2369,10 +2400,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (badge) badge.textContent = meta.unit || metric;
         const tabLive = getEl('tabLive');
         const tabLast6h = getEl('tabLast6h');
-        if (tabLive && tabLast6h) {
-          tabLive.classList.add('active');
-          tabLast6h.classList.remove('active');
-        }
+        const tabLast24h = getEl('tabLast24h');
+        if (tabLive) tabLive.classList.add('active');
+        if (tabLast6h) tabLast6h.classList.remove('active');
+        if (tabLast24h) tabLast24h.classList.remove('active');
         const showVpd = metric === 'vpd';
         setDisplay('vpdViewTabs', showVpd, 'flex');
         if (detailChartCanvas) detailChartCanvas.style.display = showVpd ? 'none' : 'block';
@@ -2941,7 +2972,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         detailMode = 'live';
         if (tabLiveBtn) tabLiveBtn.classList.add('active');
         const tabLast6h = getEl('tabLast6h');
+        const tabLast24h = getEl('tabLast24h');
         if (tabLast6h) tabLast6h.classList.remove('active');
+        if (tabLast24h) tabLast24h.classList.remove('active');
         renderDetail();
       });
       const tabLast6hBtn = getEl('tabLast6h');
@@ -2949,7 +2982,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         detailMode = '6h';
         tabLast6hBtn.classList.add('active');
         const tabLiveEl = getEl('tabLive');
+        const tabLast24h = getEl('tabLast24h');
         if (tabLiveEl) tabLiveEl.classList.remove('active');
+        if (tabLast24h) tabLast24h.classList.remove('active');
+        renderDetail();
+      });
+      const tabLast24hBtn = getEl('tabLast24h');
+      if (tabLast24hBtn) tabLast24hBtn.addEventListener('click', () => {
+        detailMode = '24h';
+        tabLast24hBtn.classList.add('active');
+        const tabLiveEl = getEl('tabLive');
+        const tabLast6h = getEl('tabLast6h');
+        if (tabLiveEl) tabLiveEl.classList.remove('active');
+        if (tabLast6h) tabLast6h.classList.remove('active');
         renderDetail();
       });
       const tabHeatmapBtn = getEl('tabHeatmap');
@@ -2978,6 +3023,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
       const navSensors = getEl('navSensors');
       if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
+      if (chartMetricSelect) {
+        chartMetricSelect.addEventListener('change', () => {
+          chartMetric = chartMetricSelect.value || 'temp';
+          drawChart();
+        });
+      }
 
       function applyWifiState(data = {}) {
         const connected = flag(data?.wifi_connected);
@@ -3065,9 +3116,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (yAxisLabel) yAxisLabel.textContent = `${meta.label} (${meta.unit})`;
         if (xAxisLabel) {
           if (clockState.synced) {
-            xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (HH:MM:SS lokal)' : 'Zeit (HH:MM lokal)';
+            if (detailMode === 'live') xAxisLabel.textContent = 'Zeit (HH:MM:SS lokal)';
+            else if (detailMode === '24h') xAxisLabel.textContent = 'Zeit (HH:MM lokal, 24h)';
+            else xAxisLabel.textContent = 'Zeit (HH:MM lokal)';
           } else {
-            xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss seit Start)' : 'Zeit (relativ)';
+            xAxisLabel.textContent = detailMode === 'live' ? 'Zeit (mm:ss seit Start)' : 'Zeit (HH:MM relativ)';
           }
         }
         const showHeatmap = detailMetric === 'vpd' && detailVpdView === 'heatmap';
@@ -3240,20 +3293,21 @@ void handleHistory() {
     return;
   }
 
-  bool liveRange = range != "6h";
-  unsigned long now = millis();
-  flushBucketsUpTo(def->series, now);
+  bool range24h = range == "24h";
+  if (range != "6h" && !range24h) range = "live";
+  uint64_t now = currentEpochMs();
+  flushBucket(def->series, true, now);
+  flushBucket(def->series, false, now);
 
-  size_t pointCount = liveRange ? def->series.liveCount : def->series.longCount + (def->series.aggBucketStart != 0 ? 1 : 0);
-  bool synced = timeSynced;
-  uint64_t offsetSnapshot = epochOffsetMs;
+  const uint64_t windowMs = range24h ? (24ULL * 60ULL * 60ULL * 1000ULL) : (range == "live" ? HISTORY_LIVE_WINDOW_MS : (6ULL * 60ULL * 60ULL * 1000ULL));
+  const uint64_t minTs = now > windowMs ? now - windowMs : 0;
   pruneLogsIfLowMemory(false);
   String json;
-  json.reserve(96 + pointCount * 32);
+  json.reserve(96 + 64);
   json = "{\"metric\":\"" + metric + "\",\"unit\":\"" + String(def->unit) + "\",\"points\":[";
   bool first = true;
-  auto appendPoint = [&](unsigned long ts, float v) {
-    uint64_t mapped = synced ? (offsetSnapshot + (uint64_t)ts) : (uint64_t)ts;
+  auto appendPoint = [&](uint64_t ts, float v) {
+    uint64_t mapped = ts;
     if (!first)
       json += ",";
     first = false;
@@ -3266,25 +3320,30 @@ void handleHistory() {
     json += "]";
   };
 
-  if (liveRange) {
-    for (size_t i = 0; i < def->series.liveCount; i++) {
-      size_t idx = (def->series.liveStart + i) % HISTORY_LIVE_CAPACITY;
-      const HistoryPoint &p = def->series.live[idx];
-      appendPoint(p.ts, p.value);
+  if (range24h) {
+    for (size_t i = 0; i < def->series.longCount; i++) {
+      size_t idx = (def->series.longStart + i) % HISTORY_24H_CAPACITY;
+      const HistoryPoint &p = def->series.longTerm[idx];
+      if (p.ts >= minTs) appendPoint(p.ts, p.value);
+    }
+    if (def->series.bucket15mStart != 0) {
+      float pending = def->series.bucket15mCount > 0 ? (def->series.bucket15mSum / def->series.bucket15mCount) : NAN;
+      if (def->series.bucket15mStart >= minTs) appendPoint(def->series.bucket15mStart, pending);
     }
   } else {
-    for (size_t i = 0; i < def->series.longCount; i++) {
-      size_t idx = (def->series.longStart + i) % HISTORY_LONG_CAPACITY;
-      const HistoryPoint &p = def->series.longTerm[idx];
-      appendPoint(p.ts, p.value);
+    for (size_t i = 0; i < def->series.midCount; i++) {
+      size_t idx = (def->series.midStart + i) % HISTORY_6H_CAPACITY;
+      const HistoryPoint &p = def->series.midTerm[idx];
+      if (p.ts >= minTs) appendPoint(p.ts, p.value);
     }
-    if (def->series.aggBucketStart != 0) {
-      float pending = def->series.aggCount > 0 ? (def->series.aggSum / def->series.aggCount) : NAN;
-      appendPoint(def->series.aggBucketStart, pending);
+    if (def->series.bucket5mStart != 0) {
+      float pending = def->series.bucket5mCount > 0 ? (def->series.bucket5mSum / def->series.bucket5mCount) : NAN;
+      if (def->series.bucket5mStart >= minTs) appendPoint(def->series.bucket5mStart, pending);
     }
   }
 
-  json += "],\"time_synced\":" + String(synced ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(synced ? offsetSnapshot : 0)) + "}";
+  bool syncedFlag = timeSynced;
+  json += "],\"time_synced\":" + String(syncedFlag ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(syncedFlag ? currentEpochMs() : 0)) + "}";
   server.send(200, "application/json", json);
 }
 

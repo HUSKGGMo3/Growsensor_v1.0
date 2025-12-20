@@ -3,9 +3,10 @@
 **Aktuelle Version: v0.2.6 (ungetestet / Community-Preview)**
 
 ### Hotfix v0.2.6
-- NTP-Sync (pool.ntp.org, time.google.com, time.cloudflare.com) mit Zeitzonen-Auswahl im Header; Badge „Zeit nicht synchron“ bis zur erfolgreichen Synchronisation.
-- `/api/telemetry` und `/api/history` liefern nun Epoch-Millisekunden; alle Charts (auch Hover/Detail) zeigen lokale Uhrzeit, live mit HH:MM:SS wenn synchronisiert.
+- NTP-Sync (pool.ntp.org, time.nist.gov, time.google.com) mit Zeitzonen-Auswahl im Header; Badge „Zeit nicht synchron“ bis zur erfolgreichen Synchronisation.
+- `/api/telemetry` und `/api/history` liefern Epoch-Millisekunden; alle Charts (auch Hover/Detail) zeigen lokale Uhrzeit, live mit HH:MM:SS wenn synchronisiert. Hover-Mini-Charts nutzen nun die gesamte Fläche, inkl. Achsen und Start/Mitte/Ende-Zeitlabels.
 - Zeitzonen-Wahl (Europe/Berlin, UTC, America/New_York, Asia/Tokyo u.a.) wird in NVS gespeichert; Fallback auf relative Zeit (mm:ss) bei fehlender Zeitsynchronisation.
+- Neue Bucket-Strategie: Live/6h aggregiert in 5-Minuten-Buckets, 24h aggregiert in 15-Minuten-Buckets (RAM-schonend). Der große Dashboard-Chart zeigt jetzt 24h/15m mit wählbarer Metrik.
 
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
@@ -56,7 +57,8 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Dashboard-Kacheln nutzen jetzt ein kleines Auge-Icon zum Ein-/Ausblenden; eingeklappte Kacheln schrumpfen auf den Header (keine Werte oder Hover-Charts) und werden per Klick erst wieder erweitert, ohne direkt das Detail-Modal zu öffnen. Der Status wird je Kachel in `localStorage` (`tile_visibility_v026`) gespeichert und startet standardmäßig sichtbar.
 - Hotfix: UI-Interaktionen (Navigation, Dev-Modal, Hover-/Detail-Charts) und die Wi-Fi-Karte (Verbunden-Status, SSID/IP, RSSI-Balken, Static-IP-Toggle) sind wiederhergestellt.
 - NTP-Synchronisation nach Wi-Fi-Verbindung mit periodischem Refresh, drei Zeitservern und persistenter Zeitzone (Preferences/NVS).
-- `/api/telemetry` und `/api/history` geben Epoch-Millisekunden zurück; Haupt-/Hover-/Detail-Charts zeigen lokale Uhrzeit (HH:MM bzw. HH:MM:SS) und fallen bei fehlender Synchronisation auf relative Zeiten zurück.
+- `/api/telemetry` und `/api/history` geben Epoch-Millisekunden zurück; Haupt-/Hover-/Detail-Charts zeigen lokale Uhrzeit (HH:MM bzw. HH:MM:SS) und fallen bei fehlender Synchronisation auf relative Zeiten zurück. Hover-Charts rendern wieder korrekt skaliert mit Achsen.
+- Bucketed Charts: Live/6h in 5-Minuten-Buckets, 24h in 15-Minuten-Buckets. Das Detail-Modal hat jetzt Live/6h/24h-Tabs und der große Dashboard-Chart zeigt eine auswählbare Metrik über die letzten 24h (15m).
 - Zeitzonen-Dropdown im Header + Live-Uhranzeige; unsynced-Status klar sichtbar per Badge.
 
   (v0.2.6 bleibt ungetestet – bitte vorsichtig einsetzen.)
