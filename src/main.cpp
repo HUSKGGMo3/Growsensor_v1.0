@@ -1116,22 +1116,24 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .card-header { display:flex; align-items:center; justify-content: space-between; gap:8px; }
       .status-dot { width:12px; height:12px; border-radius:50%; background:#6b7280; box-shadow:0 0 0 3px rgba(107,114,128,0.25); }
       .tile-title { display:flex; align-items:center; gap:8px; }
-      .tile-toggle-btn { pointer-events:auto; display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border-radius:999px; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; min-width:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; position:relative; }
-      .tile-toggle-btn .toggle-dot { position:absolute; width:9px; height:9px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(52,211,153,0.3); transition:background 120ms ease, box-shadow 180ms ease, transform 160ms ease, opacity 160ms ease; right:6px; top:6px; }
-      .tile-toggle-btn .toggle-icon { font-size:0.9rem; opacity:0.9; pointer-events:none; }
-      .tile-toggle-btn.off { border-color:#b91c1c; }
-      .tile-toggle-btn.off .toggle-dot { background:#ef4444; box-shadow:0 0 0 4px rgba(248,113,113,0.32); opacity:0.95; }
-      .tile-toggle-btn:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
-      .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; }
+      .tile-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
+      .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; padding-bottom:48px; }
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
       .tile-body { transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; }
-      .metric-tile.collapsed { max-height:64px; padding-bottom:10px; opacity:0.96; transform:translateY(0); }
+      .metric-tile.collapsed { max-height:96px; min-height:64px; padding-bottom:16px; opacity:0.98; transform:translateY(0); }
       .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); display:none; }
       .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
+      .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; }
+      .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; pointer-events:none; }
       .metric-tile:hover .hover-chart { display:flex; }
-      .metric-tile .tile-toggle-btn, .metric-tile .tile-toggle-btn * { pointer-events:auto; }
+      .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; }
+      .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
+      .tile-eye:active { transform:translateY(0); }
+      .tile-eye svg { width:18px; height:18px; display:block; }
+      .tile-eye .eye-closed { display:none; }
+      .metric-tile.collapsed .tile-eye .eye-open { display:none; }
+      .metric-tile.collapsed .tile-eye .eye-closed { display:block; }
       .hover-chart canvas { width:100%; height:140px; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
@@ -1190,6 +1192,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .time-row { margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
       .tz-select { width:auto; min-width:160px; }
       .time-text { font-size:0.9rem; color:#cbd5e1; }
+      .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+      .row.hidden { display:none !important; }
     </style>
   </head>
   <body>
@@ -1236,7 +1240,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="lux">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="lux" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="lux">–</div>
@@ -1246,7 +1249,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="ppfd">
           <div class="card-header tile-header">
             <div class="tile-title"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="ppfd" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="ppfd">–</div>
@@ -1257,7 +1259,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="co2">
           <div class="card-header tile-header">
             <div class="tile-title"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
-            <button class="tile-toggle-btn" data-metric="co2" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="co2">–</div>
@@ -1267,7 +1268,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="temp">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="temp" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="temp">–</div>
@@ -1277,7 +1277,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="humidity">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="humidity" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="humidity">–</div>
@@ -1287,7 +1286,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="leaf">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="leaf" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="leaf">–</div>
@@ -1297,7 +1295,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="vpd">
           <div class="card-header tile-header">
             <div class="tile-title"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="vpd" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="vpd">–</div>
@@ -1389,7 +1386,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               <input type="checkbox" id="staticIpToggle" style="width:auto;"> Static IP
             </label>
           </div>
-          <div class="row">
+          <div class="row hidden" id="staticIpRow">
             <input id="ip" placeholder="IP (optional)" class="dev-only" />
             <input id="gw" placeholder="Gateway (optional)" class="dev-only" />
             <input id="sn" placeholder="Subnet (optional)" class="dev-only" />
@@ -1566,6 +1563,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         pushError('Missing DOM element: clearErrors');
       }
 
+      window.addEventListener('error', (event) => {
+        const msg = event?.message || 'Uncaught JS error';
+        pushError(`JS Error: ${msg}`);
+      });
+
+      window.addEventListener('unhandledrejection', (event) => {
+        const reason = event?.reason;
+        const msg = (reason && reason.message) ? reason.message : (typeof reason === 'string' ? reason : 'Unhandled promise rejection');
+        pushError(`JS Promise: ${msg}`);
+      });
+
       function getEl(id) {
         const el = document.getElementById(id);
         if (!el) pushError(`Missing DOM element: ${id}`);
@@ -1596,149 +1604,81 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         { id:'leaf', label:'Leaf-Temp', unit:'°C', defaultVisible:true, defaultOrder:5 },
         { id:'vpd', label:'VPD', unit:'kPa', defaultVisible:true, defaultOrder:6 },
       ];
-      const TILE_STATE_KEY = 'dashboardTilePrefs';
-      const TILE_INSERT_EARLY_CAP = 6;
-      let tileCollapsed = {};
-      let tileOrder = TILE_DEFS.map(t => t.id);
+      const TILE_VISIBILITY_KEY = 'tile_visibility_v026';
+      let tileVisibility = {};
+      const tileOrder = TILE_DEFS.map(t => t.id);
+      const TILE_EYE_MARKUP = `<button class=\"tile-eye\" type=\"button\" aria-pressed=\"true\" title=\"Kachel einklappen\" aria-label=\"Kachel einklappen\"><span class=\"sr-only\">Kachel ein-/ausblenden</span><svg class=\"eye-open\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 5c-5 0-9 7-9 7s4 7 9 7 9-7 9-7-4-7-9-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z\" fill=\"currentColor\"/></svg><svg class=\"eye-closed\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m3 3 18 18-1.4 1.4-3.1-3.1C15 20.3 13.5 21 12 21c-5 0-9-7-9-7 0-.9 1.1-3 3-4.9L1.6 4.4 3 3zm5 5.6 2 2A2 2 0 0 0 10 12a2 2 0 0 0 2 2c.4 0 .7-.1 1-.3l2 2c-.9.5-1.9.8-3 .8-2.8 0-5-2.2-5-5 0-.9.2-1.7.5-2.5zm3.9-3.1c5 0 9 7 9 7 0 1.1-1.3 3.7-3.8 5.5l-1.5-1.5c1.7-1.2 2.9-3 3.3-3.9-.7-1.1-3.4-5.1-7-5.1-.7 0-1.3.1-1.9.3l-1.6-1.6c.9-.3 1.8-.5 2.8-.5z\" fill=\"currentColor\"/></svg></button>`;
 
-      function tileMeta(id) {
-        return TILE_DEFS.find(t => t.id === id) || { id, label: id.toUpperCase(), unit:'', defaultVisible:true, defaultOrder: TILE_INSERT_EARLY_CAP - 1 };
-      }
-
-      function loadTilePrefs() {
+      function loadTileVisibility() {
         let saved = {};
         try {
-          saved = JSON.parse(localStorage.getItem(TILE_STATE_KEY) || '{}') || {};
+          saved = JSON.parse(localStorage.getItem(TILE_VISIBILITY_KEY) || '{}') || {};
         } catch (err) {
-          console.warn('Failed to parse tile prefs', err);
-          saved = {};
+          console.warn('Failed to parse tile visibility', err);
         }
-        const savedVis = (saved && typeof saved.visibility === 'object') ? saved.visibility : {};
-        const savedCollapsed = (saved && typeof saved.collapsed === 'object') ? saved.collapsed : {};
-        tileCollapsed = {};
-        const normalizeVisible = (val, fallback = true) => {
-          if (val === undefined) return fallback;
-          if (val === false || val === 0 || val === '0') return false;
-          return true;
+        tileVisibility = {};
+        const setDefault = (id, fallback = true) => {
+          tileVisibility[id] = saved[id] !== undefined ? saved[id] !== false : fallback !== false;
         };
-        const ensureCollapsed = (id) => {
-          const meta = tileMeta(id);
-          if (Object.prototype.hasOwnProperty.call(savedCollapsed, id)) {
-            tileCollapsed[id] = savedCollapsed[id] === true;
-          } else if (Object.prototype.hasOwnProperty.call(savedVis, id)) {
-            tileCollapsed[id] = !normalizeVisible(savedVis[id], meta.defaultVisible !== false);
-          } else {
-            tileCollapsed[id] = false;
-          }
-        };
-        TILE_DEFS.forEach(def => ensureCollapsed(def.id));
-        Object.keys(savedCollapsed).forEach(id => {
-          if (!Object.prototype.hasOwnProperty.call(tileCollapsed, id)) {
-            tileCollapsed[id] = savedCollapsed[id] === true;
+        TILE_DEFS.forEach(def => setDefault(def.id, true));
+        Object.keys(saved || {}).forEach(id => {
+          if (!Object.prototype.hasOwnProperty.call(tileVisibility, id)) {
+            tileVisibility[id] = saved[id] !== false;
           }
         });
-        Object.keys(savedVis).forEach(id => {
-          if (!Object.prototype.hasOwnProperty.call(tileCollapsed, id)) {
-            tileCollapsed[id] = !normalizeVisible(savedVis[id], true);
-          }
-        });
-        const savedOrder = Array.isArray(saved.order) ? saved.order.filter(id => typeof id === 'string') : [];
-        const baseOrder = TILE_DEFS.slice().sort((a,b) => (a.defaultOrder ?? 0) - (b.defaultOrder ?? 0)).map(d => d.id);
-        const seen = new Set();
-        const nextOrder = [];
-        const pushId = (id, preferEarly = false) => {
-          if (!id || seen.has(id)) return;
-          const idx = preferEarly ? Math.min(nextOrder.length, TILE_INSERT_EARLY_CAP) : nextOrder.length;
-          nextOrder.splice(idx, 0, id);
-          seen.add(id);
-        };
-        savedOrder.forEach(id => pushId(id));
-        baseOrder.forEach((id, idx) => {
-          const meta = tileMeta(id);
-          pushId(id, (meta.defaultOrder ?? idx) < TILE_INSERT_EARLY_CAP);
-        });
-        Object.keys(tileCollapsed).forEach(id => {
-          if (!seen.has(id)) pushId(id, true);
-        });
-        tileOrder = nextOrder;
       }
 
-      function persistTilePrefs() {
+      function persistTileVisibility() {
         try {
-          localStorage.setItem(TILE_STATE_KEY, JSON.stringify({ collapsed: tileCollapsed, order: tileOrder }));
+          localStorage.setItem(TILE_VISIBILITY_KEY, JSON.stringify(tileVisibility));
         } catch (err) {
-          console.warn('Failed to store tile prefs', err);
+          console.warn('Failed to store tile visibility', err);
         }
       }
 
-      function syncTilesFromDom() {
+      function tileIsExpanded(metric) {
+        if (!(metric in tileVisibility)) tileVisibility[metric] = true;
+        return tileVisibility[metric] !== false;
+      }
+
+      function updateEyeVisual(btn, expanded) {
+        if (!btn) return;
+        const label = expanded ? 'Kachel einklappen' : 'Kachel anzeigen';
+        btn.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+        btn.setAttribute('aria-label', label);
+        btn.setAttribute('title', label);
+      }
+
+      function applyTileVisibility() {
         document.querySelectorAll('.metric-tile').forEach(tile => {
-          const id = tile.dataset.metric;
-          if (!id) return;
-          if (tileCollapsed[id] === undefined) tileCollapsed[id] = false;
-          if (!tileOrder.includes(id)) {
-            const insertAt = Math.min(tileOrder.length, TILE_INSERT_EARLY_CAP);
-            tileOrder.splice(insertAt, 0, id);
+          const metric = tile.dataset.metric;
+          if (!metric) return;
+          const expanded = tileIsExpanded(metric);
+          tile.classList.toggle('collapsed', !expanded);
+          updateEyeVisual(tile.querySelector('.tile-eye'), expanded);
+        });
+      }
+
+      function setTileExpanded(metric, expanded, persist = true) {
+        tileVisibility[metric] = expanded !== false;
+        applyTileVisibility();
+        if (persist) persistTileVisibility();
+      }
+
+      function ensureTileEyes() {
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const metric = tile.dataset.metric || '';
+          if (!tile.querySelector('.tile-eye')) {
+            tile.insertAdjacentHTML('beforeend', TILE_EYE_MARKUP);
           }
+          const eye = tile.querySelector('.tile-eye');
+          if (eye) eye.dataset.metric = metric;
         });
       }
 
-      function applyTileOrder() {
-        const grid = document.querySelector('.metrics');
-        if (!grid) return;
-        const tileMap = new Map();
-        grid.querySelectorAll('.metric-tile').forEach(el => tileMap.set(el.dataset.metric, el));
-        tileOrder.forEach(id => {
-          const node = tileMap.get(id);
-          if (node) grid.appendChild(node);
-        });
-        tileMap.forEach((node, id) => {
-          if (!tileOrder.includes(id)) grid.appendChild(node);
-        });
-      }
-
-      function setToggleVisual(toggleBtn, collapsed, healthy = false) {
-        if (!toggleBtn) return;
-        const dot = toggleBtn.querySelector('.toggle-dot');
-        const active = !collapsed && healthy;
-        toggleBtn.classList.toggle('off', !active);
-        toggleBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
-        toggleBtn.setAttribute('aria-label', collapsed ? 'Anzeigen' : 'Einklappen');
-        toggleBtn.setAttribute('title', collapsed ? 'Kachel anzeigen' : 'Kachel einklappen');
-        if (dot) {
-          dot.style.background = active ? '#22c55e' : '#ef4444';
-          dot.classList.toggle('pulse', active);
-          dot.style.boxShadow = active ? '0 0 0 4px rgba(52,211,153,0.3)' : '0 0 0 4px rgba(248,113,113,0.32)';
-          dot.style.opacity = active ? '1' : '0.95';
-        }
-        const icon = toggleBtn.querySelector('.toggle-icon');
-        if (icon) icon.textContent = collapsed ? '+' : '–';
-      }
-
-      function applyTileCollapseState() {
-        document.querySelectorAll('.metric-tile').forEach(tile => {
-          const id = tile.dataset.metric;
-          if (!id) return;
-          const collapsed = tileCollapsed[id] === true;
-          tile.classList.toggle('collapsed', collapsed);
-          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, metricIsHealthy(id));
-        });
-      }
-
-      function updateTileCollapsed(metric, collapsed, persist = true) {
-        tileCollapsed[metric] = collapsed === true;
-        const tile = document.querySelector(`.metric-tile[data-metric="${metric}"]`);
-        if (tile) {
-          tile.classList.toggle('collapsed', collapsed);
-          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, metricIsHealthy(metric));
-        }
-        if (persist) persistTilePrefs();
-      }
-
-      loadTilePrefs();
-      syncTilesFromDom();
-      applyTileOrder();
-      applyTileCollapseState();
+      loadTileVisibility();
+      ensureTileEyes();
+      applyTileVisibility();
 
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
@@ -1974,10 +1914,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const metric = tile.dataset.metric;
           if (!metric) return;
           const state = metricStatus(metric, lastTelemetryPayload);
-          const collapsed = tileCollapsed[metric] === true;
+          const expanded = tileIsExpanded(metric);
           const dotId = `${metric}Dot`;
           setDot(dotId, state.ok, state.present, state.enabled);
-          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, state.healthy);
+          tile.classList.toggle('collapsed', !expanded);
+          updateEyeVisual(tile.querySelector('.tile-eye'), expanded);
         });
       }
 
@@ -2303,7 +2244,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
         drawChart();
         updateAverages();
-        tileOrder.forEach(drawHover);
+        tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
       }
 
       function updateAverages() {
@@ -2479,7 +2420,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
           drawChart();
           updateAverages();
-          tileOrder.forEach(drawHover);
+          tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
           renderVpdTile(data);
           renderDetail();
           applyWifiState(data);
@@ -2792,12 +2733,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function updateStaticIpVisibility() {
         const toggle = getEl('staticIpToggle');
         const checked = toggle ? toggle.checked : false;
-        ['ip','gw','sn'].forEach(id => {
-          const el = getEl(id);
-          if (el && el.parentElement) {
-            el.parentElement.style.display = checked ? 'flex' : 'none';
-          }
-        });
+        const wrapper = getEl('staticIpRow');
+        if (wrapper) wrapper.classList.toggle('hidden', !checked);
       }
 
       if (timezoneSelect) {
@@ -2963,31 +2900,32 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       document.querySelectorAll('.metric-tile').forEach(card => {
         const metric = card.dataset.metric;
         card.addEventListener('mouseenter', () => {
-          if (tileCollapsed[metric] === true) return;
+          if (!tileIsExpanded(metric)) return;
           drawHover(metric);
         });
       });
 
-      document.querySelectorAll('.tile-toggle-btn').forEach(btn => {
+      document.querySelectorAll('.tile-eye').forEach(btn => {
         const metric = btn.dataset.metric;
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
+          e.preventDefault();
           if (!metric) return;
-          const nextState = !(tileCollapsed[metric] === true);
-          updateTileCollapsed(metric, nextState);
+          setTileExpanded(metric, !tileIsExpanded(metric));
         });
       });
 
       document.addEventListener('click', (e) => {
+        if (!(e.target instanceof Element)) return;
         const tile = e.target.closest('.metric-tile');
         if (tile) {
           const metric = tile.dataset.metric;
           if (!metric) return;
-          if (tileCollapsed[metric] === true) {
-            updateTileCollapsed(metric, false);
+          if (e.target.closest('.tile-eye')) return;
+          if (!tileIsExpanded(metric)) {
+            setTileExpanded(metric, true);
             return;
           }
-          if (e.target.closest('.tile-toggle-btn')) return;
           openDetailModal(metric);
         }
       });
@@ -3041,22 +2979,30 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const navSensors = getEl('navSensors');
       if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
 
-      function applyWifiState(data) {
-        const connected = flag(data.wifi_connected);
-        const ap = flag(data.ap_mode);
+      function applyWifiState(data = {}) {
+        const connected = flag(data?.wifi_connected);
+        const ap = flag(data?.ap_mode);
+        const showConnected = connected && !ap;
         const form = getEl('wifiForm');
         const block = getEl('wifiConnectedBlock');
-        if (!form || !block) return;
-        if (connected && !ap && !wifiFormOpen) {
-          block.classList.remove('hidden');
-          form.classList.add('hidden');
-          setText('wifiIp', data.ip || '–');
-          setText('wifiSsid', data.ssid || '–');
-          updateWifiBars(data.rssi);
-        } else {
-          block.classList.toggle('hidden', !(connected && !ap));
-          form.classList.toggle('hidden', !wifiFormOpen ? (connected && !ap) : false);
+        if (block) {
+          block.classList.toggle('hidden', !showConnected);
+          if (showConnected) {
+            setText('wifiIp', data.ip || data.ip_active || '–');
+            setText('wifiSsid', data.ssid || data.ssid_active || '–');
+            updateWifiBars(typeof data.rssi === 'number' ? data.rssi : null);
+          } else {
+            setText('wifiIp', '–');
+            setText('wifiSsid', '–');
+            updateWifiBars(null);
+          }
         }
+        if (form) {
+          const showForm = wifiFormOpen || !showConnected;
+          form.classList.toggle('hidden', !showForm);
+        }
+        const toggleBtn = getEl('toggleWifiForm');
+        if (toggleBtn) toggleBtn.textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
       }
 
       function updateWifiBars(rssi) {
@@ -3075,11 +3021,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const toggleWifiFormBtn = getEl('toggleWifiForm');
       if (toggleWifiFormBtn) toggleWifiFormBtn.addEventListener('click', () => {
         wifiFormOpen = !wifiFormOpen;
-        const form = getEl('wifiForm');
-        if (form) {
-          if (wifiFormOpen) form.classList.remove('hidden'); else form.classList.add('hidden');
-        }
-        toggleWifiFormBtn.textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
+        applyWifiState(lastTelemetryPayload);
       });
 
       function setDevVisible() {

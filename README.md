@@ -53,10 +53,8 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    ```
 
 ## v0.2.6 Changes
-- Tiles can now be collapsed or expanded directly on each dashboard tile via the top-right toggle; the control shows green only when the tile is expanded *and* the related sensor is present, enabled, healthy, and serving valid data (otherwise it stays red).
-- Collapsed tiles now shrink to a compact height (only the header stays visible), hide hover charts, and do not open the detail modal when clicked.
-- New metrics default to expanded and are inserted near the top of the dashboard (first two rows) via an explicit tile order.
-- The collapsed state is persisted in the browser (`localStorage`) and survives reloads/reboots; this only changes what is shown, not sensor collection.
+- Dashboard tiles can now be collapsed or expanded via a small eye icon; collapsed tiles shrink to a header-only view (no values or hover charts) and clicks expand them without opening the detail modal. State is stored per tile in `localStorage` (`tile_visibility_v026`) and defaults to visible for all metrics.
+- Hotfix: restored broken UI interactions (dashboard navigation, dev mode modal, hover/detail charts) and Wi‑Fi information (connected state, SSID/IP, RSSI bars, static-IP toggle).
 - NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).
 - `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts.
 - Header timezone dropdown with persistent selection and live clock.
