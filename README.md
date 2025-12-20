@@ -9,6 +9,7 @@
 - Hardened cloud state & runtime flags: `/api/cloud` now distinguishes persisted vs. runtime enablement, recording, queue size, last upload/test path/time, reasons, and failure counters. The worker ticks ~1.5s with tiered retry backoff (5s/15s/60s, max 5 attempts), enqueues a recording-start event immediately, and pushes per-minute recording snapshots under `/GrowSensor/<deviceId>/samples/...`.
 - New `/api/cloud/test` endpoint and “Sende Test” UI button create `TestCloud_<deviceId>_<timestamp>.txt` via MKCOL/PUT under `/GrowSensor/<deviceId>/` (LAN WebDAV), returning HTTP code/path/bytes for end-to-end verification.
 - Nextcloud HTTP/HTTPS toggle (`use_tls`): explicit “Nextcloud lokal (HTTP, kein TLS)” mode uses plain `WiFiClient` (no TLS warnings), auto-detects schemes from URLs, surfaces upload root `/GrowSensor/<deviceId>/` in the UI, and keeps the config flag persisted across reboots.
+- Hotfix v0.3.2: fixed missing declarations/helpers in the cloud recording pipeline; restored successful build.
 
 ### Patch v0.3.1 (experimental, HTTP-only LAN cloud)
 - New **Cloud** tab (visible for all users) to configure LAN-only Nextcloud WebDAV logging over HTTP. Stores credentials in a dedicated `cloud` namespace, never wipes Wi‑Fi/settings, and warns when using HTTP (plaintext). Includes Test/Start/Stop controls, queue/failure counters, and a retention selector (1–4 months).

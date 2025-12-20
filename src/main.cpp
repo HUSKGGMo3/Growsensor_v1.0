@@ -86,6 +86,12 @@ bool isTimeSynced();
 void onTimeSynchronized(uint64_t epochNowMs, uint32_t monotonicNowMs);
 uint64_t mapTimestampToEpochMs(uint32_t monotonicTs);
 uint64_t currentEpochMs();
+String cloudRootPath();
+float safeFloat(float v, float fallback = 0.0f);
+int safeInt(int v, int fallback = 0);
+void enqueueCloudJob(const String &path, const String &payload, const String &dayKey,
+                     const String &kind = "generic", const String &contentType = "application/json",
+                     bool replaceByPath = true);
 // Auth
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
@@ -1012,13 +1018,13 @@ String buildRecordingPayload(uint64_t epochMs) {
   net["ip"] = (wifiConnected ? WiFi.localIP() : WiFi.softAPIP()).toString();
   net["ap_mode"] = apMode;
   JsonObject metrics = doc.createNestedObject("metrics");
-  metrics["lux"] = safeFloat(latest.lux);
-  metrics["ppfd"] = safeFloat(latest.ppfd);
-  metrics["temp"] = safeFloat(latest.ambientTempC);
-  metrics["humidity"] = safeFloat(latest.humidity);
-  metrics["leaf"] = safeFloat(latest.leafTempC);
-  metrics["co2"] = safeInt(latest.co2ppm, -1);
-  metrics["vpd"] = safeFloat(latest.vpd);
+  metrics["lux"] = isfinite(latest.lux) ? latest.lux : nullptr;
+  metrics["ppfd"] = isfinite(latest.ppfd) ? latest.ppfd : nullptr;
+  metrics["temp"] = isfinite(latest.ambientTempC) ? latest.ambientTempC : nullptr;
+  metrics["humidity"] = isfinite(latest.humidity) ? latest.humidity : nullptr;
+  metrics["leaf"] = isfinite(latest.leafTempC) ? latest.leafTempC : nullptr;
+  metrics["co2"] = (latest.co2ppm >= 0) ? latest.co2ppm : nullptr;
+  metrics["vpd"] = isfinite(latest.vpd) ? latest.vpd : nullptr;
   String payload;
   serializeJson(doc, payload);
   return payload;
@@ -1173,7 +1179,7 @@ void pushHistoryValue(const char *metric, float value, uint64_t ts) {
   }
 }
 
-float safeFloat(float v, float fallback = 0.0f) { return isnan(v) ? fallback : v; }
+float safeFloat(float v, float fallback = 0.0f) { return isfinite(v) ? v : fallback; }
 int safeInt(int v, int fallback = 0) { return v < 0 ? fallback : v; }
 
 float currentPpfdFactor() {
