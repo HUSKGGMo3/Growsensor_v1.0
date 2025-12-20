@@ -3,7 +3,8 @@
 **Aktuelle Version: v0.3.3 (experimentell / ungetestet)**
 
 ### Patch v0.3.3 (experimentell, Cloud-first + Long-Range-Cloud-Gating)
-- Cloud-UI zeigt Connected/Enabled/Recording, letzte Uploads/Errors und klappt die Login-Daten nach erfolgreicher Verbindung ein (Edit zum Öffnen). Optionales „Login-Daten dauerhaft speichern“ hält Base-URL/User/App-Passwort über Reboots; „Forget credentials“ löscht nur Cloud-Keys.
+- Cloud-UI zeigt Connected/Enabled/Recording, letzte Uploads/Errors und nutzt ein Credentials-Accordion, das bei „connected + gespeichert“ automatisch einklappt. Optionales „Login-Daten dauerhaft speichern“ hält Base-URL/User/App-Passwort über Reboots; „Forget credentials“ löscht nur Cloud-Keys.
+- WebDAV-Base-URL muss mit Slash enden (`http://host/remote.php/dav/files/<user>/`). Uploads landen in `/GrowSensor/<deviceId>/(samples|daily|meta|logs)`, und „Sende Test“ führt einen echten PUT-Upload aus.
 - Cloud-first Storage: bei `cloudStorageActive` (enabled + connected + recording) bleiben nur RAM-Puffer + Cloud-Queue, während offline auf lokale 24h-History zurückgefallen wird.
 - Long-Range-Charts (1–4 Monate) sind in UI und API hart an Cloud gebunden; `/api/cloud/daily` proxy’d Daily-Aggregates mit kurzem RAM-Cache und liefert 403, wenn Cloud inaktiv ist.
 - Cloud-Logs landen als Chunk-Dateien unter `/GrowSensor/<deviceId>/logs/chunks/` (ISO | Level | Source | Message) ohne WebDAV-Append.

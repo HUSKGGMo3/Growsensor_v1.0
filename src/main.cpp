@@ -18,6 +18,10 @@
 #include <algorithm>
 #include <esp_system.h>
 
+#ifndef CLOUD_DIAG
+#define CLOUD_DIAG 0
+#endif
+
 #ifndef ENABLE_MDNS
 #define ENABLE_MDNS 1
 #endif
@@ -97,6 +101,8 @@ uint64_t mapTimestampToEpochMs(uint32_t monotonicTs);
 uint64_t currentEpochMs();
 String cloudRootPath();
 String normalizeCloudBaseUrl(String url);
+String ensureTrailingSlash(String s);
+String joinUrl(const String &base, const String &rel);
 float safeFloat(float v, float fallback = 0.0f);
 int safeInt(int v, int fallback = 0);
 void enqueueCloudJob(const String &path, const String &payload, const String &dayKey,
@@ -330,6 +336,7 @@ struct CloudStatus {
   bool enabled = false;           // persisted flag
   bool runtimeEnabled = false;    // worker flag
   bool recording = false;
+  bool foldersReady = true;
   uint64_t lastUploadMs = 0;
   uint64_t lastFailureMs = 0;
   uint64_t lastPingMs = 0;
@@ -337,7 +344,9 @@ struct CloudStatus {
   uint64_t lastConfigSaveMs = 0;
   uint64_t lastStateChangeMs = 0;
   uint32_t failureCount = 0;
+  int lastHttpCode = 0;
   String lastError;
+  String lastUrl;
   String lastUploadedPath;
   String lastStateReason;
   String deviceFolder;
@@ -403,7 +412,7 @@ void appendLogLine(const String &line);
 void logEvent(const String &msg, const String &level = "info", const String &source = "system");
 String deviceId();
 String buildCloudUrl(const String &path);
-bool ensureCollection(const String &url);
+bool ensureCollection(const String &path, const char *label);
 
 // Sensor toggles (persisted)
 bool enableLight = true;
@@ -652,12 +661,15 @@ void markCloudSuccess(const String &reason = "cloud ok") {
   lastCloudOkEpochMs = currentEpochMs();
   cloudStatus.lastPingMs = lastCloudOkEpochMs;
   cloudStatus.lastError = "";
+  cloudStatus.lastHttpCode = 0;
+  cloudStatus.lastUrl = "";
   cloudStatus.lastStateReason = reason;
   cloudStatus.lastStateChangeMs = currentEpochMs();
   refreshStorageMode(reason);
 }
 
 void markCloudFailure(const String &msg) {
+  lastCloudOkMs = 0;
   cloudStatus.lastError = msg;
   cloudStatus.failureCount++;
   cloudStatus.lastFailureMs = currentEpochMs();
@@ -903,14 +915,35 @@ String safeBaseUrl() {
 
 String normalizeCloudBaseUrl(String url) {
   url.trim();
-  while (url.endsWith("/")) url.remove(url.length() - 1);
   if (url.length() == 0) return "";
   if (url.startsWith("https://")) {
     url = "http://" + url.substring(strlen("https://"));
   } else if (!url.startsWith("http://")) {
     url = "http://" + url;
   }
-  return url;
+  String rootTag = String("/") + CLOUD_ROOT_FOLDER;
+  int idx = url.lastIndexOf(rootTag);
+  if (idx > 0) {
+    int end = idx + rootTag.length();
+    if (end == (int)url.length() || url.charAt(end) == '/') {
+      url = url.substring(0, idx);
+    }
+  }
+  return ensureTrailingSlash(url);
+}
+
+String ensureTrailingSlash(String s) {
+  while (s.endsWith("/")) s.remove(s.length() - 1);
+  if (s.length() == 0) return s;
+  s += "/";
+  return s;
+}
+
+String joinUrl(const String &base, const String &rel) {
+  String cleanBase = ensureTrailingSlash(base);
+  String cleanRel = rel;
+  while (cleanRel.startsWith("/")) cleanRel.remove(0, 1);
+  return cleanBase + cleanRel;
 }
 
 String cloudDeviceRoot() {
@@ -918,12 +951,7 @@ String cloudDeviceRoot() {
 }
 
 String cloudRootPath() {
-  String base = safeBaseUrl();
-  String devRoot = cloudDeviceRoot();
-  if (base.endsWith(devRoot) || base.endsWith(devRoot + "/")) return devRoot;
-  String rootOnly = String("/") + CLOUD_ROOT_FOLDER;
-  if (base.endsWith(rootOnly) || base.endsWith(rootOnly + "/")) return devRoot;
-  return devRoot;
+  return cloudDeviceRoot();
 }
 
 String cloudDailyMonthPath(const String &dayKey) {
@@ -983,13 +1011,17 @@ bool cloudEnsureFolders(const String &dayKey) {
   String samplesDayPath = dayKey.length() > 0 ? samplesPath + "/" + dayKey : "";
   String logsPath = deviceRoot + "/logs";
   String logsChunksPath = logsPath + "/chunks";
-  const String paths[] = {baseRoot, deviceRoot, metaPath, dailyPath, samplesPath, samplesDayPath, monthPath, logsPath, logsChunksPath};
   bool ok = true;
-  for (const auto &p : paths) {
-    if (p.length() == 0) continue;
-    String url = buildCloudUrl(p.startsWith("/") ? p : (String("/") + p));
-    ok = ensureCollection(url) && ok;
-  }
+  if (!ensureCollection(baseRoot, "root")) ok = false;
+  if (!ensureCollection(deviceRoot, "device")) ok = false;
+  if (!ensureCollection(samplesPath, "samples")) ok = false;
+  if (!ensureCollection(dailyPath, "daily")) ok = false;
+  if (!ensureCollection(metaPath, "meta")) ok = false;
+  if (!ensureCollection(logsPath, "logs")) ok = false;
+  if (!ensureCollection(logsChunksPath, "logc")) ok = false;
+  if (samplesDayPath.length() > 0 && !ensureCollection(samplesDayPath, "sday")) ok = false;
+  if (monthPath.length() > 0 && !ensureCollection(monthPath, "month")) ok = false;
+  cloudStatus.foldersReady = ok;
   return ok;
 }
 
@@ -1130,6 +1162,7 @@ void enqueueRecordingEvent(const String &event, const String &reason) {
 
 void enqueueCloudJob(const String &path, const String &payload, const String &dayKey, const String &kind, const String &contentType, bool replaceByPath) {
   if (!cloudConfig.enabled || cloudConfig.baseUrl.length() == 0 || payload.length() == 0) return;
+  if (!cloudStatus.foldersReady) return;
   String finalPath = path.startsWith("/") ? path : (String("/") + path);
   for (auto &job : cloudQueue) {
     if (replaceByPath && job.path == finalPath) {
@@ -1412,25 +1445,24 @@ void flushCloudLogs(bool force = false) {
 String buildCloudUrl(const String &path) {
   String base = safeBaseUrl();
   if (base.length() == 0) return "";
-  String full = base;
   String cleanedPath = path;
   while (cleanedPath.startsWith("//")) cleanedPath.remove(0, 1);
-  if (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
-  String devRoot = cloudDeviceRoot();
-  String rootOnly = String("/") + CLOUD_ROOT_FOLDER;
-  if (full.endsWith(devRoot) || full.endsWith(devRoot + "/")) {
-    if (cleanedPath.startsWith(devRoot.substring(1))) {
-      cleanedPath = cleanedPath.substring(devRoot.length() - 1);
-      while (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
-    }
-  } else if (full.endsWith(rootOnly) || full.endsWith(rootOnly + "/")) {
-    if (cleanedPath.startsWith(rootOnly.substring(1))) {
-      cleanedPath = cleanedPath.substring(rootOnly.length() - 1);
-      while (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
-    }
-  }
-  if (!full.endsWith("/")) full += "/";
-  return full + cleanedPath;
+  return joinUrl(base, cleanedPath);
+}
+
+String cloudShortPath(const String &path) {
+  if (path.length() == 0) return "/";
+  return path.startsWith("/") ? path : (String("/") + path);
+}
+
+void setCloudError(const char *op, const String &label, const String &path, int code, const String &detail = "") {
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastUrl = cloudShortPath(path);
+  String msg = String(op) + " " + label + " -> " + String(code);
+#if CLOUD_DIAG
+  if (detail.length() > 0) msg += String(" ") + detail;
+#endif
+  markCloudFailure(msg);
 }
 
 bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS) {
@@ -1448,18 +1480,34 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
   }
   if (contentType) http.addHeader("Content-Type", contentType);
   if (method == "PROPFIND") http.addHeader("Depth", "0");
-  code = http.sendRequest(method.c_str(), body);
-  if (resp) *resp = http.getString();
+  if (method == "MKCOL") {
+    http.addHeader("Content-Length", "0");
+    code = http.sendRequest(method.c_str(), (uint8_t *)nullptr, 0);
+  } else if (method == "PUT") {
+    code = http.sendRequest(method.c_str(), (uint8_t *)body.c_str(), body.length());
+  } else {
+    code = http.sendRequest(method.c_str(), body);
+  }
+  if (resp) {
+    String out = http.getString();
+    if (out.length() > 120) out = out.substring(0, 120);
+    *resp = out;
+  }
   http.end();
   return code > 0;
 }
 
-bool ensureCollection(const String &url) {
+bool ensureCollection(const String &path, const char *label) {
+  String url = buildCloudUrl(path);
   int code = 0;
   String resp;
   bool ok = webdavRequest("MKCOL", url, "", "text/plain", code, &resp);
-  if (!ok) return false;
+  if (!ok) {
+    setCloudError("MKCOL", label, path, code, resp);
+    return false;
+  }
   if (code == 201 || code == 200 || code == 204 || code == 405 || code == 409) return true;
+  setCloudError("MKCOL", label, path, code, resp);
   return false;
 }
 
@@ -1472,17 +1520,31 @@ bool pingCloud(bool force = false) {
   unsigned long now = millis();
   if (!force && lastCloudPingMs != 0 && now - lastCloudPingMs < CLOUD_PING_INTERVAL_MS) return cloudHealthOk();
   lastCloudPingMs = now;
-  String path = cloudRootPath();
-  if (path.length() == 0) path = "/";
-  String url = buildCloudUrl(path);
+  String url = safeBaseUrl();
+  if (url.length() == 0) return false;
   int code = 0;
   String resp;
   bool ok = webdavRequest("PROPFIND", url, "", "text/plain", code, &resp);
-  if (ok && code >= 200 && code < 400) {
-    markCloudSuccess("cloud ping");
+  if (!ok) {
+    setCloudError("PROPFIND", "base", "/", code, resp);
+    return false;
+  }
+  if (code == 401 || code == 403) {
+    setCloudError("PROPFIND", "auth", "/", code, resp);
+    return false;
+  }
+  if (code == 404) {
+    setCloudError("PROPFIND", "base", "/", code, resp);
+    return false;
+  }
+  if (code >= 200 && code < 400) {
+    if (!cloudEnsureFolders("")) {
+      return false;
+    }
+    markCloudSuccess("cloud ok");
     return true;
   }
-  markCloudFailure("Conn test failed: " + String(code));
+  setCloudError("PROPFIND", "base", "/", code, resp);
   return false;
 }
 
@@ -1534,7 +1596,6 @@ bool uploadCloudJob(const CloudJob &job) {
   String fullPath = job.path;
   if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
   if (!cloudEnsureFolders(job.dayKey)) {
-    markCloudFailure("Ensure folders failed");
     return false;
   }
   String url = buildCloudUrl(fullPath);
@@ -1542,8 +1603,8 @@ bool uploadCloudJob(const CloudJob &job) {
   String resp;
   const char *ctype = job.contentType.length() > 0 ? job.contentType.c_str() : "application/json";
   bool ok = webdavRequest("PUT", url, job.payload, ctype, code, &resp, CLOUD_TEST_TIMEOUT_MS);
-  if (!ok || code < 200 || code >= 300) {
-    markCloudFailure("Upload failed: " + String(code));
+  if (!ok || (code != 200 && code != 201 && code != 204)) {
+    setCloudError("PUT", "upload", fullPath, code, resp);
     return false;
   }
   cloudStatus.lastUploadMs = currentEpochMs();
@@ -1621,25 +1682,23 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
   String stamp = fileSafeTimestamp(nowMs);
   String dayKey = currentDayKey();
   if (dayKey.length() == 0) dayKey = "unsynced";
-  pathOut = cloudDeviceRoot() + "/TestCloud_" + deviceId() + "_" + stamp + ".txt";
+  pathOut = cloudDeviceRoot() + "/meta/TestCloud_" + stamp + ".txt";
   if (!cloudEnsureFolders(dayKey)) {
-    errorOut = "Ensure folders failed";
+    errorOut = cloudStatus.lastError.length() > 0 ? cloudStatus.lastError : "MKCOL failed";
     return false;
   }
   IPAddress ip = apMode ? WiFi.softAPIP() : WiFi.localIP();
-  String body = "timestamp=" + isoTimestamp(nowMs) + "\n";
-  body += "epoch_ms=" + String((unsigned long long)nowMs) + "\n";
-  body += "deviceId=" + deviceId() + "\n";
-  body += "ip=" + ip.toString() + "\n";
+  String body = "ts=" + isoTimestamp(nowMs) + "\n";
+  body += "device=" + deviceId() + "\n";
   body += "ssid=" + (WiFi.status() == WL_CONNECTED ? WiFi.SSID() : savedSsid) + "\n";
-  body += "base_url=" + safeBaseUrl() + "\n";
-  body += "mode=http\n";
+  body += "ip=" + ip.toString() + "\n";
+  body += "base_path=" + cloudRootPath() + "\n";
   int code = 0;
   String resp;
   bytesOut = body.length();
   bool ok = webdavRequest("PUT", buildCloudUrl(pathOut), body, "text/plain", code, &resp, CLOUD_TEST_TIMEOUT_MS);
   httpCode = code;
-  if (ok && code >= 200 && code < 300) {
+  if (ok && (code == 200 || code == 201 || code == 204)) {
     cloudStatus.lastTestMs = currentEpochMs();
     cloudStatus.lastUploadMs = cloudStatus.lastTestMs;
     cloudStatus.lastUploadedPath = pathOut;
@@ -1647,8 +1706,8 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
     markCloudSuccess("test upload");
     return true;
   }
-  errorOut = resp.length() > 0 ? resp : String("HTTP ") + String(code);
-  markCloudFailure("Test upload failed: " + String(code));
+  setCloudError("PUT", "test", pathOut, code, resp);
+  errorOut = cloudStatus.lastError;
   return false;
 }
 
@@ -2432,8 +2491,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .cloud-status { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-top:8px; }
       .cloud-pill { background:#0b1220; border:1px solid #1f2937; border-radius:10px; padding:8px; display:flex; justify-content:space-between; align-items:center; }
       .cloud-credentials { margin-top:10px; border:1px solid #1f2937; border-radius:12px; padding:10px; background:#0b1220; }
-      .cloud-credentials.collapsed .cloud-credentials-body { display:none; }
       .cloud-credentials-header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .cloud-credentials-toggle { width:auto; padding:4px 8px; font-size:0.9rem; }
+      .cloud-credentials-summary { display:none; align-items:center; justify-content:space-between; gap:8px; margin-top:6px; font-size:0.9rem; color:#cbd5e1; }
+      .cloud-credentials-body { overflow:hidden; max-height:1200px; opacity:1; transition:max-height 200ms ease, opacity 160ms ease; }
+      .cloud-credentials.collapsed .cloud-credentials-body { max-height:0; opacity:0; pointer-events:none; }
+      .cloud-credentials.collapsed .cloud-credentials-summary { display:flex; }
       .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
       .error-banner ul { margin: 0; padding-left: 18px; }
       .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -2795,11 +2858,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               <div class="cloud-credentials" id="cloudCredentials">
                 <div class="cloud-credentials-header">
                   <strong>Login-Daten</strong>
-                  <button id="cloudEdit" class="ghost" style="width:auto;">Edit</button>
+                  <button id="cloudCredentialsToggle" class="ghost cloud-credentials-toggle" style="width:auto;">▼</button>
+                </div>
+                <div class="cloud-credentials-summary" id="cloudCredentialsSummary">
+                  <span id="cloudCredentialsSummaryText">Eingeloggt</span>
+                  <button id="cloudEdit" class="ghost" style="width:auto;">Bearbeiten</button>
                 </div>
                 <div class="cloud-credentials-body" id="cloudCredentialsBody">
                   <label for="cloudUrl">WebDAV Base URL</label>
-                  <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/GrowSensor/" />
+                  <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/" />
                   <label for="cloudUser">Username</label>
                   <input id="cloudUser" placeholder="Nextcloud Username" />
                   <label for="cloudPass">App-Passwort / Token</label>
@@ -3188,6 +3255,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const cloudPersistToggle = getEl('cloudPersist');
       const cloudCredentials = getEl('cloudCredentials');
       const cloudCredentialsBody = getEl('cloudCredentialsBody');
+      const cloudCredentialsToggle = getEl('cloudCredentialsToggle');
+      const cloudCredentialsSummary = getEl('cloudCredentialsSummary');
+      const cloudCredentialsSummaryText = getEl('cloudCredentialsSummaryText');
       const cloudEditBtn = getEl('cloudEdit');
       const cloudForgetBtn = getEl('cloudForget');
       const cloudStatusMsg = getEl('cloudStatusMsg');
@@ -5417,7 +5487,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         cloudState.recording = data.recording === undefined ? cloudState.recording : flag(data.recording);
         cloudState.persist = data.persist_credentials === undefined ? cloudState.persist : flag(data.persist_credentials, true);
         cloudState.storageMode = typeof data.storage_mode === 'string' ? data.storage_mode : cloudState.storageMode;
-        cloudState.connected = flag(data.connected) || cloudState.storageMode === 'cloud_primary';
+        cloudState.connected = flag(data.connected);
         const lastUploadVal = parseMs(data.last_upload_ms);
         const lastPingVal = parseMs(data.last_ping_ms);
         const lastFailureVal = parseMs(data.last_failure_ms);
@@ -5485,13 +5555,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (chartRangeSelect) chartRangeSelect.value = '24h';
           drawChart();
         }
-        if (!cloudState.connected || !cloudState.enabled) cloudCredentialsOverride = false;
-        const shouldCollapse = cloudState.connected && !cloudCredentialsOverride;
+        if (!cloudState.connected || !cloudState.enabled || !cloudState.persist) cloudCredentialsOverride = false;
+        const shouldCollapse = cloudState.connected && cloudState.persist && !cloudCredentialsOverride;
         if (cloudCredentials) {
           cloudCredentials.classList.toggle('collapsed', shouldCollapse);
         }
-        if (cloudCredentialsBody) cloudCredentialsBody.style.display = cloudCredentials?.classList.contains('collapsed') ? 'none' : 'block';
-        if (cloudEditBtn) cloudEditBtn.style.display = cloudCredentials?.classList.contains('collapsed') ? 'inline-flex' : 'none';
+        const isCollapsed = cloudCredentials?.classList.contains('collapsed');
+        if (cloudCredentialsBody) cloudCredentialsBody.style.display = isCollapsed ? 'none' : 'block';
+        if (cloudCredentialsToggle) cloudCredentialsToggle.textContent = isCollapsed ? '▼' : '▲';
+        if (cloudEditBtn) cloudEditBtn.style.display = isCollapsed ? 'inline-flex' : 'none';
+        const showSummary = isCollapsed && cloudState.persist && cloudState.connected;
+        if (cloudCredentialsSummary) cloudCredentialsSummary.style.display = showSummary ? 'flex' : 'none';
+        if (cloudCredentialsSummaryText) {
+          const user = data.username || cloudUserInput?.value || 'User';
+          cloudCredentialsSummaryText.textContent = showSummary ? `Eingeloggt als ${user} (gespeichert)` : '';
+        }
       }
 
       function renderCloudForm(data = {}) {
@@ -5542,9 +5620,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           let data = {};
           try { data = text ? JSON.parse(text) : {}; } catch (err) { data = {}; }
           const ok = res.ok && (data.ok === 1 || data.ok === true);
-          const code = data.httpCode ?? data.http_code ?? res.status;
+          const code = data.code ?? data.httpCode ?? data.http_code ?? res.status;
           const path = data.path || '';
-          if (cloudStatusMsg) { cloudStatusMsg.textContent = ok ? `Test-Datei gesendet (${code}${path ? ` → ${path}` : ''})` : `Test fehlgeschlagen (${code || 'n/a'})`; cloudStatusMsg.className = ok ? 'status ok' : 'status err'; }
+          const errMsg = data.err || data.error || '';
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = ok ? `Test-Datei gesendet (${code}${path ? ` → ${path}` : ''})` : `Test fehlgeschlagen (${code || 'n/a'}${errMsg ? `: ${errMsg}` : ''})`; cloudStatusMsg.className = ok ? 'status ok' : 'status err'; }
           if (ok) renderCloudStatus({ connected:true, last_test_ms: Date.now(), last_uploaded_path: path });
         } catch (err) {
           if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Test fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
@@ -5578,6 +5657,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (cloudUserInput) cloudUserInput.value = '';
           if (cloudPassInput) cloudPassInput.value = '';
           if (cloudPersistToggle) cloudPersistToggle.checked = false;
+          cloudCredentialsOverride = true;
+          if (cloudCredentials) cloudCredentials.classList.remove('collapsed');
+          if (cloudCredentialsBody) cloudCredentialsBody.style.display = 'block';
+          if (cloudEditBtn) cloudEditBtn.style.display = 'none';
+          if (cloudCredentialsToggle) cloudCredentialsToggle.textContent = '▲';
           if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Credentials gelöscht'; cloudStatusMsg.className = 'status ok'; }
         } catch (err) {
           if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Löschen fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
@@ -5606,6 +5690,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudCredentials) cloudCredentials.classList.remove('collapsed');
         if (cloudCredentialsBody) cloudCredentialsBody.style.display = 'block';
         if (cloudEditBtn) cloudEditBtn.style.display = 'none';
+        if (cloudCredentialsToggle) cloudCredentialsToggle.textContent = '▲';
+      });
+      if (cloudCredentialsToggle) cloudCredentialsToggle.addEventListener('click', () => {
+        const collapsed = cloudCredentials?.classList.contains('collapsed');
+        cloudCredentialsOverride = true;
+        if (collapsed) {
+          cloudCredentials?.classList.remove('collapsed');
+          if (cloudCredentialsBody) cloudCredentialsBody.style.display = 'block';
+          if (cloudEditBtn) cloudEditBtn.style.display = 'none';
+          cloudCredentialsToggle.textContent = '▲';
+        } else {
+          cloudCredentials?.classList.add('collapsed');
+          if (cloudCredentialsBody) cloudCredentialsBody.style.display = 'none';
+          if (cloudEditBtn) cloudEditBtn.style.display = 'inline-flex';
+          cloudCredentialsToggle.textContent = '▼';
+        }
       });
       if (cloudForgetBtn) cloudForgetBtn.addEventListener('click', () => forgetCloudCredentials());
 
@@ -6107,14 +6207,8 @@ void handleCloudTest() {
   size_t bytes = 0;
   String path, err;
   bool ok = sendCloudTestFile(httpCode, bytes, path, err);
-  DynamicJsonDocument doc(256);
-  doc["ok"] = ok ? 1 : 0;
-  doc["httpCode"] = httpCode;
-  doc["path"] = path;
-  doc["bytes"] = (unsigned long)bytes;
-  doc["error"] = err;
-  String payload;
-  serializeJson(doc, payload);
+  (void)bytes;
+  String payload = "{\"ok\":" + String(ok ? 1 : 0) + ",\"code\":" + String(httpCode) + ",\"path\":\"" + path + "\",\"err\":\"" + err + "\"}";
   server.send(ok ? 200 : 500, "application/json", payload);
 }
 
@@ -6142,6 +6236,8 @@ void handleCloud() {
     doc["queue_size"] = (uint32_t)cloudQueue.size();
     doc["failures"] = cloudStatus.failureCount;
     doc["last_error"] = cloudStatus.lastError;
+    doc["last_http_code"] = cloudStatus.lastHttpCode;
+    doc["last_url"] = cloudStatus.lastUrl;
     doc["last_state_reason"] = cloudStatus.lastStateReason;
     doc["device_folder"] = cloudStatus.deviceFolder;
     doc["device_id"] = deviceId();
@@ -6182,14 +6278,8 @@ void handleCloud() {
     size_t bytes = 0;
     String path, err;
     bool ok = sendCloudTestFile(httpCode, bytes, path, err);
-    DynamicJsonDocument doc(256);
-    doc["ok"] = ok ? 1 : 0;
-    doc["httpCode"] = httpCode;
-    doc["path"] = path;
-    doc["bytes"] = (unsigned long)bytes;
-    doc["error"] = err;
-    String payload;
-    serializeJson(doc, payload);
+    (void)bytes;
+    String payload = "{\"ok\":" + String(ok ? 1 : 0) + ",\"code\":" + String(httpCode) + ",\"path\":\"" + path + "\",\"err\":\"" + err + "\"}";
     server.send(ok ? 200 : 500, "application/json", payload);
     return;
   }

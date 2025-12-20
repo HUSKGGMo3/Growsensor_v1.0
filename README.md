@@ -3,7 +3,8 @@
 **Current release: v0.3.3 (experimental / untested)**
 
 ### Patch v0.3.3 (experimental, Cloud-first storage + cloud-gated long charts)
-- Cloud UI now exposes connected/enabled/recording states, last upload/error timestamps, and collapses credentials behind an Edit toggle once connected. Optional “Login-Daten dauerhaft speichern” keeps base URL/user/app password across reboots; “Forget credentials” clears only cloud keys.
+- Cloud UI now exposes connected/enabled/recording states, last upload/error timestamps, and wraps credentials in an accordion that auto-collapses when connected + stored. Optional “Login-Daten dauerhaft speichern” keeps base URL/user/app password across reboots; “Forget credentials” clears only cloud keys.
+- WebDAV base URL must end with a slash (`http://host/remote.php/dav/files/<user>/`). Uploads land in `/GrowSensor/<deviceId>/(samples|daily|meta|logs)`, and “Sende Test” performs a real PUT upload.
 - Cloud-first storage mode: when `cloudStorageActive` (enabled + connected + recording) the device keeps only RAM buffers and cloud upload queues, while offline fallback retains local 24h history.
 - Long-range charts (1–4 months) are cloud-gated in both UI and API; `/api/cloud/daily` proxies daily aggregates with short RAM caching and returns 403 when cloud is inactive.
 - Cloud logs are streamed to `/GrowSensor/<deviceId>/logs/chunks/` as timestamped chunk files (ISO | level | source | message), avoiding WebDAV append limitations.
