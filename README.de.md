@@ -12,6 +12,13 @@
 - Hotfix v0.2.6 (ungetestet): MH-Z14 (CO₂) zur Sensor-Vorlage hinzugefügt (UART, nutzt den MH-Z19-Treiberpfad).
 - Hotfix v0.2.6 (ungetestet): VPD-Heatmap rendert bei Faktor-/Zielwert-Änderungen komplett neu, sodass Zielband (grün) und Heatmap-Overlay synchron bleiben.
 
+### Patch: Wi-Fi Reconnect & Stabilität (post v0.2.6)
+- WLAN-Wechsel ohne Dev-Mode: `/api/wifi` speichert sofort und verbindet asynchron per mDNS (`growsensor.local` Standard). Die UI zeigt ein Reconnect-Panel, pollt `growsensor.local/api/ping` ca. alle 1,5s für bis zu 60s und blendet Setup-AP-Hinweise ein, falls mDNS scheitert. `/api/status` liefert jetzt SSID/IP/RSSI/Hostname/connecting für Recovery-Flows.
+- Soft-Neustart via `/api/restart` (nur `ESP.restart()`, Log “NO ERASE”). Destruktive Aktionen liegen isoliert auf `/api/factory-reset` mit `RESET`-Bestätigung; Preferences sind in wifi/sensors/system/ui-Namensräume getrennt, um versehentliches Löschen zu verhindern.
+- Sensor-Cooldown: Lux/PPFD, Klima, Leaf und CO₂ lesen maximal 2×/Minute. Überschüssige Polls werden übersprungen und nicht historisiert – weniger I²C/UART-Last bei unverändertem Health-Tracking.
+- Charts/UX: Mini-Charts sind dauerhaft sichtbar hinter den Werten (gedimmte Overlays), X-Achsen-Ticks skalieren dynamisch, die Option „alle Metriken“ entfällt. Metriken ohne echte Daten verschwinden aus Auswahl/Legenden, Live-Ansicht verlangt frische Samples; Telemetrie trägt `*_last`/`*_ever`, sodass Ghost-Serien aus Live/6h/24h verschwinden.
+- Anti-Lockout: scheitert der Connect, wird nach kurzer Zeit wieder der Setup-AP aktiviert; mDNS startet automatisch nach jedem erfolgreichen STA-Connect.
+
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
 ## Was dieses Projekt ist / nicht ist

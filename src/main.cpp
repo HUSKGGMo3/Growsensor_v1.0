@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Wire.h>
 #include <BH1750.h>
@@ -41,6 +42,7 @@ static constexpr unsigned long WIFI_TIMEOUT = 15000;
 
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
+static constexpr unsigned long SENSOR_MIN_INTERVAL = 30000;    // 2 samples/min max
 static constexpr uint64_t HISTORY_BUCKET_5M_MS = 300000;      // 5-minute buckets
 static constexpr uint64_t HISTORY_BUCKET_15M_MS = 900000;     // 15-minute buckets
 static constexpr size_t HISTORY_6H_CAPACITY = 80;             // 6h @5min + buffer
@@ -230,13 +232,21 @@ struct HistorySeries {
   uint16_t bucket15mCount = 0;
 };
 
+struct MetricSampleInfo {
+  bool everHadData = false;
+  uint64_t lastEpochMs = 0;
+};
+
 // Globals
 BH1750 lightMeter;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 HardwareSerial co2Serial(2);
 MHZ19 co2Sensor;
-Preferences prefs;
+Preferences prefsWifi;
+Preferences prefsSensors;
+Preferences prefsUi;
+Preferences prefsSystem;
 DNSServer dnsServer;
 WebServer server(80);
 
@@ -244,6 +254,10 @@ WebServer server(80);
 String savedSsid;
 String savedWifiPass;
 bool apMode = false;
+bool wifiConnectInProgress = false;
+unsigned long wifiConnectStarted = 0;
+unsigned long wifiFallbackAt = 0;
+String deviceHostname = "growsensor";
 LightChannel channel = LightChannel::FullSpectrum;
 ClimateSensorType climateType = ClimateSensorType::SHT31;
 Co2SensorType co2Type = Co2SensorType::MHZ19;
@@ -291,6 +305,11 @@ SensorStall stallClimateHum;
 SensorStall stallLeaf;
 SensorStall stallCo2;
 
+unsigned long lastLightSampleMs = 0;
+unsigned long lastClimateSampleMs = 0;
+unsigned long lastLeafSampleMs = 0;
+unsigned long lastCo2SampleMs = 0;
+
 const VpdProfile VPD_PROFILES[] = {
     {"seedling", "Steckling/Sämling", 0.4f, 0.8f},
     {"veg", "Vegitativ", 0.8f, 1.2f},
@@ -315,6 +334,7 @@ MetricDef HISTORY_METRICS[] = {
     {"vpd", "kPa", 3, HistorySeries()},
 };
 const size_t HISTORY_METRIC_COUNT = sizeof(HISTORY_METRICS) / sizeof(HISTORY_METRICS[0]);
+MetricSampleInfo SAMPLE_INFO[HISTORY_METRIC_COUNT];
 
 // ----------------------------
 // Helpers
@@ -416,6 +436,13 @@ MetricDef *historyById(const String &id) {
   return nullptr;
 }
 
+MetricSampleInfo *sampleInfoById(const String &id) {
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    if (id == HISTORY_METRICS[i].id) return &SAMPLE_INFO[i];
+  }
+  return nullptr;
+}
+
 void addPoint(HistoryPoint *buffer, size_t capacity, size_t &start, size_t &count, uint64_t ts, float value) {
   if (capacity == 0)
     return;
@@ -480,6 +507,11 @@ void pushHistoryValue(const char *metric, float value, uint64_t ts) {
     def->series.bucket5mCount++;
     def->series.bucket15mSum += normalized;
     def->series.bucket15mCount++;
+    MetricSampleInfo *info = sampleInfoById(metric);
+    if (info) {
+      info->everHadData = true;
+      info->lastEpochMs = ts;
+    }
   }
 }
 
@@ -495,12 +527,12 @@ bool enforceAuth() {
 }
 
 void persistSensorFlags() {
-  prefs.begin("grow-sensor", false);
-  prefs.putBool("en_light", enableLight);
-  prefs.putBool("en_climate", enableClimate);
-  prefs.putBool("en_leaf", enableLeaf);
-  prefs.putBool("en_co2", enableCo2);
-  prefs.end();
+  prefsSensors.begin("sensors", false);
+  prefsSensors.putBool("en_light", enableLight);
+  prefsSensors.putBool("en_climate", enableClimate);
+  prefsSensors.putBool("en_leaf", enableLeaf);
+  prefsSensors.putBool("en_co2", enableCo2);
+  prefsSensors.end();
 }
 
 bool validPin(int pin) { return pin >= PIN_MIN && pin <= PIN_MAX; }
@@ -509,13 +541,21 @@ bool pinsValid(int sda, int scl, int co2Rx, int co2Tx) {
   return validPin(sda) && validPin(scl) && validPin(co2Rx) && validPin(co2Tx) && sda != scl && co2Rx != co2Tx;
 }
 
+bool allowSensorSample(unsigned long now, unsigned long &lastTs) {
+  if (lastTs == 0 || now - lastTs >= SENSOR_MIN_INTERVAL) {
+    lastTs = now;
+    return true;
+  }
+  return false;
+}
+
 void loadPinsFromPrefs() {
-  prefs.begin("grow-sensor", true);
-  pinI2C_SDA = prefs.getInt("i2c_sda", DEFAULT_I2C_SDA_PIN);
-  pinI2C_SCL = prefs.getInt("i2c_scl", DEFAULT_I2C_SCL_PIN);
-  pinCO2_RX = prefs.getInt("co2_rx", DEFAULT_CO2_RX_PIN);
-  pinCO2_TX = prefs.getInt("co2_tx", DEFAULT_CO2_TX_PIN);
-  prefs.end();
+  prefsSystem.begin("system", true);
+  pinI2C_SDA = prefsSystem.getInt("i2c_sda", DEFAULT_I2C_SDA_PIN);
+  pinI2C_SCL = prefsSystem.getInt("i2c_scl", DEFAULT_I2C_SCL_PIN);
+  pinCO2_RX = prefsSystem.getInt("co2_rx", DEFAULT_CO2_RX_PIN);
+  pinCO2_TX = prefsSystem.getInt("co2_tx", DEFAULT_CO2_TX_PIN);
+  prefsSystem.end();
 
   if (!pinsValid(pinI2C_SDA, pinI2C_SCL, pinCO2_RX, pinCO2_TX)) {
     pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
@@ -632,9 +672,9 @@ uint64_t currentEpochMs() {
 
 void loadPartners() {
   partners.clear();
-  prefs.begin("grow-sensor", true);
-  String raw = prefs.getString("partners", "[]");
-  prefs.end();
+  prefsUi.begin("ui", true);
+  String raw = prefsUi.getString("partners", "[]");
+  prefsUi.end();
   DynamicJsonDocument doc(1024);
   if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
   JsonArray arr = doc.as<JsonArray>();
@@ -704,9 +744,9 @@ void saveSensorConfigs() {
   }
   String out;
   serializeJson(arr, out);
-  prefs.begin("grow-sensor", false);
-  prefs.putString("sensors_cfg", out);
-  prefs.end();
+  prefsSensors.begin("sensors", false);
+  prefsSensors.putString("sensors_cfg", out);
+  prefsSensors.end();
 }
 
 void applyPinsFromConfig() {
@@ -738,9 +778,9 @@ void applyPinsFromConfig() {
 
 void loadSensorConfigs() {
   sensorConfigs.clear();
-  prefs.begin("grow-sensor", true);
-  String raw = prefs.getString("sensors_cfg", "");
-  prefs.end();
+  prefsSensors.begin("sensors", true);
+  String raw = prefsSensors.getString("sensors_cfg", "");
+  prefsSensors.end();
   if (raw.length() == 0) {
     SensorConfig l; l.id="lux"; l.type="BH1750"; l.category="light"; l.name="BH1750"; l.interfaceType="i2c"; l.enabled=enableLight; l.sda=pinI2C_SDA; l.scl=pinI2C_SCL;
     SensorConfig c; c.id="climate"; c.type=climateSensorName(climateType); c.category="climate"; c.name="Klima"; c.interfaceType="i2c"; c.enabled=enableClimate; c.sda=pinI2C_SDA; c.scl=pinI2C_SCL;
@@ -779,6 +819,8 @@ void loadSensorConfigs() {
 // ----------------------------
 void startAccessPoint() {
   apMode = true;
+  wifiConnectInProgress = false;
+  wifiFallbackAt = 0;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
   delay(100); // give the AP time to start
@@ -789,32 +831,80 @@ void startAccessPoint() {
   logEvent("AP mode active: " + String(AP_SSID));
 }
 
+void startMdns() {
+  if (deviceHostname.isEmpty()) deviceHostname = "growsensor";
+  if (!MDNS.begin(deviceHostname.c_str())) {
+    logEvent("mDNS start failed");
+    return;
+  }
+  MDNS.addService("http", "tcp", 80);
+  logEvent("mDNS active: " + deviceHostname + ".local");
+}
+
+bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult) {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+  if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
+    WiFi.config(staticIp, staticGateway, staticSubnet);
+  }
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  wifiConnectInProgress = true;
+  wifiConnectStarted = millis();
+  wifiFallbackAt = wifiConnectStarted + WIFI_TIMEOUT + 10000;
+  if (!waitForResult) return false;
+
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiConnectStarted < WIFI_TIMEOUT) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnectInProgress = false;
+    apMode = false;
+    wifiFallbackAt = 0;
+    logEvent("WiFi connected: " + WiFi.localIP().toString());
+    startMdns();
+    startNtpSync();
+    return true;
+  }
+  wifiConnectInProgress = false;
+  return false;
+}
+
 bool connectToWiFi() {
-  prefs.begin("grow-sensor", false);
-  savedSsid = prefs.getString("ssid", "");
-  savedWifiPass = prefs.getString("wifi_pass", "");
-  bool hasWifiPassKey = prefs.isKey("wifi_pass");
-  bool hasLegacyPassKey = prefs.isKey("pass");
-  String legacyPass = hasLegacyPassKey ? prefs.getString("pass", "") : "";
-  channel = lightChannelFromString(prefs.getString("channel", "full_spectrum"));
-  climateType = climateFromString(prefs.getString("climate_type", "sht31"));
-  co2Type = co2FromString(prefs.getString("co2_type", "mhz19"));
-  staticIpEnabled = prefs.getBool("static", false);
-  staticIp.fromString(prefs.getString("ip", ""));
-  staticGateway.fromString(prefs.getString("gw", ""));
-  staticSubnet.fromString(prefs.getString("sn", ""));
-  timezoneName = prefs.getString("timezone", timezoneName);
-  enableLight = prefs.getBool("en_light", true);
-  enableClimate = prefs.getBool("en_climate", true);
-  enableLeaf = prefs.getBool("en_leaf", true);
-  enableCo2 = prefs.getBool("en_co2", true);
-  vpdStageId = prefs.getString("vpd_stage", "seedling");
+  prefsWifi.begin("wifi", false);
+  savedSsid = prefsWifi.getString("ssid", "");
+  savedWifiPass = prefsWifi.getString("wifi_pass", "");
+  bool hasWifiPassKey = prefsWifi.isKey("wifi_pass");
+  bool hasLegacyPassKey = prefsWifi.isKey("pass");
+  String legacyPass = hasLegacyPassKey ? prefsWifi.getString("pass", "") : "";
+  prefsWifi.end();
+  prefsSystem.begin("system", false);
+  channel = lightChannelFromString(prefsSystem.getString("channel", "full_spectrum"));
+  climateType = climateFromString(prefsSystem.getString("climate_type", "sht31"));
+  co2Type = co2FromString(prefsSystem.getString("co2_type", "mhz19"));
+  timezoneName = prefsSystem.getString("timezone", timezoneName);
+  vpdStageId = prefsSystem.getString("vpd_stage", "seedling");
+  prefsSystem.end();
+  prefsWifi.begin("wifi", false);
+  staticIpEnabled = prefsWifi.getBool("static", false);
+  staticIp.fromString(prefsWifi.getString("ip", ""));
+  staticGateway.fromString(prefsWifi.getString("gw", ""));
+  staticSubnet.fromString(prefsWifi.getString("sn", ""));
+  prefsWifi.end();
+  prefsSensors.begin("sensors", false);
+  enableLight = prefsSensors.getBool("en_light", true);
+  enableClimate = prefsSensors.getBool("en_climate", true);
+  enableLeaf = prefsSensors.getBool("en_leaf", true);
+  enableCo2 = prefsSensors.getBool("en_co2", true);
+  prefsSensors.end();
   bool migrateLegacyWifiPass = !hasWifiPassKey && hasLegacyPassKey && savedWifiPass.isEmpty() && !legacyPass.isEmpty() && !savedSsid.isEmpty();
   if (migrateLegacyWifiPass) {
     savedWifiPass = legacyPass;
-    prefs.putString("wifi_pass", savedWifiPass);
+    prefsWifi.begin("wifi", false);
+    prefsWifi.putString("wifi_pass", savedWifiPass);
+    prefsWifi.end();
   }
-  prefs.end();
   applyTimezoneEnv();
   loadPartners();
   loadSensorConfigs();
@@ -826,25 +916,12 @@ bool connectToWiFi() {
     return false;
   }
 
-  WiFi.mode(WIFI_STA);
-  if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
-    WiFi.config(staticIp, staticGateway, staticSubnet);
-  }
-  WiFi.begin(savedSsid.c_str(), savedWifiPass.c_str());
   Serial.printf("[WiFi] Connecting to %s ...\n", savedSsid.c_str());
+  bool ok = beginWifiConnect(savedSsid, savedWifiPass, true);
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
-    delay(250);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
+  if (ok) {
     apMode = false;
     Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
-    logEvent("WiFi connected: " + WiFi.localIP().toString());
-    startNtpSync();
     return true;
   }
 
@@ -855,18 +932,49 @@ bool connectToWiFi() {
 }
 
 void saveWifiCredentials(const String &ssid, const String &pass) {
-  prefs.begin("grow-sensor", false);
-  prefs.putString("ssid", ssid);
-  prefs.putString("wifi_pass", pass);
-  prefs.end();
+  prefsWifi.begin("wifi", false);
+  prefsWifi.putString("ssid", ssid);
+  prefsWifi.putString("wifi_pass", pass);
+  prefsWifi.end();
   savedSsid = ssid;
   savedWifiPass = pass;
 }
 
+void maintainWifiConnection() {
+  if (wifiConnectInProgress) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiConnectInProgress = false;
+      apMode = false;
+      wifiFallbackAt = 0;
+      logEvent("WiFi connected: " + WiFi.localIP().toString());
+      startMdns();
+      startNtpSync();
+    } else if (wifiFallbackAt > 0 && millis() > wifiFallbackAt) {
+      logEvent("WiFi connect timeout, enabling AP fallback");
+      wifiConnectInProgress = false;
+      startAccessPoint();
+    }
+    return;
+  }
+  if (!apMode && WiFi.status() != WL_CONNECTED && wifiFallbackAt > 0 && millis() > wifiFallbackAt) {
+    logEvent("WiFi unavailable, enabling AP fallback");
+    startAccessPoint();
+  }
+}
+
 void clearPreferences() {
-  prefs.begin("grow-sensor", false);
-  prefs.clear();
-  prefs.end();
+  prefsWifi.begin("wifi", false);
+  prefsWifi.clear();
+  prefsWifi.end();
+  prefsSensors.begin("sensors", false);
+  prefsSensors.clear();
+  prefsSensors.end();
+  prefsSystem.begin("system", false);
+  prefsSystem.clear();
+  prefsSystem.end();
+  prefsUi.begin("ui", false);
+  prefsUi.clear();
+  prefsUi.end();
   logEvent("Preferences cleared");
 }
 
@@ -884,9 +992,9 @@ void savePartners() {
   }
   String out;
   serializeJson(arr, out);
-  prefs.begin("grow-sensor", false);
-  prefs.putString("partners", out);
-  prefs.end();
+  prefsUi.begin("ui", false);
+  prefsUi.putString("partners", out);
+  prefsUi.end();
 }
 
 // ----------------------------
@@ -967,74 +1075,72 @@ void readSensors() {
   }
 
   latest.ppfdFactor = currentPpfdFactor();
+  unsigned long nowMs = millis();
 
-  if (enableLight && lightHealth.present && lightMeter.measurementReady()) {
+  bool lightSampled = false;
+  if (enableLight && lightHealth.present && allowSensorSample(nowMs, lastLightSampleMs) && lightMeter.measurementReady()) {
+    lightSampled = true;
     latest.lux = lightMeter.readLightLevel();
     latest.ppfdFactor = currentPpfdFactor();
     latest.ppfd = luxToPPFD(latest.lux, channel);
     lightHealth.healthy = !isnan(latest.lux);
     lightHealth.lastUpdate = millis();
     if (!isnan(latest.lux)) {
-      if (isnan(stallLight.lastValue) || fabsf(stallLight.lastValue - latest.lux) > 0.01f) {
-        stallLight.lastValue = latest.lux;
-        stallLight.lastChange = millis();
-      }
+      stallLight.lastValue = latest.lux;
+      stallLight.lastChange = millis();
     }
   }
 
   float temp = NAN;
   float humidity = NAN;
-  if (enableClimate && climateHealth.present) {
+  bool climateSampled = false;
+  if (enableClimate && climateHealth.present && allowSensorSample(nowMs, lastClimateSampleMs)) {
     if (climateType == ClimateSensorType::SHT31) {
       temp = sht31.readTemperature();
       humidity = sht31.readHumidity();
     } else {
-      // Other climate sensors not implemented yet
       temp = NAN;
       humidity = NAN;
     }
+    climateSampled = true;
   }
   if (!isnan(temp) && !isnan(humidity)) {
     latest.ambientTempC = temp;
     latest.humidity = humidity;
     climateHealth.healthy = true;
     climateHealth.lastUpdate = millis();
-    if (isnan(stallClimateTemp.lastValue) || fabsf(stallClimateTemp.lastValue - temp) > 0.01f) {
-      stallClimateTemp.lastValue = temp;
-      stallClimateTemp.lastChange = millis();
-    }
-    if (isnan(stallClimateHum.lastValue) || fabsf(stallClimateHum.lastValue - humidity) > 0.01f) {
-      stallClimateHum.lastValue = humidity;
-      stallClimateHum.lastChange = millis();
-    }
-  } else {
+    stallClimateTemp.lastValue = temp;
+    stallClimateHum.lastValue = humidity;
+    stallClimateTemp.lastChange = millis();
+    stallClimateHum.lastChange = millis();
+  } else if (climateSampled) {
     climateHealth.healthy = false;
   }
 
-  double objTemp = enableLeaf && leafHealth.present ? mlx.readObjectTempC() : NAN;
+  bool leafSampled = false;
+  double objTemp = (enableLeaf && leafHealth.present && allowSensorSample(nowMs, lastLeafSampleMs)) ? mlx.readObjectTempC() : NAN;
   if (!isnan(objTemp)) {
+    leafSampled = true;
     latest.leafTempC = objTemp;
     leafHealth.healthy = true;
     leafHealth.lastUpdate = millis();
-    if (isnan(stallLeaf.lastValue) || fabsf(stallLeaf.lastValue - objTemp) > 0.01f) {
-      stallLeaf.lastValue = objTemp;
-      stallLeaf.lastChange = millis();
-    }
-  } else {
+    stallLeaf.lastValue = objTemp;
+    stallLeaf.lastChange = millis();
+  } else if (leafSampled) {
     leafHealth.healthy = false;
   }
 
-  if (enableCo2 && co2Health.present) {
+  bool co2Sampled = false;
+  if (enableCo2 && co2Health.present && allowSensorSample(nowMs, lastCo2SampleMs)) {
     if (co2Type == Co2SensorType::MHZ19 || co2Type == Co2SensorType::MHZ14) {
+      co2Sampled = true;
       int ppm = co2Sensor.getCO2();
       if (ppm > 0 && ppm < 5000) {
         latest.co2ppm = ppm;
         co2Health.healthy = true;
         co2Health.lastUpdate = millis();
-        if (stallCo2.lastValue != ppm) {
-          stallCo2.lastValue = ppm;
-          stallCo2.lastChange = millis();
-        }
+        stallCo2.lastValue = ppm;
+        stallCo2.lastChange = millis();
       } else {
         co2Health.healthy = false;
       }
@@ -1044,6 +1150,7 @@ void readSensors() {
   }
 
   // Compute VPD when data is valid and IR sensor is not drifting excessively
+  bool vpdUpdated = climateSampled || leafSampled;
   float leafForVpd = latest.leafTempC;
   if (!leafHealth.healthy && !isnan(latest.ambientTempC)) {
     // Fallback: approximate leaf temp as ambient -2°C if IR sensor failed
@@ -1074,13 +1181,23 @@ void readSensors() {
   }
 
   uint64_t sampleTs = currentEpochMs();
-  pushHistoryValue("lux", latest.lux, sampleTs);
-  pushHistoryValue("ppfd", latest.ppfd, sampleTs);
-  pushHistoryValue("co2", static_cast<float>(latest.co2ppm), sampleTs);
-  pushHistoryValue("temp", latest.ambientTempC, sampleTs);
-  pushHistoryValue("humidity", latest.humidity, sampleTs);
-  pushHistoryValue("leaf", latest.leafTempC, sampleTs);
-  pushHistoryValue("vpd", latest.vpd, sampleTs);
+  if (lightSampled) {
+    pushHistoryValue("lux", latest.lux, sampleTs);
+    pushHistoryValue("ppfd", latest.ppfd, sampleTs);
+  }
+  if (co2Sampled) {
+    pushHistoryValue("co2", static_cast<float>(latest.co2ppm), sampleTs);
+  }
+  if (climateSampled) {
+    pushHistoryValue("temp", latest.ambientTempC, sampleTs);
+    pushHistoryValue("humidity", latest.humidity, sampleTs);
+  }
+  if (leafSampled) {
+    pushHistoryValue("leaf", latest.leafTempC, sampleTs);
+  }
+  if (vpdUpdated && !isnan(latest.vpd)) {
+    pushHistoryValue("vpd", latest.vpd, sampleTs);
+  }
 
   unsigned long now = millis();
   auto stallCheck = [&](SensorStall &stall, SensorHealth &health, bool &enabled, const char *name) {
@@ -1150,15 +1267,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
       .tile-content { position:relative; z-index:2; display:flex; flex-direction:column; gap:8px; pointer-events:auto; height:100%; }
       .tile-body { position:relative; transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; min-height:156px; display:flex; flex-direction:column; gap:8px; z-index:2; }
-      .value-panel { background: linear-gradient(180deg, rgba(15,23,42,0.86), rgba(15,23,42,0.6)); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border:1px solid rgba(148,163,184,0.16); box-shadow: 0 10px 28px rgba(0,0,0,0.38); border-radius: 12px; padding: 10px 12px; display:inline-flex; flex-direction:column; gap:4px; max-width:100%; }
+      .value-panel { background: linear-gradient(180deg, rgba(15,23,42,0.9), rgba(15,23,42,0.7)); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border:1px solid rgba(148,163,184,0.22); box-shadow: 0 14px 30px rgba(0,0,0,0.42); border-radius: 12px; padding: 10px 12px; display:inline-flex; flex-direction:column; gap:4px; max-width:100%; position:relative; z-index:2; }
       .tile-subtext { font-size:0.9rem; color:#cbd5e1; line-height:1.3; }
       .metric-tile.collapsed { max-height:96px; min-height:64px; padding-bottom:16px; opacity:0.98; transform:translateY(0); }
       .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); display:none; }
-      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { opacity:0 !important; visibility:hidden !important; pointer-events:none; }
+      .metric-tile.collapsed .hover-chart { opacity:0.22; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:0; padding:12px; background:radial-gradient(circle at 20% 20%, rgba(34,211,238,0.05), rgba(15,23,42,0.55)), rgba(15,23,42,0.72); border:1px solid #1f2937; border-radius:12px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:1; opacity:0; visibility:hidden; transition:opacity 160ms ease, visibility 160ms ease; }
-      .metric-tile:hover .hover-chart { opacity:1; visibility:visible; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:radial-gradient(circle at 20% 20%, rgba(34,211,238,0.05), rgba(15,23,42,0.55)), rgba(15,23,42,0.72); border:1px solid #1f2937; border-radius:12px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:1; opacity:0.32; visibility:visible; transition:opacity 180ms ease; }
+      .metric-tile:hover .hover-chart { opacity:0.6; }
       .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; z-index:3; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
       .tile-eye:active { transform:translateY(0); }
@@ -1217,6 +1334,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .wifi-bars { display:flex; gap:4px; align-items:flex-end; height:16px; }
       .wifi-bar { width:4px; background:#334155; border-radius:2px; }
       .wifi-bar.active { background:#22c55e; }
+      .reconnect-panel { margin-top:10px; padding:10px; border:1px dashed #334155; border-radius:10px; background:rgba(15,23,42,0.55); }
       .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
       .error-banner ul { margin: 0; padding-left: 18px; }
       .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -1402,7 +1520,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               <option value="vpd">VPD</option>
               <option value="co2">CO₂</option>
               <option value="lux">Lux</option>
-              <option value="all">Alle Metriken</option>
             </select>
           </label>
         </div>
@@ -1454,7 +1571,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               <div><strong>Signal:</strong></div>
               <div class="wifi-bars" id="wifiBars"></div>
             </div>
-            <button id="toggleWifiForm" class="ghost" style="width:auto; margin-top:8px;">Wi-Fi ändern</button>
+            <button id="toggleWifiForm" class="ghost" style="width:auto; margin-top:8px;">Mit neuem Netzwerk verbinden</button>
+          </div>
+          <div id="wifiReconnectPanel" class="hidden reconnect-panel">
+            <div class="wifi-status">
+              <span class="led pulse" style="background:#38bdf8;"></span>
+              <strong>Verbinde...</strong>
+            </div>
+            <p id="wifiReconnectText" class="hover-hint">Suche growsensor.local</p>
+            <div class="row" style="gap:6px;">
+              <button id="reconnectOpen" class="ghost" style="width:auto;">growsensor.local öffnen</button>
+              <button id="reconnectRetry" style="width:auto;">Erneut versuchen</button>
+            </div>
+            <p class="hover-hint" id="wifiReconnectFallback">Falls keine Verbindung: verbinde dich mit dem Setup-AP <strong>GrowSensor-Setup</strong>.</p>
           </div>
           <div id="wifiForm">
           <div class="row">
@@ -1472,14 +1601,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             </label>
           </div>
           <div class="row hidden" id="staticIpRow">
-            <input id="ip" placeholder="IP (optional)" class="dev-only" />
-            <input id="gw" placeholder="Gateway (optional)" class="dev-only" />
-            <input id="sn" placeholder="Subnet (optional)" class="dev-only" />
+            <input id="ip" placeholder="IP (optional)" />
+            <input id="gw" placeholder="Gateway (optional)" />
+            <input id="sn" placeholder="Subnet (optional)" />
           </div>
-          <button id="saveWifi" class="dev-only">Verbinden & Speichern</button>
-          <button id="resetWifi" class="dev-only" style="margin-top:8px;background:#ef4444;color:#fff;">WLAN Reset</button>
+          <button id="saveWifi">Mit neuem Netzwerk verbinden</button>
+          <button id="resetWifi" style="margin-top:8px;background:#ef4444;color:#fff;">Werkseinstellungen</button>
           <p id="wifiStatus" class="status" style="margin-top:8px;"></p>
-          <p class="dev-note" id="wifiDevNote">Wi-Fi Änderungen nur im Dev-Modus.</p>
           </div>
         </article>
       </section>
@@ -1830,6 +1958,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       let clickDebug = false;
       let lastVpdTargets = { low: null, high: null };
       let wifiFormOpen = false;
+      let reconnectTimer = null;
+      let reconnectDeadline = 0;
+      let reconnectActive = false;
       let wizardOpenedAt = 0;
       const detailCache = {};
       const METRIC_META = {
@@ -1841,6 +1972,43 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         leaf:{ unit:'°C', label:'Leaf-Temp', decimals:1 },
         vpd:{ unit:'kPa', label:'VPD', decimals:3 },
       };
+      const metricDataState = {};
+      metrics.forEach(m => metricDataState[m] = { ever:false, last:0 });
+      function markMetricSample(metric, ts) {
+        if (!metricDataState[metric]) metricDataState[metric] = { ever:false, last:0 };
+        if (typeof ts === 'number' && !Number.isNaN(ts)) {
+          metricDataState[metric].last = Math.max(metricDataState[metric].last, ts);
+        }
+        if (metricDataState[metric].last > 0) metricDataState[metric].ever = true;
+      }
+      function metricHasData(metric) {
+        const state = metricDataState[metric];
+        return !!(state && state.ever);
+      }
+      function hasRecentSample(metric, windowMs = 60000) {
+        const state = metricDataState[metric];
+        if (!state || !state.last) return false;
+        const now = getApproxEpochMs() ?? Date.now();
+        return now - state.last <= windowMs;
+      }
+      function hasDataInRange(metric, mode) {
+        const data = getSeriesData(metric, mode);
+        return data.some(p => p && p.v !== null && typeof p.t === 'number');
+      }
+      function refreshMetricOptions() {
+        if (!chartMetricSelect) return;
+        const available = metrics.filter(metricHasData);
+        chartMetricSelect.querySelectorAll('option').forEach(opt => {
+          if (!opt.value) return;
+          const show = available.includes(opt.value);
+          opt.disabled = !show;
+          opt.hidden = !show;
+        });
+        if (available.length > 0 && !available.includes(chartMetricSelect.value)) {
+          chartMetricSelect.value = available[0];
+          chartMetric = chartMetricSelect.value;
+        }
+      }
       const COLOR_PALETTE = [
         { id:'cyan', name:'Cyan', value:'#22d3ee' },
         { id:'indigo', name:'Indigo', value:'#6366f1' },
@@ -2288,6 +2456,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const tsMs = parseMs(ts);
         const nowTs = tsMs !== null ? tsMs : (clockState.synced ? (getApproxEpochMs() ?? Date.now()) : Date.now());
         const entry = (typeof value === 'number' && !Number.isNaN(value)) ? value : null;
+        if (entry !== null) markMetricSample(metric, nowTs);
         store.synced = syncedFlag ? true : store.synced;
         addBucketSample(store, entry, nowTs, BUCKET_5M, 'mid', MAX_6H_POINTS);
         addBucketSample(store, entry, nowTs, BUCKET_15M, 'long', MAX_24H_POINTS);
@@ -2323,6 +2492,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         store.synced = syncedFlag ? true : store.synced;
         const normalized = normalizeMode(mode);
         const sanitized = points.map(p => ({ t: p.t, v: (p && typeof p.v === 'number' && !Number.isNaN(p.v)) ? p.v : null }));
+        const latestValid = sanitized.filter(p => p && p.v !== null).pop();
+        if (latestValid && typeof latestValid.t === 'number') markMetricSample(metric, latestValid.t);
         if (normalized === '6h') {
           store.mid = sanitized.slice(-MAX_6H_POINTS);
           store.agg5.bucket = store.mid.length ? Math.floor(store.mid[store.mid.length - 1].t / BUCKET_5M) : -1;
@@ -2404,7 +2575,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const span = Math.max(1, endTs - startTs);
         const includeDate = normalized === '24h' && dayStamp(startTs, tz) !== dayStamp(endTs, tz);
         const anchorDate = includeDate ? dayStamp(startTs, tz) : '';
-        const desiredBase = targetTicks ? Math.max(2, targetTicks) : Math.max(minTicks, Math.round(plotWidth / 90));
+        const desiredBase = targetTicks ? Math.max(2, targetTicks) : Math.max(minTicks, Math.round(plotWidth / 80));
         const desired = Math.min(maxTicks, Math.max(2, desiredBase));
         const minSpacing = 48;
         const segments = Math.max(1, desired - 1);
@@ -2417,7 +2588,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const maxLabelWidth = sampleLabels.reduce((m, l) => Math.max(m, ctxDraw.measureText(l).width), 0);
         const spacingNeeded = Math.max(maxLabelWidth + labelPadding, minSpacing);
         const maxCountBySpace = Math.max(2, Math.floor(plotWidth / Math.max(1, spacingNeeded)) + 1);
-        const allowed = Math.max(2, Math.min(maxTicks, Math.min(desired, maxCountBySpace)));
+        const allowed = Math.max(2, Math.min(maxTicks, Math.max(minTicks, Math.min(desired, maxCountBySpace))));
         const step = Math.max(1, Math.ceil(rawTicks.length / allowed));
         const ticks = [];
         for (let i = 0; i < rawTicks.length; i += step) ticks.push(rawTicks[i]);
@@ -2538,62 +2709,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawChart() {
         if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
-        const isAllMetrics = chartMetric === 'all';
         const colorSelectWrapper = chartColorSelect ? chartColorSelect.closest('label') : null;
-        if (colorSelectWrapper) colorSelectWrapper.style.display = isAllMetrics ? 'none' : 'flex';
+        if (colorSelectWrapper) colorSelectWrapper.style.display = 'flex';
         let ok = false;
-        if (isAllMetrics) {
-          const series = metrics.map(m => {
-            const meta = METRIC_META[m] || { label: m.toUpperCase(), unit:'', decimals:1 };
-            const data = getSeriesData(m, '24h');
-            const deviceId = deviceIdForMetric(m);
-            const color = colorForMetricDevice(m, deviceId);
-            const normalized = normalizeSeries(data, 2);
-            if (!normalized.points.length) return null;
-            const rangeText = Number.isFinite(normalized.min) && Number.isFinite(normalized.max) ? `Range: ${normalized.min.toFixed(meta.decimals ?? 1)}–${normalized.max.toFixed(meta.decimals ?? 1)} ${meta.unit}` : '';
-            const lastText = normalized.last !== null ? `Letzter Wert: ${normalized.last.toFixed(meta.decimals ?? 1)} ${meta.unit}` : 'Keine gültigen Werte';
-            return {
-              id: `${m}-${deviceId}`,
-              metric: m,
-              deviceId,
-              label: `${meta.label || m.toUpperCase()} (${meta.unit || ''}) – GeräteID: ${deviceId}`,
-              title: `${lastText}${rangeText ? ` • ${rangeText}` : ''}`,
-              color,
-              points: normalized.points,
-            };
-          }).filter(Boolean);
-          ok = drawLineChart(chartCanvas, ctx, [], '24h', { unit:'normiert', decimals:2 }, {
-            series,
-            unitLabel: 'normiert (0..1)',
-            decimals: 2,
-            minXTicks: 6,
-            maxXTicks: 10,
-            yTicks: 5,
-            windowMs: DAY_MS,
-            anchorEndTs: getApproxEpochMs() ?? null,
-            synced: clockState.synced,
-            timezone: clockState.timezone
-          });
-          if (mainChartLegend) {
-            renderLegend(mainChartLegend, ok ? series : [], {
-              allowColorPickers: true,
-              onColorChange: (item, color) => {
-                setColorForMetricDevice(item.metric, item.deviceId, color);
-                drawChart();
-                tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
-              }
-            });
-          }
-        } else {
-          const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
-          const data = getSeriesData(chartMetric, '24h');
-          const deviceId = deviceIdForMetric(chartMetric);
-          const color = colorForMetricDevice(chartMetric, deviceId);
-          const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
-          ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
-          if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
-          if (chartColorSelect) renderColorSelect(chartColorSelect, color);
+        const available = metrics.filter(m => metricHasData(m) && hasDataInRange(m, '24h'));
+        if (!available.includes(chartMetric) && available.length) {
+          chartMetric = available[0];
+          if (chartMetricSelect) chartMetricSelect.value = chartMetric;
         }
+        const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
+        const data = getSeriesData(chartMetric, '24h');
+        const deviceId = deviceIdForMetric(chartMetric);
+        const color = colorForMetricDevice(chartMetric, deviceId);
+        const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
+        ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
+        if (chartColorSelect) renderColorSelect(chartColorSelect, color);
         if (!ok) {
           const { width } = resizeCanvas(chartCanvas, ctx);
           ctx.clearRect(0,0,chartCanvas.width, chartCanvas.height);
@@ -2607,6 +2738,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const ctxHover = hoverCanvases[metric];
         if (!ctxHover || !ctxHover.canvas) { pushError(`Missing DOM element: hover canvas for ${metric}`); return; }
         const canvas = ctxHover.canvas;
+        if (!metricHasData(metric) || !hasDataInRange(metric, '6h')) {
+          resizeCanvas(canvas, ctxHover);
+          ctxHover.clearRect(0,0,canvas.width, canvas.height);
+          return;
+        }
         const data = getSeriesData(metric, '6h');
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
         const deviceId = deviceIdForMetric(metric);
@@ -2728,6 +2864,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         drawChart();
         updateAverages();
         tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
+        refreshMetricOptions();
       }
 
       function updateAverages() {
@@ -2879,6 +3016,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const synced = flag(data.time_synced) && epochMs !== null;
           const tsForSample = synced ? epochMs : (monoMs !== null ? monoMs : Date.now());
           updateConnectionStatus(data.ap_mode === 1, data.wifi_connected === 1);
+          const lastMap = {
+            lux: parseMs(data.lux_last),
+            ppfd: parseMs(data.lux_last),
+            co2: parseMs(data.co2_last),
+            temp: parseMs(data.temp_last),
+            humidity: parseMs(data.humidity_last),
+            leaf: parseMs(data.leaf_last),
+            vpd: parseMs(data.vpd_last)
+          };
+          metrics.forEach(metric => {
+            const val = data[metric];
+            const valid = typeof val === 'number' && !Number.isNaN(val) && (metric !== 'co2' || val > 0);
+            const hint = lastMap[metric];
+            if (hint !== null) markMetricSample(metric, hint);
+            if (valid) markMetricSample(metric, tsForSample);
+            if (flag(data[`${metric}_ever`])) markMetricSample(metric, hint ?? tsForSample ?? Date.now());
+          });
           setText('lux', (typeof data.lux === 'number' && !Number.isNaN(data.lux)) ? data.lux.toFixed(1) : '–');
           setText('ppfd', (typeof data.ppfd === 'number' && !Number.isNaN(data.ppfd)) ? data.ppfd.toFixed(1) : '–');
           setText('ppfdFactor', (typeof data.ppfd_factor === 'number' && !Number.isNaN(data.ppfd_factor)) ? data.ppfd_factor.toFixed(4) : '–');
@@ -2912,6 +3066,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             requestAnimationFrame(() => refreshVpdHeatmaps(true, { skipTile: true }));
           }
           applyWifiState(data);
+          refreshMetricOptions();
         } catch (err) {
           console.warn('telemetry failed', err);
           pushError(`API /api/telemetry failed: ${err.message}`);
@@ -3193,7 +3348,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       });
       const restartNowBtn = getEl('restartNow');
       if (restartNowBtn) restartNowBtn.addEventListener('click', async () => {
-        await authedFetch('/api/reset', { method:'POST' });
+        await authedFetch('/api/restart', { method:'POST' });
       });
 
       async function scanNetworks() {
@@ -3221,6 +3376,52 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           pushError(`API /api/networks failed: ${err.message}`);
         }
       }
+
+      function stopReconnectFlow(message = '') {
+        reconnectActive = false;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        reconnectDeadline = 0;
+        if (message) setText('wifiReconnectText', message);
+        setDisplay('wifiReconnectPanel', false);
+      }
+
+      function startReconnectFlow() {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        reconnectActive = true;
+        reconnectDeadline = Date.now() + 60000;
+        setDisplay('wifiReconnectPanel', true, 'block');
+        setText('wifiReconnectText', 'Suche growsensor.local ...');
+        const poll = async () => {
+          if (!reconnectActive) return;
+          if (reconnectDeadline && Date.now() > reconnectDeadline) {
+            setText('wifiReconnectText', 'Keine Antwort. Bitte Verbindung prüfen oder Setup-AP nutzen.');
+            reconnectActive = false;
+            return;
+          }
+          try {
+            const res = await fetch('http://growsensor.local/api/ping', { method:'GET', mode:'cors' });
+            if (res.ok) {
+              window.location = 'http://growsensor.local/';
+              return;
+            }
+          } catch (err) {
+            // ignore, retry
+          }
+          reconnectTimer = setTimeout(poll, 1500);
+        };
+        poll();
+      }
+
+      const reconnectOpenBtn = getEl('reconnectOpen');
+      if (reconnectOpenBtn) reconnectOpenBtn.addEventListener('click', () => {
+        window.location = 'http://growsensor.local/';
+      });
+      const reconnectRetryBtn = getEl('reconnectRetry');
+      if (reconnectRetryBtn) reconnectRetryBtn.addEventListener('click', () => {
+        startReconnectFlow();
+      });
 
       function updateStaticIpVisibility() {
         const toggle = getEl('staticIpToggle');
@@ -3289,35 +3490,40 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const saveWifiBtn = getEl('saveWifi');
       if (saveWifiBtn) saveWifiBtn.addEventListener('click', async () => {
         const wifiStatus = getEl('wifiStatus');
-        if (!devMode) { if (wifiStatus) { wifiStatus.textContent = 'Dev-Modus erforderlich'; wifiStatus.className='status err'; } return; }
         const ssid = getEl('ssid')?.value || '';
         const pass = getEl('pass')?.value || '';
         const staticIp = getEl('staticIpToggle')?.checked || false;
         const ip = getEl('ip')?.value || '';
         const gw = getEl('gw')?.value || '';
         const sn = getEl('sn')?.value || '';
-        if (wifiStatus) wifiStatus.textContent = 'Speichern & Neustart...';
+        if (wifiStatus) { wifiStatus.textContent = 'Verbinde...'; wifiStatus.className = 'status'; }
+        startReconnectFlow();
         try {
           const res = await authedFetch('/api/wifi', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}&static=${staticIp ? 1 : 0}&ip=${encodeURIComponent(ip)}&gw=${encodeURIComponent(gw)}&sn=${encodeURIComponent(sn)}` });
           const text = await res.text().catch(() => '');
           if (res.ok) {
-            if (wifiStatus) { wifiStatus.textContent = 'Verbunden mit deiner Pflanze'; wifiStatus.className = 'status ok'; }
+            if (wifiStatus) { wifiStatus.textContent = 'Verbinde mit neuem Netzwerk...'; wifiStatus.className = 'status'; }
           } else {
             if (wifiStatus) { wifiStatus.textContent = 'Falsches Passwort'; wifiStatus.className = 'status err'; }
+            stopReconnectFlow('Passwort prüfen');
             pushError(`API /api/wifi failed: ${res.status} ${text}`);
           }
         } catch (err) {
           pushError(`API /api/wifi failed: ${err.message}`);
           if (wifiStatus) { wifiStatus.textContent = 'Speichern fehlgeschlagen'; wifiStatus.className = 'status err'; }
+          stopReconnectFlow('Verbindung fehlgeschlagen');
         }
       });
 
       const resetWifiBtn = getEl('resetWifi');
       if (resetWifiBtn) resetWifiBtn.addEventListener('click', async () => {
         const wifiStatus = getEl('wifiStatus');
-        if (!devMode) { if (wifiStatus) { wifiStatus.textContent = 'Dev-Modus erforderlich'; wifiStatus.className='status err'; } return; }
         if (wifiStatus) wifiStatus.textContent = 'Werkseinstellungen...';
-        await authedFetch('/api/reset', { method: 'POST' });
+        const confirmation = prompt('Werkseinstellungen durchführen? Tippe RESET zum Bestätigen.', '');
+        if ((confirmation || '').trim().toUpperCase() !== 'RESET') { if (wifiStatus) wifiStatus.textContent = 'Abgebrochen'; return; }
+        const body = new URLSearchParams();
+        body.set('confirm', 'RESET');
+        await authedFetch('/api/factory-reset', { method: 'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
         setTimeout(() => location.reload(), 1500);
       });
 
@@ -3492,7 +3698,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
       if (chartColorSelect) {
         chartColorSelect.addEventListener('change', () => {
-          if (!chartMetric || chartMetric === 'all') return;
+          if (!chartMetric) return;
           const deviceId = deviceIdForMetric(chartMetric);
           const color = chartColorSelect.value || COLOR_PALETTE[0].value;
           setColorForMetricDevice(chartMetric, deviceId, color);
@@ -3516,11 +3722,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function applyWifiState(data = {}) {
         const connected = flag(data?.wifi_connected);
         const ap = flag(data?.ap_mode);
+        const connecting = flag(data?.connecting);
         const showConnected = connected && !ap;
         const form = getEl('wifiForm');
         const block = getEl('wifiConnectedBlock');
+        const reconnectPanel = getEl('wifiReconnectPanel');
+        if (connecting) {
+          if (!reconnectActive) startReconnectFlow();
+        } else {
+          stopReconnectFlow();
+        }
+        if (reconnectPanel) reconnectPanel.classList.toggle('hidden', !connecting);
         if (block) {
-          block.classList.toggle('hidden', !showConnected);
+          block.classList.toggle('hidden', !showConnected || connecting);
           if (showConnected) {
             setText('wifiIp', data.ip || data.ip_active || '–');
             setText('wifiSsid', data.ssid || data.ssid_active || '–');
@@ -3532,11 +3746,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           }
         }
         if (form) {
-          const showForm = wifiFormOpen || !showConnected;
+          const showForm = wifiFormOpen || (!showConnected && !connecting);
           form.classList.toggle('hidden', !showForm);
         }
+        if (connecting) {
+          const wifiStatus = getEl('wifiStatus');
+          if (wifiStatus) { wifiStatus.textContent = 'Verbinde...'; wifiStatus.className = 'status'; }
+        }
         const toggleBtn = getEl('toggleWifiForm');
-        if (toggleBtn) toggleBtn.textContent = wifiFormOpen ? 'Abbrechen' : 'Wi-Fi ändern';
+        if (toggleBtn) toggleBtn.textContent = wifiFormOpen ? 'Abbrechen' : 'Mit neuem Netzwerk verbinden';
       }
 
       function updateWifiBars(rssi) {
@@ -3560,10 +3778,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function setDevVisible() {
         document.querySelectorAll('.dev-only').forEach(el => el.disabled = !devMode);
-        const wifiDevNote = getEl('wifiDevNote');
         const partnerCard = getEl('partnerCard');
         const devStatus = getEl('devStatus');
-        if (wifiDevNote) wifiDevNote.style.display = devMode ? 'none' : 'block';
         if (partnerCard) partnerCard.style.display = devMode ? 'block' : 'none';
         if (devStatus) devStatus.style.display = devMode ? 'inline-block' : 'none';
       }
@@ -3610,6 +3826,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (vpdHeatmapCanvas) vpdHeatmapCanvas.style.display = showHeatmap ? 'block' : 'none';
         if (detailChartCanvas) detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
         if (chartEmpty) chartEmpty.style.display = 'none';
+        const hasLiveData = detailMode === 'live' ? hasRecentSample(detailMetric, 60000) : hasDataInRange(detailMetric, detailMode);
+        const online = detailMode === 'live' ? metricIsHealthy(detailMetric, lastTelemetryPayload) : true;
+        if (!metricHasData(detailMetric) || !hasLiveData || !online) {
+          if (detailLegend) renderLegend(detailLegend, []);
+          if (chartEmpty) chartEmpty.style.display = 'flex';
+          return;
+        }
         if (showHeatmap) {
           if (detailLegend) renderLegend(detailLegend, []);
           if (detailColorSelect) renderColorSelect(detailColorSelect, colorForMetricDevice(detailMetric, deviceIdForMetric(detailMetric)));
@@ -3752,27 +3975,65 @@ void handleTelemetry() {
   String climateDev = sensorLabel(findSensor("climate") ? findSensor("climate")->type : climateSensorName(climateType));
   String leafDev = sensorLabel(findSensor("leaf") ? findSensor("leaf")->type : "MLX90614");
   String co2Dev = sensorLabel(findSensor("co2") ? findSensor("co2")->type : co2SensorName(co2Type));
-  char json[1400];
+  auto sampleTsFor = [&](const String &id) -> unsigned long long {
+    MetricSampleInfo *info = sampleInfoById(id);
+    return info ? (unsigned long long)info->lastEpochMs : 0ULL;
+  };
+  auto everFor = [&](const String &id) -> int {
+    MetricSampleInfo *info = sampleInfoById(id);
+    return info && info->everHadData ? 1 : 0;
+  };
+
+  char json[1800];
   snprintf(json, sizeof(json),
            "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,"
            "\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d,"
-           "\"wifi_connected\":%d,\"ap_mode\":%d,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"rssi\":%d,\"ssid\":\"%s\","
+           "\"wifi_connected\":%d,\"connecting\":%d,\"ap_mode\":%d,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"rssi\":%d,\"ssid\":\"%s\","
            "\"lux_ok\":%d,\"co2_ok\":%d,\"climate_ok\":%d,\"leaf_ok\":%d,\"vpd_ok\":%d,"
            "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
            "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d,"
            "\"lux_age_ms\":%lu,\"co2_age_ms\":%lu,\"climate_age_ms\":%lu,\"leaf_age_ms\":%lu,"
            "\"now\":%lu,\"monotonic_ms\":%lu,\"epoch_ms\":%llu,\"time_synced\":%d,\"timezone\":\"%s\","
-           "\"lux_device\":\"%s\",\"climate_device\":\"%s\",\"leaf_device\":\"%s\",\"co2_device\":\"%s\"}",
+           "\"lux_device\":\"%s\",\"climate_device\":\"%s\",\"leaf_device\":\"%s\",\"co2_device\":\"%s\","
+           "\"lux_last\":%llu,\"co2_last\":%llu,\"temp_last\":%llu,\"humidity_last\":%llu,\"leaf_last\":%llu,\"vpd_last\":%llu,"
+           "\"lux_ever\":%d,\"co2_ever\":%d,\"temp_ever\":%d,\"humidity_ever\":%d,\"leaf_ever\":%d,\"vpd_ever\":%d}",
            safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
            safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
-           wifiConnected ? 1 : 0, apMode ? 1 : 0, ipStr.c_str(), gwStr.c_str(), snStr.c_str(), rssi, ssid.c_str(),
+           wifiConnected ? 1 : 0, wifiConnectInProgress ? 1 : 0, apMode ? 1 : 0, ipStr.c_str(), gwStr.c_str(), snStr.c_str(), rssi, ssid.c_str(),
            luxOk ? 1 : 0, co2Ok ? 1 : 0, climateOk ? 1 : 0, leafOk ? 1 : 0, vpdOk ? 1 : 0,
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
            ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate),
            now, now, (unsigned long long)epochMs, timeSynced ? 1 : 0, timezoneName.c_str(),
-           luxDev.c_str(), climateDev.c_str(), leafDev.c_str(), co2Dev.c_str());
+           luxDev.c_str(), climateDev.c_str(), leafDev.c_str(), co2Dev.c_str(),
+           sampleTsFor("lux"), sampleTsFor("co2"), sampleTsFor("temp"), sampleTsFor("humidity"), sampleTsFor("leaf"), sampleTsFor("vpd"),
+           everFor("lux"), everFor("co2"), everFor("temp"), everFor("humidity"), everFor("leaf"), everFor("vpd"));
+  server.send(200, "application/json", json);
+}
+
+void handlePing() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", "{\"ok\":1}");
+}
+
+void handleStatus() {
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
+  String ipStr = activeIp.toString();
+  String ssid = wifiConnected ? WiFi.SSID() : savedSsid;
+  int rssi = wifiConnected ? WiFi.RSSI() : 0;
+  bool connecting = wifiConnectInProgress && !wifiConnected;
+  String json = "{";
+  json += "\"wifi_connected\":" + String(wifiConnected ? 1 : 0) + ",";
+  json += "\"connecting\":" + String(connecting ? 1 : 0) + ",";
+  json += "\"ap_mode\":" + String(apMode ? 1 : 0) + ",";
+  json += "\"ssid\":\"" + ssid + "\",";
+  json += "\"rssi\":" + String(rssi) + ",";
+  json += "\"ip\":\"" + ipStr + "\",";
+  json += "\"hostname\":\"" + deviceHostname + "\"";
+  json += "}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", json);
 }
 
@@ -3876,12 +4137,12 @@ void handlePins() {
     return;
   }
 
-  prefs.begin("grow-sensor", false);
-  prefs.putInt("i2c_sda", sda);
-  prefs.putInt("i2c_scl", scl);
-  prefs.putInt("co2_rx", rx);
-  prefs.putInt("co2_tx", tx);
-  prefs.end();
+  prefsSystem.begin("system", false);
+  prefsSystem.putInt("i2c_sda", sda);
+  prefsSystem.putInt("i2c_scl", scl);
+  prefsSystem.putInt("co2_rx", rx);
+  prefsSystem.putInt("co2_tx", tx);
+  prefsSystem.end();
 
   pinI2C_SDA = sda;
   pinI2C_SCL = scl;
@@ -3945,11 +4206,11 @@ void handleSettings() {
     lastTimeSyncAttempt = 0;
     startNtpSync();
   }
-  prefs.begin("grow-sensor", false);
-  if (hasChannel) prefs.putString("channel", lightChannelName());
-  if (hasVpdStage) prefs.putString("vpd_stage", vpdStageId);
-  if (hasTimezone) prefs.putString("timezone", timezoneName);
-  prefs.end();
+  prefsSystem.begin("system", false);
+  if (hasChannel) prefsSystem.putString("channel", lightChannelName());
+  if (hasVpdStage) prefsSystem.putString("vpd_stage", vpdStageId);
+  if (hasTimezone) prefsSystem.putString("timezone", timezoneName);
+  prefsSystem.end();
   server.send(200, "text/plain", "saved");
 }
 
@@ -3971,42 +4232,39 @@ void handleWifiSave() {
   }
 
   saveWifiCredentials(ssid, pass);
-  prefs.begin("grow-sensor", false);
-  prefs.putBool("static", staticFlag);
-  prefs.putString("ip", ip.toString());
-  prefs.putString("gw", gw.toString());
-  prefs.putString("sn", sn.toString());
-  prefs.end();
+  prefsWifi.begin("wifi", false);
+  prefsWifi.putBool("static", staticFlag);
+  prefsWifi.putString("ip", ip.toString());
+  prefsWifi.putString("gw", gw.toString());
+  prefsWifi.putString("sn", sn.toString());
+  prefsWifi.end();
   staticIpEnabled = staticFlag;
   staticIp = ip;
   staticGateway = gw;
   staticSubnet = sn;
 
-  WiFi.disconnect();
-  WiFi.mode(WIFI_STA);
-  if (staticIpEnabled && staticIp != IPAddress((uint32_t)0) && staticGateway != IPAddress((uint32_t)0) && staticSubnet != IPAddress((uint32_t)0)) {
-    WiFi.config(staticIp, staticGateway, staticSubnet);
-  }
-  WiFi.begin(ssid.c_str(), pass.c_str());
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
-    delay(200);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    apMode = false;
-    logEvent("WiFi saved + connected: " + WiFi.localIP().toString());
-    server.send(200, "text/plain", "connected");
-  } else {
-    logEvent("WiFi save failed (wrong password?)");
-    server.send(401, "text/plain", "wrong password");
-  }
+  apMode = false;
+  wifiFallbackAt = millis() + WIFI_TIMEOUT + 10000;
+  beginWifiConnect(ssid, pass, false);
+  server.send(200, "text/plain", "connecting");
 }
 
-void handleReset() {
+void handleRestart() {
   if (!enforceAuth())
     return;
+  logEvent("Soft restart requested — NO ERASE performed");
+  server.send(200, "text/plain", "restarting");
+  delay(150);
+  ESP.restart();
+}
+
+void handleFactoryReset() {
+  if (!enforceAuth())
+    return;
+  if (!server.hasArg("confirm") || server.arg("confirm") != "RESET") {
+    server.send(400, "text/plain", "confirm RESET");
+    return;
+  }
   clearPreferences();
   server.send(200, "text/plain", "cleared");
   delay(200);
@@ -4092,9 +4350,9 @@ void handleSensorsApi() {
     }
     if (id == "climate_type" && server.hasArg("value")) {
       climateType = climateFromString(server.arg("value"));
-      prefs.begin("grow-sensor", false);
-      prefs.putString("climate_type", climateSensorName(climateType));
-      prefs.end();
+      prefsSystem.begin("system", false);
+      prefsSystem.putString("climate_type", climateSensorName(climateType));
+      prefsSystem.end();
       reinitClimateSensor();
       rebuildSensorList();
       server.send(200, "text/plain", "saved");
@@ -4102,9 +4360,9 @@ void handleSensorsApi() {
     }
     if (id == "co2_type" && server.hasArg("value")) {
       co2Type = co2FromString(server.arg("value"));
-      prefs.begin("grow-sensor", false);
-      prefs.putString("co2_type", co2SensorName(co2Type));
-      prefs.end();
+      prefsSystem.begin("system", false);
+      prefsSystem.putString("co2_type", co2SensorName(co2Type));
+      prefsSystem.end();
       reinitCo2Sensor();
       rebuildSensorList();
       server.send(200, "text/plain", "saved");
@@ -4281,10 +4539,14 @@ void handleLogs() {
 void setupServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/telemetry", HTTP_GET, handleTelemetry);
+  server.on("/api/ping", HTTP_GET, handlePing);
+  server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/api/settings", HTTP_GET, handleSettings);
   server.on("/api/settings", HTTP_POST, handleSettings);
   server.on("/api/wifi", HTTP_POST, handleWifiSave);
-  server.on("/api/reset", HTTP_POST, handleReset);
+  server.on("/api/restart", HTTP_POST, handleRestart);
+  server.on("/api/factory-reset", HTTP_POST, handleFactoryReset);
+  server.on("/api/reset", HTTP_POST, handleFactoryReset);
   server.on("/api/networks", HTTP_GET, handleNetworks);
   server.on("/api/sensors", HTTP_GET, handleSensorsApi);
   server.on("/api/sensors", HTTP_POST, handleSensorsApi);
@@ -4321,6 +4583,7 @@ void loop() {
   }
   pruneLogsIfLowMemory(false);
   server.handleClient();
+  maintainWifiConnection();
   maintainTimeSync();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
