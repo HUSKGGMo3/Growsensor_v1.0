@@ -8,6 +8,8 @@
 - Zeitzonen-Wahl (Europe/Berlin, UTC, America/New_York, Asia/Tokyo u.a.) wird in NVS gespeichert; Fallback auf relative Zeit (mm:ss) bei fehlender Zeitsynchronisation.
 - Neue Bucket-Strategie: Live/6h aggregiert in 5-Minuten-Buckets, 24h aggregiert in 15-Minuten-Buckets (RAM-schonend). Der große Dashboard-Chart zeigt jetzt 24h/15m mit wählbarer Metrik.
 - Hotfix v0.2.6 (ungetestet): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
+- Hotfix v0.2.6 (ungetestet): Mehr X-Achsen-Ticks mit automatischem Skip, gepufferte Y-Achsen (sichtbare Ein-Punkt-Linien), Hover-Charts über die ganze Kachel sowie Farb-Dropdowns pro Gerät (Palette in `localStorage` gespeichert) plus Legende mit Geräte-ID.
+- Hotfix v0.2.6 (ungetestet): MH-Z14 (CO₂) zur Sensor-Vorlage hinzugefügt (UART, nutzt den MH-Z19-Treiberpfad).
 
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 
@@ -34,7 +36,7 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 
 ## Unterstützte Hardware
 - ESP32 (klassisch, Arduino-Framework)
-- Sensoren: BH1750 (Lux), SHT31/SHT30 (Temp/Feuchte), MLX90614 (Blatt-Temp), MH-Z19-Serie (CO₂).
+- Sensoren: BH1750 (Lux), SHT31/SHT30 (Temp/Feuchte), MLX90614 (Blatt-Temp), MH-Z19/MH-Z14-Serie (CO₂).
 - I²C-Pins und CO₂-UART-Pins sind in `src/main.cpp` konfigurierbar (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
 
 ## Sicherheit & Login
@@ -61,6 +63,8 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - `/api/telemetry` und `/api/history` geben Epoch-Millisekunden zurück; Haupt-/Hover-/Detail-Charts zeigen lokale Uhrzeit (HH:MM bzw. HH:MM:SS) und fallen bei fehlender Synchronisation auf relative Zeiten zurück. Hover-Charts rendern wieder korrekt skaliert mit Achsen.
 - Bucketed Charts: Live/6h in 5-Minuten-Buckets, 24h in 15-Minuten-Buckets. Das Detail-Modal hat jetzt Live/6h/24h-Tabs und der große Dashboard-Chart zeigt eine auswählbare Metrik über die letzten 24h (15m).
 - Zeitzonen-Dropdown im Header + Live-Uhranzeige; unsynced-Status klar sichtbar per Badge.
+- Chart-UX: Mehr X-Ticks ohne Überschneidungen, gepufferte Y-Achsen, Farbwahl pro Gerät (Palette, Speicherung in `localStorage`) inkl. Geräte-ID-Legende im großen 24h-Chart und im Detail-Modal.
+- Sensor-Templates erweitert um MH-Z14 (CO₂) mit bestehendem UART-Treiber.
 
   (v0.2.6 bleibt ungetestet – bitte vorsichtig einsetzen.)
 

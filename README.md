@@ -8,6 +8,8 @@
 - Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.nist.gov, time.google.com) and graceful fallback to relative time until synced.
 - New bucketed charting: Live/6h views aggregate into 5-minute buckets, 24h charts aggregate into 15-minute buckets (stored on-device to avoid RAM spikes). The dashboard’s large chart is now a 24h/15m view with a metric dropdown.
 - Hotfix v0.2.6 (untested): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
+- Hotfix v0.2.6 (untested): Time-axis tick strategy with more (auto-skipped) labels, padded Y-axes so single values are visible, full-height hover charts, and per-device color dropdowns (persisted in `localStorage`) with legends showing the device ID.
+- Hotfix v0.2.6 (untested): MH-Z14 (CO₂) added to the sensor templates (UART, mapped to the MH-Z19 driver path).
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
@@ -34,7 +36,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 
 ## Supported Hardware
 - ESP32 (classic, Arduino framework)
-- Sensors: BH1750 (Lux), SHT31/SHT30 (Temp/Humidity), MLX90614 (Leaf Temp), MH-Z19 series (CO₂).
+- Sensors: BH1750 (Lux), SHT31/SHT30 (Temp/Humidity), MLX90614 (Leaf Temp), MH-Z19/MH-Z14 series (CO₂).
 - I²C pins and CO₂ UART pins are configurable in `src/main.cpp` (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
 
 ## Security & Login
@@ -61,6 +63,8 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts. Hover mini-charts now draw full-size canvases with X/Y axes and time labels.
 - Chart ranges are bucketed to save memory: Live/6h use 5-minute buckets, 24h uses 15-minute buckets. The detail modal gains a 24h tab, and the dashboard’s big chart now shows a selectable metric over the last 24h (15m resolution).
 - Header timezone dropdown with persistent selection and live clock.
+- Chart UX polish: more X-axis ticks with collision avoidance, padded Y-axes, per-metric color palette with device-ID legend in the large 24h chart and detail modal (colors are stored per device in `localStorage`).
+- Sensor templates expanded with MH-Z14 (CO₂) mapped to the existing UART driver.
   (v0.2.6 remains untested – please use with care.)
 
 ## v0.2.5 Changes

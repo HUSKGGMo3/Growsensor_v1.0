@@ -84,6 +84,7 @@ enum class ClimateSensorType {
 
 enum class Co2SensorType {
   MHZ19,
+  MHZ14,
   SENSEAIR_S8,
   SCD30,
   SCD40,
@@ -181,6 +182,8 @@ const SensorTemplate SENSOR_TEMPLATES[] = {
     {"MLX90614", "MLX90614", "leaf", "i2c", DEFAULT_I2C_SDA_PIN,
      DEFAULT_I2C_SCL_PIN, -1, -1},
     {"MHZ19", "MH-Z19", "co2", "uart", -1, -1, DEFAULT_CO2_RX_PIN,
+     DEFAULT_CO2_TX_PIN},
+    {"MHZ14", "MH-Z14", "co2", "uart", -1, -1, DEFAULT_CO2_RX_PIN,
      DEFAULT_CO2_TX_PIN},
     {"SCD30", "SCD30", "co2", "i2c", DEFAULT_I2C_SDA_PIN,
      DEFAULT_I2C_SCL_PIN, -1, -1},
@@ -357,11 +360,13 @@ String climateSensorName(ClimateSensorType t) {
 }
 
 ClimateSensorType climateFromString(const String &v) {
-  if (v == "dht22") return ClimateSensorType::DHT22;
-  if (v == "bme280") return ClimateSensorType::BME280;
-  if (v == "bme680") return ClimateSensorType::BME680;
-  if (v == "sht30") return ClimateSensorType::SHT30;
-  if (v == "ds18b20") return ClimateSensorType::DS18B20;
+  String lower = v;
+  lower.toLowerCase();
+  if (lower == "dht22") return ClimateSensorType::DHT22;
+  if (lower == "bme280") return ClimateSensorType::BME280;
+  if (lower == "bme680") return ClimateSensorType::BME680;
+  if (lower == "sht30") return ClimateSensorType::SHT30;
+  if (lower == "ds18b20") return ClimateSensorType::DS18B20;
   return ClimateSensorType::SHT31;
 }
 
@@ -369,6 +374,8 @@ String co2SensorName(Co2SensorType t) {
   switch (t) {
   case Co2SensorType::MHZ19:
     return "mhz19";
+  case Co2SensorType::MHZ14:
+    return "mhz14";
   case Co2SensorType::SENSEAIR_S8:
     return "senseair_s8";
   case Co2SensorType::SCD30:
@@ -383,10 +390,13 @@ String co2SensorName(Co2SensorType t) {
 }
 
 Co2SensorType co2FromString(const String &v) {
-  if (v == "senseair_s8") return Co2SensorType::SENSEAIR_S8;
-  if (v == "scd30") return Co2SensorType::SCD30;
-  if (v == "scd40") return Co2SensorType::SCD40;
-  if (v == "scd41") return Co2SensorType::SCD41;
+  String lower = v;
+  lower.toLowerCase();
+  if (lower == "mhz14") return Co2SensorType::MHZ14;
+  if (lower == "senseair_s8") return Co2SensorType::SENSEAIR_S8;
+  if (lower == "scd30") return Co2SensorType::SCD30;
+  if (lower == "scd40") return Co2SensorType::SCD40;
+  if (lower == "scd41") return Co2SensorType::SCD41;
   return Co2SensorType::MHZ19;
 }
 
@@ -907,7 +917,7 @@ void reinitLeafSensor() {
 void reinitCo2Sensor() {
   co2Health.healthy = false;
   co2Health.enabled = true;
-  if (co2Type == Co2SensorType::MHZ19) {
+  if (co2Type == Co2SensorType::MHZ19 || co2Type == Co2SensorType::MHZ14) {
     co2Serial.begin(9600, SERIAL_8N1, pinCO2_RX, pinCO2_TX);
     co2Sensor.begin(co2Serial);
     co2Sensor.autoCalibration(false);
@@ -1015,7 +1025,7 @@ void readSensors() {
   }
 
   if (enableCo2 && co2Health.present) {
-    if (co2Type == Co2SensorType::MHZ19) {
+    if (co2Type == Co2SensorType::MHZ19 || co2Type == Co2SensorType::MHZ14) {
       int ppm = co2Sensor.getCO2();
       if (ppm > 0 && ppm < 5000) {
         latest.co2ppm = ppm;
@@ -1143,7 +1153,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:stretch; justify-content:stretch; pointer-events:none; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:4; }
       .metric-tile:hover .hover-chart { display:flex; }
       .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
@@ -1152,7 +1162,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tile-eye .eye-closed { display:none; }
       .metric-tile.collapsed .tile-eye .eye-open { display:none; }
       .metric-tile.collapsed .tile-eye .eye-closed { display:block; }
-      .hover-chart canvas { width:100%; height:100%; display:block; }
+      .hover-chart canvas { width:100%; height:100%; display:block; flex:1 1 auto; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
       .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
@@ -1212,6 +1222,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .time-text { font-size:0.9rem; color:#cbd5e1; }
       .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
       .row.hidden { display:none !important; }
+      .chart-legend { display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:0.9rem; color:#cbd5e1; }
+      .legend-item { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:#0b1220; border:1px solid #1f2937; }
+      .color-select { width:auto; min-width:150px; }
     </style>
   </head>
   <body>
@@ -1360,6 +1373,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             </select>
           </label>
         </div>
+        <div class="row" style="justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
+          <div id="mainChartLegend" class="chart-legend"></div>
+          <label for="chartColorSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
+            Farbe
+            <select id="chartColorSelect" class="color-select"></select>
+          </label>
+        </div>
         <div class="chart"><canvas id="chart"></canvas></div>
       </section>
 
@@ -1487,11 +1507,18 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             <div id="chartModalTitle">Detailansicht</div>
             <span class="badge" id="chartModalBadge">–</span>
           </div>
-          <div class="modal-tabs" id="detailScopeTabs">
-            <button id="tabLive" class="active">Live</button>
-            <button id="tabLast6h">Letzte 6h</button>
-            <button id="tabLast24h">Letzte 24h</button>
-          </div>
+        <div class="modal-tabs" id="detailScopeTabs">
+          <button id="tabLive" class="active">Live</button>
+          <button id="tabLast6h">Letzte 6h</button>
+          <button id="tabLast24h">Letzte 24h</button>
+        </div>
+        <div class="row" style="align-items:center; gap:8px; flex-wrap:wrap; justify-content:space-between;">
+          <label for="detailColorSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
+            Farbe
+            <select id="detailColorSelect" class="color-select"></select>
+          </label>
+          <div id="detailLegend" class="chart-legend"></div>
+        </div>
         <div style="position:relative;">
           <div class="modal-tabs" id="vpdViewTabs" style="display:none;">
             <button id="tabHeatmap" class="active">Heatmap</button>
@@ -1743,6 +1770,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const wifiBars = getEl('wifiBars');
       const timezoneSelect = getEl('timezoneSelect');
       const chartMetricSelect = getEl('chartMetricSelect');
+      const chartColorSelect = getEl('chartColorSelect');
+      const detailColorSelect = getEl('detailColorSelect');
+      const mainChartLegend = getEl('mainChartLegend');
+      const detailLegend = getEl('detailLegend');
       const timeBadge = getEl('timeBadge');
       const localTimeText = getEl('localTimeText');
       let detailMetric = null;
@@ -1762,6 +1793,120 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         leaf:{ unit:'°C', label:'Leaf-Temp', decimals:1 },
         vpd:{ unit:'kPa', label:'VPD', decimals:3 },
       };
+      const COLOR_PALETTE = [
+        { id:'cyan', name:'Cyan', value:'#22d3ee' },
+        { id:'indigo', name:'Indigo', value:'#6366f1' },
+        { id:'amber', name:'Amber', value:'#f59e0b' },
+        { id:'emerald', name:'Emerald', value:'#10b981' },
+        { id:'pink', name:'Pink', value:'#ec4899' },
+        { id:'red', name:'Rot', value:'#ef4444' },
+        { id:'lime', name:'Lime', value:'#84cc16' },
+        { id:'sky', name:'Sky', value:'#38bdf8' },
+        { id:'violet', name:'Violett', value:'#a855f7' },
+        { id:'slate', name:'Slate', value:'#94a3b8' },
+        { id:'rose', name:'Rose', value:'#fb7185' },
+        { id:'teal', name:'Teal', value:'#14b8a6' },
+      ];
+      const COLOR_PREF_KEY = 'metric_colors_v026';
+      let colorPrefs = {};
+      function loadColorPrefs() {
+        try {
+          const raw = localStorage.getItem(COLOR_PREF_KEY);
+          if (raw) colorPrefs = JSON.parse(raw) || {};
+        } catch (err) {
+          console.warn('color prefs parse failed', err);
+          colorPrefs = {};
+        }
+      }
+      function persistColorPrefs() {
+        try { localStorage.setItem(COLOR_PREF_KEY, JSON.stringify(colorPrefs)); } catch (err) { console.warn('color prefs persist failed', err); }
+      }
+      function hashString(str) {
+        let h = 0;
+        for (let i = 0; i < str.length; i++) {
+          h = Math.imul(31, h) + str.charCodeAt(i) | 0;
+        }
+        return Math.abs(h);
+      }
+      function colorForDevice(id) {
+        if (!id) return COLOR_PALETTE[0].value;
+        if (colorPrefs[id]) return colorPrefs[id];
+        const idx = hashString(id) % COLOR_PALETTE.length;
+        return COLOR_PALETTE[idx].value;
+      }
+      function setColorForDevice(id, color) {
+        if (!id || !color) return;
+        colorPrefs[id] = color;
+        persistColorPrefs();
+      }
+      loadColorPrefs();
+      const metricDeviceIds = {
+        lux: 'BH1750',
+        ppfd: 'BH1750',
+        co2: 'MHZ19',
+        temp: 'SHT31',
+        humidity: 'SHT31',
+        leaf: 'MLX90614',
+        vpd: 'VPD',
+      };
+      function setDeviceId(metric, id) {
+        if (!metric || !id) return;
+        metricDeviceIds[metric] = id;
+      }
+      function deviceIdForMetric(metric) {
+        return metricDeviceIds[metric] || metric.toUpperCase();
+      }
+      function applyDeviceIdsFromTelemetry(data = {}) {
+        const map = data.device_ids || {};
+        const co2Dev = data.co2_device || map.co2;
+        const lightDev = data.lux_device || map.lux;
+        const climateDev = data.climate_device || map.climate;
+        const leafDev = data.leaf_device || map.leaf;
+        if (lightDev) { setDeviceId('lux', lightDev); setDeviceId('ppfd', lightDev); }
+        if (climateDev) { setDeviceId('temp', climateDev); setDeviceId('humidity', climateDev); }
+        if (leafDev) setDeviceId('leaf', leafDev);
+        if (co2Dev) setDeviceId('co2', co2Dev);
+        if ((metricDeviceIds.temp || climateDev) && (metricDeviceIds.leaf || leafDev)) {
+          setDeviceId('vpd', `${metricDeviceIds.temp || climateDev || 'climate'}+${metricDeviceIds.leaf || leafDev || 'leaf'}`);
+        }
+      }
+      function applyDeviceIdsFromSensors(active = []) {
+        const byCat = {};
+        active.forEach(s => {
+          if (!s || s.enabled === false) return;
+          byCat[s.category] = s.type || s.name || s.id;
+        });
+        if (byCat.light) { setDeviceId('lux', byCat.light); setDeviceId('ppfd', byCat.light); }
+        if (byCat.climate) { setDeviceId('temp', byCat.climate); setDeviceId('humidity', byCat.climate); }
+        if (byCat.leaf) setDeviceId('leaf', byCat.leaf);
+        if (byCat.co2) setDeviceId('co2', byCat.co2);
+        if (metricDeviceIds.temp || metricDeviceIds.humidity || metricDeviceIds.leaf) {
+          setDeviceId('vpd', `${metricDeviceIds.temp || 'climate'}+${metricDeviceIds.leaf || 'leaf'}`);
+        }
+      }
+      function renderLegend(el, entries = []) {
+        if (!el) return;
+        el.innerHTML = '';
+        entries.forEach(item => {
+          const div = document.createElement('div');
+          div.className = 'legend-item';
+          div.innerHTML = `<span class="legend-swatch" style="background:${item.color};"></span><span>${item.label || item.id}</span>`;
+          el.appendChild(div);
+        });
+      }
+      function renderColorSelect(selectEl, currentColor) {
+        if (!selectEl) return;
+        const selected = currentColor || COLOR_PALETTE[0].value;
+        selectEl.innerHTML = '';
+        COLOR_PALETTE.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.value;
+          opt.textContent = `● ${c.name}`;
+          opt.style.color = c.value;
+          if (c.value === selected) opt.selected = true;
+          selectEl.appendChild(opt);
+        });
+      }
       const KNOWN_TIMEZONES = ['Europe/Berlin','UTC','Europe/London','America/New_York','Asia/Tokyo','Australia/Sydney'];
       let chartMetric = 'temp';
       if (chartMetricSelect && chartMetricSelect.value) chartMetric = chartMetricSelect.value;
@@ -2102,7 +2247,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return out.filter(p => p.temp !== null && p.hum !== null && p.vpd !== null);
       }
 
-      function formatTimeLabel(ts, mode, firstTs, lastTs, synced = clockState.synced, tz = clockState.timezone) {
+      function formatTimeLabel(ts, mode, firstTs, lastTs, synced = clockState.synced, tz = clockState.timezone, includeDate = false, anchorDate = '') {
         const normalized = normalizeMode(mode);
         if (!synced) {
           const delta = Math.max(0, ts - firstTs);
@@ -2118,7 +2263,60 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const opts = { hour:'2-digit', minute:'2-digit', timeZone: tz || 'UTC' };
         if (normalized === 'live') opts.second = '2-digit';
         const d = new Date(ts);
-        return new Intl.DateTimeFormat(undefined, opts).format(d);
+        const timeLabel = new Intl.DateTimeFormat(undefined, opts).format(d);
+        if (includeDate) {
+          const dateLabel = new Intl.DateTimeFormat(undefined, { timeZone: tz || 'UTC', month:'2-digit', day:'2-digit' }).format(d);
+          if (!anchorDate || dateLabel !== anchorDate) return `${dateLabel} ${timeLabel}`;
+        }
+        return timeLabel;
+      }
+
+      function dayStamp(ts, tz = clockState.timezone) {
+        return new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'UTC', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(ts));
+      }
+
+      function computeYRange(values, decimals = 1) {
+        const maxVal = Math.max(...values);
+        const minVal = Math.min(...values);
+        if (!Number.isFinite(maxVal) || !Number.isFinite(minVal)) return { min:0, max:1, span:1 };
+        let paddedMin = minVal;
+        let paddedMax = maxVal;
+        if (maxVal === minVal) {
+          const pad = Math.max(Math.abs(maxVal) * 0.02, decimals > 0 ? Math.pow(10, -decimals) : 1);
+          paddedMin = maxVal - pad;
+          paddedMax = maxVal + pad;
+        } else {
+          const pad = Math.max((maxVal - minVal) * 0.05, Math.abs(maxVal) * 0.01, Math.abs(minVal) * 0.01);
+          paddedMin = minVal - pad;
+          paddedMax = maxVal + pad;
+        }
+        return { min: paddedMin, max: paddedMax, span: Math.max(paddedMax - paddedMin, 0.0001) };
+      }
+
+      function planTimeTicks(ctxDraw, { mode, firstTs, lastTs, plotWidth, synced, tz, minTicks = 5, maxTicks = 10, targetTicks = null, labelPadding = 14 }) {
+        const normalized = normalizeMode(mode);
+        const span = Math.max(1, lastTs - firstTs);
+        const includeDate = normalized === '24h' && dayStamp(firstTs, tz) !== dayStamp(lastTs, tz);
+        const anchorDate = includeDate ? dayStamp(firstTs, tz) : '';
+        const desiredBase = targetTicks ? Math.max(2, targetTicks) : Math.max(minTicks, Math.round(plotWidth / 80));
+        const desired = Math.min(maxTicks, Math.max(2, desiredBase));
+        const segments = Math.max(1, desired - 1);
+        const rawTicks = [];
+        for (let i = 0; i <= segments; i++) {
+          rawTicks.push(Math.round(firstTs + (span / segments) * i));
+        }
+        const labelFor = (ts) => formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz, includeDate, anchorDate);
+        const sampleLabels = rawTicks.map(labelFor);
+        const maxLabelWidth = sampleLabels.reduce((m, l) => Math.max(m, ctxDraw.measureText(l).width), 0);
+        const widthLimit = Math.max(2, Math.floor(plotWidth / Math.max(60, maxLabelWidth + labelPadding)));
+        const allowed = Math.max(2, Math.min(maxTicks, Math.min(desired, widthLimit)));
+        const step = Math.max(1, Math.ceil(rawTicks.length / allowed));
+        const ticks = [];
+        for (let i = 0; i < rawTicks.length; i += step) ticks.push(rawTicks[i]);
+        if (ticks[ticks.length - 1] !== rawTicks[rawTicks.length - 1]) ticks.push(rawTicks[rawTicks.length - 1]);
+        const labels = ticks.map(labelFor);
+        const finalMaxWidth = labels.reduce((m,l)=>Math.max(m, ctxDraw.measureText(l).width), 0);
+        return { ticks, labels, maxLabelWidth: finalMaxWidth };
       }
 
       function drawLineChart(canvas, ctxDraw, points, mode, meta, opts = {}) {
@@ -2131,14 +2329,18 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const tz = opts.timezone || clockState.timezone;
         const { width, height } = resizeCanvas(canvas, ctxDraw);
         ctxDraw.clearRect(0,0,canvas.width, canvas.height);
-        const valid = points.filter(p => p && p.v !== null && !Number.isNaN(p.v));
-        if (!valid.length) return false;
-        const values = valid.map(p => p.v);
-        const maxVal = Math.max(...values);
-        const minVal = Math.min(...values);
-        const span = Math.max(maxVal - minVal, 0.0001);
-        const firstTs = valid[0]?.t ?? 0;
-        const lastTs = valid[valid.length - 1]?.t ?? (firstTs + 1);
+        const seriesList = Array.isArray(opts.series) && opts.series.length ? opts.series : [{ id: opts.seriesId || meta?.label || 'series', label: opts.seriesLabel || meta?.label, color: opts.color, points }];
+        const prepared = seriesList.map(s => {
+          const pts = (s.points || []).filter(p => p && typeof p.t === 'number' && p.v !== null && !Number.isNaN(p.v));
+          return { ...s, points: pts };
+        }).filter(s => s.points.length);
+        if (!prepared.length) return false;
+        const allPoints = prepared.flatMap(s => s.points);
+        const sorted = [...allPoints].sort((a,b) => a.t - b.t);
+        const values = sorted.map(p => p.v);
+        const range = computeYRange(values, decimals);
+        const firstTs = sorted[0]?.t ?? 0;
+        const lastTs = sorted[sorted.length - 1]?.t ?? (firstTs + 1);
         const timeSpan = Math.max(1, lastTs - firstTs);
         ctxDraw.strokeStyle = '#1f2937';
         ctxDraw.fillStyle = '#94a3b8';
@@ -2146,40 +2348,18 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
         const yLabels = [];
         for (let i=0;i<=yTicks;i++){
-          const val = (maxVal - (span*(i/yTicks))).toFixed(decimals);
+          const val = (range.max - (range.span*(i/yTicks))).toFixed(decimals);
           yLabels.push(val);
         }
         const maxYLabelWidth = yLabels.reduce((m,l) => Math.max(m, ctxDraw.measureText(l).width), 0);
         const paddingLeft = Math.max(opts.paddingLeft ?? 44, Math.ceil(maxYLabelWidth + 12));
         const paddingRight = opts.paddingRight ?? 12;
         const paddingTop = opts.paddingTop ?? 12;
-        let paddingBottom = opts.paddingBottom ?? 28;
+        let paddingBottom = Math.max(opts.paddingBottom ?? 32, Math.round(fontSize * 1.4));
         const labelPadding = opts.labelPadding ?? 14;
-        let rotateLabels = opts.rotateXLabels ?? false;
-
-        const sampleTs = Array.from(new Set([firstTs, firstTs + timeSpan / 2, lastTs].map(v => Math.round(v)))).filter(v => Number.isFinite(v));
-        const sampleLabels = sampleTs.map(ts => formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz));
-        const maxXLabelWidth = sampleLabels.reduce((m,l) => Math.max(m, ctxDraw.measureText(l).width), 0);
-
         let plotWidth = Math.max(1, width - paddingLeft - paddingRight);
         let plotHeight = Math.max(1, height - paddingTop - paddingBottom);
-        const widthLimited = Math.max(2, Math.floor(plotWidth / Math.max(40, maxXLabelWidth + labelPadding)));
-        const preferredLabels = opts.xTicks ? Math.max(2, opts.xTicks + 1) : widthLimited;
-        const maxLabels = Math.max(2, Math.min(preferredLabels, widthLimited));
-        const step = Math.max(1, Math.ceil(valid.length / maxLabels));
-        const tickIndices = [];
-        for (let i=0;i<valid.length;i+=step) tickIndices.push(i);
-        if (tickIndices[tickIndices.length - 1] !== valid.length - 1) tickIndices.push(valid.length - 1);
-        if (tickIndices[0] !== 0) tickIndices.unshift(0);
-
-        const allowRotate = opts.allowRotate ?? false;
-        if (allowRotate) {
-          const estimatedWidth = tickIndices.length * (maxXLabelWidth + labelPadding);
-          if (estimatedWidth > plotWidth) rotateLabels = true;
-        }
-        if (rotateLabels) paddingBottom += Math.round(fontSize * 0.8);
-        plotWidth = Math.max(1, width - paddingLeft - paddingRight);
-        plotHeight = Math.max(1, height - paddingTop - paddingBottom);
+        const tickPlan = planTimeTicks(ctxDraw, { mode: normalized, firstTs, lastTs, plotWidth, synced, tz, minTicks: opts.minXTicks ?? 5, maxTicks: opts.maxXTicks ?? 10, targetTicks: opts.xTicks ? Math.max(2, opts.xTicks + 1) : null, labelPadding });
         const plotBottom = paddingTop + plotHeight;
 
         for (let i=0;i<=yTicks;i++){
@@ -2191,31 +2371,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           ctxDraw.fillText(label, paddingLeft - 8, Math.min(plotBottom - 2, y));
         }
 
-        tickIndices.forEach(idx => {
-          const pt = valid[idx];
-          if (!pt || typeof pt.t !== 'number') return;
-          const x = paddingLeft + ((pt.t - firstTs) / timeSpan) * plotWidth;
+        tickPlan.ticks.forEach(ts => {
+          const x = paddingLeft + ((ts - firstTs) / timeSpan) * plotWidth;
           ctxDraw.beginPath(); ctxDraw.moveTo(x, paddingTop); ctxDraw.lineTo(x, plotBottom); ctxDraw.stroke();
         });
 
-        tickIndices.forEach(idx => {
-          const pt = valid[idx];
-          if (!pt || typeof pt.t !== 'number') return;
-          const x = paddingLeft + ((pt.t - firstTs) / timeSpan) * plotWidth;
-          const label = formatTimeLabel(pt.t, normalized, firstTs, lastTs, synced, tz);
-          ctxDraw.save();
-          if (rotateLabels) {
-            ctxDraw.translate(x, plotBottom + 2);
-            ctxDraw.rotate(-0.61);
-            ctxDraw.textAlign = 'right';
-            ctxDraw.textBaseline = 'middle';
-            ctxDraw.fillText(label, 0, 0);
-          } else {
-            ctxDraw.textAlign = 'center';
-            ctxDraw.textBaseline = 'top';
-            ctxDraw.fillText(label, x, plotBottom + 2);
-          }
-          ctxDraw.restore();
+        tickPlan.ticks.forEach((ts, idx) => {
+          const x = paddingLeft + ((ts - firstTs) / timeSpan) * plotWidth;
+          const label = tickPlan.labels[idx];
+          ctxDraw.textAlign = 'center';
+          ctxDraw.textBaseline = 'top';
+          ctxDraw.fillText(label, x, plotBottom + 2);
         });
 
         if (opts.unitLabel) {
@@ -2224,17 +2390,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           ctxDraw.textBaseline = 'top';
           ctxDraw.fillText(opts.unitLabel, width - paddingRight, paddingTop + 2);
         }
-        ctxDraw.strokeStyle = '#22d3ee';
-        ctxDraw.lineWidth = opts.lineWidth || 2;
-        ctxDraw.beginPath();
-        let started=false;
-        valid.forEach((pt)=>{
-          if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
-          const x = paddingLeft + ((pt.t - firstTs)/timeSpan)*plotWidth;
-          const y = plotBottom - ((pt.v-minVal)/span)*plotHeight;
-          if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
+        prepared.forEach((serie) => {
+          const color = serie.color || opts.color || '#22d3ee';
+          ctxDraw.strokeStyle = color;
+          ctxDraw.lineWidth = serie.lineWidth || opts.lineWidth || 2;
+          ctxDraw.beginPath();
+          let started=false;
+          serie.points.forEach((pt)=>{
+            if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
+            const x = paddingLeft + ((pt.t - firstTs)/timeSpan)*plotWidth;
+            const y = plotBottom - ((pt.v-range.min)/range.span)*plotHeight;
+            if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
+          });
+          ctxDraw.stroke();
         });
-        ctxDraw.stroke();
         return true;
       }
 
@@ -2242,7 +2411,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
         const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
         const data = getSeriesData(chartMetric, '24h');
-        const ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { unitLabel: meta.unit, decimals: meta.decimals ?? 1, xTicks:4, yTicks:4, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const deviceId = deviceIdForMetric(chartMetric);
+        const color = colorForDevice(deviceId);
+        const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
+        const ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
+        if (chartColorSelect) renderColorSelect(chartColorSelect, color);
         if (!ok) {
           const { width } = resizeCanvas(chartCanvas, ctx);
           ctx.clearRect(0,0,chartCanvas.width, chartCanvas.height);
@@ -2258,7 +2432,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const canvas = ctxHover.canvas;
         const data = getSeriesData(metric, '6h');
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
-        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { xTicks:2, yTicks:3, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const deviceId = deviceIdForMetric(metric);
+        const color = colorForDevice(deviceId);
+        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { series:[{ id: deviceId, color, points: data }], minXTicks:4, maxXTicks:8, yTicks:3, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
         if (!ok) {
           resizeCanvas(canvas, ctxHover);
           ctxHover.clearRect(0,0,canvas.width, canvas.height);
@@ -2267,7 +2443,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone, allowRotate: true });
+        const deviceId = deviceIdForMetric(metric);
+        const color = colorForDevice(deviceId);
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { series:[{ id: deviceId, label:`GeräteID: ${deviceId}`, color, points }], unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone, minXTicks:6, maxXTicks:10, yTicks:5 });
+        if (detailLegend) renderLegend(detailLegend, ok ? [{ id: deviceId, label:`GeräteID: ${deviceId}`, color }] : []);
+        if (detailColorSelect) renderColorSelect(detailColorSelect, color);
         const debugBox = getEl('chartDebugText');
         if (devMode) {
           const values = points.map(p => p.v).filter(v => v !== null);
@@ -2508,6 +2688,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
           }
           lastVpdTargets = { low: data.vpd_low ?? null, high: data.vpd_high ?? null };
+          applyDeviceIdsFromTelemetry(data);
           updateTileHeaderStates(data);
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
           drawChart();
@@ -2557,6 +2738,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         { type:'BME280', name:'BME280', category:'climate', iface:'i2c', sda:21, scl:22 },
         { type:'MLX90614', name:'MLX90614', category:'leaf', iface:'i2c', sda:21, scl:22 },
         { type:'MHZ19', name:'MH-Z19', category:'co2', iface:'uart', rx:16, tx:17 },
+        { type:'MHZ14', name:'MH-Z14', category:'co2', iface:'uart', rx:16, tx:17 },
         { type:'SCD30', name:'SCD30', category:'co2', iface:'i2c', sda:21, scl:22 },
         { type:'SCD40', name:'SCD40', category:'co2', iface:'i2c', sda:21, scl:22 },
       ];
@@ -2617,6 +2799,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const active = data.active || [];
           const templates = data.templates || SENSOR_TEMPLATES;
           renderSensors(active, templates);
+          applyDeviceIdsFromSensors(active);
+          drawChart();
+          renderDetail();
           clearErrors('API /api/sensors/config');
         } catch (err) {
           pushError(`API /api/sensors/config failed: ${err.message}`);
@@ -3090,6 +3275,27 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           drawChart();
         });
       }
+      if (chartColorSelect) {
+        chartColorSelect.addEventListener('change', () => {
+          const deviceId = deviceIdForMetric(chartMetric);
+          const color = chartColorSelect.value || COLOR_PALETTE[0].value;
+          setColorForDevice(deviceId, color);
+          drawChart();
+          tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
+          renderDetail();
+        });
+      }
+      if (detailColorSelect) {
+        detailColorSelect.addEventListener('change', () => {
+          if (!detailMetric) return;
+          const deviceId = deviceIdForMetric(detailMetric);
+          const color = detailColorSelect.value || COLOR_PALETTE[0].value;
+          setColorForDevice(deviceId, color);
+          drawChart();
+          tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
+          renderDetail();
+        });
+      }
 
       function applyWifiState(data = {}) {
         const connected = flag(data?.wifi_connected);
@@ -3189,6 +3395,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (detailChartCanvas) detailChartCanvas.style.display = showHeatmap ? 'none' : 'block';
         if (chartEmpty) chartEmpty.style.display = 'none';
         if (showHeatmap) {
+          if (detailLegend) renderLegend(detailLegend, []);
+          if (detailColorSelect) renderColorSelect(detailColorSelect, colorForDevice(deviceIdForMetric(detailMetric)));
           const points = collectPaired(detailMode);
           drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points);
         } else {
@@ -3321,7 +3529,12 @@ void handleTelemetry() {
   unsigned long now = millis();
   uint64_t epochMs = mapTimestampToEpochMs(now);
   auto ageMs = [&](unsigned long t) -> unsigned long { return t == 0 ? 0UL : (now - t); };
-  char json[1200];
+  auto sensorLabel = [](String v) { v.toUpperCase(); return v; };
+  String luxDev = sensorLabel(findSensor("lux") ? findSensor("lux")->type : "BH1750");
+  String climateDev = sensorLabel(findSensor("climate") ? findSensor("climate")->type : climateSensorName(climateType));
+  String leafDev = sensorLabel(findSensor("leaf") ? findSensor("leaf")->type : "MLX90614");
+  String co2Dev = sensorLabel(findSensor("co2") ? findSensor("co2")->type : co2SensorName(co2Type));
+  char json[1400];
   snprintf(json, sizeof(json),
            "{\"lux\":%.1f,\"ppfd\":%.1f,\"ppfd_factor\":%.4f,\"co2\":%d,\"temp\":%.1f,\"humidity\":%.1f,\"leaf\":%.1f,"
            "\"vpd\":%.3f,\"vpd_low\":%.2f,\"vpd_high\":%.2f,\"vpd_status\":%d,"
@@ -3330,7 +3543,8 @@ void handleTelemetry() {
            "\"lux_present\":%d,\"co2_present\":%d,\"climate_present\":%d,\"leaf_present\":%d,"
            "\"lux_enabled\":%d,\"co2_enabled\":%d,\"climate_enabled\":%d,\"leaf_enabled\":%d,"
            "\"lux_age_ms\":%lu,\"co2_age_ms\":%lu,\"climate_age_ms\":%lu,\"leaf_age_ms\":%lu,"
-           "\"now\":%lu,\"monotonic_ms\":%lu,\"epoch_ms\":%llu,\"time_synced\":%d,\"timezone\":\"%s\"}",
+           "\"now\":%lu,\"monotonic_ms\":%lu,\"epoch_ms\":%llu,\"time_synced\":%d,\"timezone\":\"%s\","
+           "\"lux_device\":\"%s\",\"climate_device\":\"%s\",\"leaf_device\":\"%s\",\"co2_device\":\"%s\"}",
            safeFloat(latest.lux), safeFloat(latest.ppfd), safeFloat(latest.ppfdFactor), safeInt(latest.co2ppm, -1), safeFloat(latest.ambientTempC),
            safeFloat(latest.humidity), safeFloat(latest.leafTempC), safeFloat(latest.vpd), safeFloat(latest.vpdTargetLow),
            safeFloat(latest.vpdTargetHigh), latest.vpdStatus,
@@ -3339,7 +3553,8 @@ void handleTelemetry() {
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
            ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate),
-           now, now, (unsigned long long)epochMs, timeSynced ? 1 : 0, timezoneName.c_str());
+           now, now, (unsigned long long)epochMs, timeSynced ? 1 : 0, timezoneName.c_str(),
+           luxDev.c_str(), climateDev.c_str(), leafDev.c_str(), co2Dev.c_str());
   server.send(200, "application/json", json);
 }
 
