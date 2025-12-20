@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
@@ -59,12 +60,17 @@ static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4
 static constexpr unsigned long TIME_SYNC_RETRY_MS = 60000;      // retry NTP every 60s until synced
 static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offset every 5 minutes
 static constexpr time_t TIME_VALID_AFTER = 1700000000;          // ~2023-11-14 UTC safeguard
-static constexpr unsigned long CLOUD_RETRY_MS = 15000;
+static constexpr unsigned long CLOUD_WORKER_INTERVAL_MS = 1500;
+static constexpr unsigned long CLOUD_RECORDING_INTERVAL_MS = 60000;
+static constexpr unsigned long CLOUD_BACKOFF_SHORT_MS = 5000;
+static constexpr unsigned long CLOUD_BACKOFF_MED_MS = 15000;
+static constexpr unsigned long CLOUD_BACKOFF_LONG_MS = 60000;
 static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
 static constexpr unsigned long CLOUD_HEALTH_WINDOW_MS = 60000;
 static constexpr unsigned long CLOUD_PING_INTERVAL_MS = 30000;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
 static const char *FIRMWARE_VERSION = "v0.3.2";
+static const char *CLOUD_ROOT_FOLDER = "GrowSensor";
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
 static const char *NTP_SERVER_2 = "time.nist.gov";
@@ -287,7 +293,10 @@ struct CloudJob {
   String dayKey;
   String path;
   String payload;
+  String contentType = "application/json";
+  String kind;
   int attempts = 0;
+  unsigned long nextAttemptAt = 0;
 };
 
 struct CloudConfig {
@@ -295,17 +304,28 @@ struct CloudConfig {
   String username;
   String password;
   bool enabled = false;
+  bool recording = false;
+  bool useTls = true;
   uint8_t retentionMonths = 1;
 };
 
 struct CloudStatus {
   bool connected = false;
-  bool enabled = false;
+  bool enabled = false;           // persisted flag
+  bool runtimeEnabled = false;    // worker flag
+  bool recording = false;
+  bool useTls = true;
   uint64_t lastUploadMs = 0;
   uint64_t lastFailureMs = 0;
   uint64_t lastPingMs = 0;
+  uint64_t lastTestMs = 0;
+  uint64_t lastConfigSaveMs = 0;
+  uint64_t lastStateChangeMs = 0;
   uint32_t failureCount = 0;
   String lastError;
+  String lastUploadedPath;
+  String lastStateReason;
+  String deviceFolder;
   size_t queueSize = 0;
 };
 
@@ -385,7 +405,6 @@ unsigned long lastClimateSampleMs = 0;
 unsigned long lastLeafSampleMs = 0;
 unsigned long lastCo2SampleMs = 0;
 String activeDayKey;
-unsigned long lastCloudAttempt = 0;
 
 const VpdProfile VPD_PROFILES[] = {
     {"seedling", "Steckling/Sämling", 0.4f, 0.8f},
@@ -426,6 +445,10 @@ unsigned long lastCloudPingMs = 0;
 unsigned long lastCloudOkMs = 0;
 uint64_t lastCloudOkEpochMs = 0;
 unsigned long lastDailyCheckpointMs = 0;
+unsigned long lastCloudWorkerTickMs = 0;
+unsigned long nextCloudAttemptAfterMs = 0;
+unsigned long lastRecordingEnqueueMs = 0;
+String lastRecordingMinuteKey;
 
 // ----------------------------
 // Helpers
@@ -565,19 +588,28 @@ const char *storageModeName(StorageMode mode) {
 }
 
 bool cloudHealthOk() {
-  if (!cloudConfig.enabled || lastCloudOkMs == 0) return false;
+  if (!(cloudConfig.enabled && cloudConfig.baseUrl.length() > 0) || lastCloudOkMs == 0) return false;
   if (WiFi.status() != WL_CONNECTED) return false;
   return millis() - lastCloudOkMs <= CLOUD_HEALTH_WINDOW_MS;
 }
 
-void refreshStorageMode() {
+void refreshStorageMode(const String &reason = "") {
+  bool runtimeActive = cloudConfig.enabled && cloudConfig.baseUrl.length() > 0;
   StorageMode next = StorageMode::LOCAL_ONLY;
-  if (cloudConfig.enabled) {
+  if (runtimeActive) {
     next = cloudHealthOk() ? StorageMode::CLOUD_PRIMARY : StorageMode::LOCAL_FALLBACK;
+  }
+  if (storageMode != next && reason.length() > 0) {
+    cloudStatus.lastStateReason = reason;
+    cloudStatus.lastStateChangeMs = currentEpochMs();
   }
   storageMode = next;
   cloudStatus.enabled = cloudConfig.enabled;
+  cloudStatus.runtimeEnabled = runtimeActive;
   cloudStatus.connected = storageMode == StorageMode::CLOUD_PRIMARY;
+  cloudStatus.recording = cloudConfig.recording;
+  cloudStatus.useTls = cloudConfig.useTls;
+  cloudStatus.deviceFolder = cloudRootPath();
 }
 
 uint16_t retentionDays() {
@@ -587,12 +619,14 @@ uint16_t retentionDays() {
   return (uint16_t)(months * 30);
 }
 
-void markCloudSuccess() {
+void markCloudSuccess(const String &reason = "cloud ok") {
   lastCloudOkMs = millis();
   lastCloudOkEpochMs = currentEpochMs();
   cloudStatus.lastPingMs = lastCloudOkEpochMs;
   cloudStatus.lastError = "";
-  refreshStorageMode();
+  cloudStatus.lastStateReason = reason;
+  cloudStatus.lastStateChangeMs = currentEpochMs();
+  refreshStorageMode(reason);
 }
 
 void markCloudFailure(const String &msg) {
@@ -600,19 +634,34 @@ void markCloudFailure(const String &msg) {
   cloudStatus.failureCount++;
   cloudStatus.lastFailureMs = currentEpochMs();
   cloudStatus.connected = false;
-  refreshStorageMode();
+  cloudStatus.lastStateReason = msg;
+  cloudStatus.lastStateChangeMs = currentEpochMs();
+  refreshStorageMode(msg);
 }
 
-void saveCloudConfig() {
+void saveCloudConfig(const String &reason = "config save") {
+  String trimmed = cloudConfig.baseUrl;
+  trimmed.trim();
+  cloudConfig.baseUrl = trimmed;
+  if (cloudConfig.baseUrl.startsWith("http://")) cloudConfig.useTls = false;
+  else if (cloudConfig.baseUrl.startsWith("https://")) cloudConfig.useTls = true;
   prefsCloud.begin("cloud", false);
   prefsCloud.putString("base", cloudConfig.baseUrl);
   prefsCloud.putString("user", cloudConfig.username);
   prefsCloud.putString("pass", cloudConfig.password);
   prefsCloud.putBool("enabled", cloudConfig.enabled);
+  prefsCloud.putBool("recording", cloudConfig.recording);
+  prefsCloud.putBool("tls", cloudConfig.useTls);
   prefsCloud.putUChar("retention", cloudConfig.retentionMonths);
   prefsCloud.end();
   cloudStatus.enabled = cloudConfig.enabled;
-  refreshStorageMode();
+  cloudStatus.runtimeEnabled = cloudConfig.enabled && cloudConfig.baseUrl.length() > 0;
+  cloudStatus.recording = cloudConfig.recording;
+  cloudStatus.useTls = cloudConfig.useTls;
+  cloudStatus.lastConfigSaveMs = currentEpochMs();
+  cloudStatus.lastStateReason = reason;
+  cloudStatus.lastStateChangeMs = cloudStatus.lastConfigSaveMs;
+  refreshStorageMode(reason);
 }
 
 void loadCloudConfig() {
@@ -621,12 +670,40 @@ void loadCloudConfig() {
   cloudConfig.username = prefsCloud.getString("user", "");
   cloudConfig.password = prefsCloud.getString("pass", "");
   cloudConfig.enabled = prefsCloud.getBool("enabled", false);
+  cloudConfig.recording = prefsCloud.getBool("recording", false);
+  cloudConfig.useTls = prefsCloud.getBool("tls", true);
   cloudConfig.retentionMonths = prefsCloud.getUChar("retention", 1);
   if (cloudConfig.retentionMonths < 1) cloudConfig.retentionMonths = 1;
   if (cloudConfig.retentionMonths > 4) cloudConfig.retentionMonths = 4;
   prefsCloud.end();
   cloudStatus.enabled = cloudConfig.enabled;
-  refreshStorageMode();
+  if (cloudConfig.baseUrl.startsWith("http://")) cloudConfig.useTls = false;
+  else if (cloudConfig.baseUrl.startsWith("https://")) cloudConfig.useTls = true;
+  cloudStatus.useTls = cloudConfig.useTls;
+  cloudStatus.recording = cloudConfig.recording;
+  cloudStatus.lastStateReason = "boot load";
+  cloudStatus.lastStateChangeMs = currentEpochMs();
+  refreshStorageMode("boot load");
+}
+
+void setCloudEnabled(bool enabled, const String &reason) {
+  cloudConfig.enabled = enabled;
+  cloudStatus.enabled = enabled;
+  cloudStatus.runtimeEnabled = enabled && cloudConfig.baseUrl.length() > 0;
+  if (!enabled) {
+    cloudConfig.recording = false;
+    cloudStatus.recording = false;
+  }
+  cloudStatus.lastStateReason = reason;
+  cloudStatus.lastStateChangeMs = currentEpochMs();
+  refreshStorageMode(reason);
+}
+
+void setRecordingActive(bool active, const String &reason) {
+  cloudConfig.recording = active;
+  cloudStatus.recording = active;
+  cloudStatus.lastStateReason = reason;
+  cloudStatus.lastStateChangeMs = currentEpochMs();
 }
 
 void persistDailyHistory() {
@@ -789,20 +866,23 @@ String safeBaseUrl() {
   String b = cloudConfig.baseUrl;
   b.trim();
   while (b.endsWith("/")) b.remove(b.length() - 1);
+  if (!b.startsWith("http://") && !b.startsWith("https://")) {
+    b = String(cloudConfig.useTls ? "https://" : "http://") + b;
+  }
   return b;
+}
+
+String cloudDeviceRoot() {
+  return String("/") + CLOUD_ROOT_FOLDER + "/" + deviceId();
 }
 
 String cloudRootPath() {
   String base = safeBaseUrl();
-  String devId = deviceId();
-  bool hasDevice = base.endsWith(devId) || base.endsWith(devId + "/");
-  if (hasDevice) {
-    int pos = base.lastIndexOf("/" + devId);
-    if (pos >= 0) return base.substring(pos);
-  }
-  bool hasRoot = base.endsWith("GrowSensor") || base.endsWith("GrowSensor/");
-  String prefix = hasRoot ? "" : "/GrowSensor";
-  return prefix + "/" + devId;
+  String devRoot = cloudDeviceRoot();
+  if (base.endsWith(devRoot) || base.endsWith(devRoot + "/")) return devRoot;
+  String rootOnly = String("/") + CLOUD_ROOT_FOLDER;
+  if (base.endsWith(rootOnly) || base.endsWith(rootOnly + "/")) return devRoot;
+  return devRoot;
 }
 
 String cloudDailyMonthPath(const String &dayKey) {
@@ -815,19 +895,52 @@ String cloudDailyPath(const String &dayKey) {
   return cloudDailyMonthPath(dayKey) + "/" + dayKey + ".json";
 }
 
+String cloudSamplesFolder(const String &dayKey) {
+  if (dayKey.length() == 0) return "";
+  return cloudDeviceRoot() + "/samples/" + dayKey;
+}
+
+String cloudMetaFolder() {
+  return cloudDeviceRoot() + "/meta";
+}
+
+String fileSafeTimestamp(uint64_t epochMs) {
+  time_t secs = epochMs / 1000ULL;
+  struct tm t;
+  if (localtime_r(&secs, &t) == nullptr) return "";
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+  return String(buf);
+}
+
+String isoTimestamp(uint64_t epochMs) {
+  time_t secs = epochMs / 1000ULL;
+  struct tm t;
+  if (localtime_r(&secs, &t) == nullptr) return "";
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+  return String(buf);
+}
+
+String minuteKeyFromEpoch(uint64_t epochMs) {
+  time_t secs = epochMs / 1000ULL;
+  struct tm t;
+  if (localtime_r(&secs, &t) == nullptr) return "";
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d_%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
+  return String(buf);
+}
+
 bool cloudEnsureFolders(const String &dayKey) {
   if (cloudConfig.baseUrl.length() == 0) return false;
-  String monthPath = cloudDailyMonthPath(dayKey);
-  if (monthPath.length() == 0) return false;
+  String monthPath = dayKey.length() >= 7 ? cloudDailyMonthPath(dayKey) : "";
   String deviceRoot = cloudRootPath();
-  String baseRoot = deviceRoot;
-  int lastSlash = deviceRoot.lastIndexOf('/');
-  if (lastSlash > 0) {
-    baseRoot = deviceRoot.substring(0, lastSlash);
-  }
+  String baseRoot = String("/") + CLOUD_ROOT_FOLDER;
   String metaPath = deviceRoot + "/meta";
   String dailyPath = deviceRoot + "/daily";
-  const String paths[] = {baseRoot, deviceRoot, metaPath, dailyPath, monthPath};
+  String samplesPath = deviceRoot + "/samples";
+  String samplesDayPath = dayKey.length() > 0 ? samplesPath + "/" + dayKey : "";
+  const String paths[] = {baseRoot, deviceRoot, metaPath, dailyPath, samplesPath, samplesDayPath, monthPath};
   bool ok = true;
   for (const auto &p : paths) {
     if (p.length() == 0) continue;
@@ -886,28 +999,96 @@ String serializeDailyPayload(const String &dayKey) {
   return payload;
 }
 
-void enqueueCloudJob(const String &dayKey, const String &payload) {
+String buildRecordingPayload(uint64_t epochMs) {
+  DynamicJsonDocument doc(1024);
+  doc["ts"] = epochMs;
+  doc["iso"] = isoTimestamp(epochMs);
+  doc["deviceId"] = deviceId();
+  doc["firmware"] = FIRMWARE_VERSION;
+  doc["mode"] = cloudConfig.useTls ? "https" : "http";
+  JsonObject net = doc.createNestedObject("net");
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  net["ssid"] = wifiConnected ? WiFi.SSID() : savedSsid;
+  net["ip"] = (wifiConnected ? WiFi.localIP() : WiFi.softAPIP()).toString();
+  net["ap_mode"] = apMode;
+  JsonObject metrics = doc.createNestedObject("metrics");
+  metrics["lux"] = safeFloat(latest.lux);
+  metrics["ppfd"] = safeFloat(latest.ppfd);
+  metrics["temp"] = safeFloat(latest.ambientTempC);
+  metrics["humidity"] = safeFloat(latest.humidity);
+  metrics["leaf"] = safeFloat(latest.leafTempC);
+  metrics["co2"] = safeInt(latest.co2ppm, -1);
+  metrics["vpd"] = safeFloat(latest.vpd);
+  String payload;
+  serializeJson(doc, payload);
+  return payload;
+}
+
+void enqueueRecordingSample(uint64_t epochMs) {
+  if (!cloudStatus.runtimeEnabled || !cloudConfig.recording) return;
+  String minuteKey = minuteKeyFromEpoch(epochMs);
+  if (minuteKey.length() == 0) {
+    minuteKey = String("unsynced_") + String((unsigned long)(millis() / 60000UL));
+  }
+  String dayKey = dayKeyForEpoch(epochMs);
+  if (dayKey.length() == 0) dayKey = currentDayKey();
+  if (dayKey.length() == 0) dayKey = "unsynced";
+  String folder = cloudSamplesFolder(dayKey);
+  if (folder.length() == 0) return;
+  String path = folder + "/samples_" + minuteKey + ".json";
+  enqueueCloudJob(path, buildRecordingPayload(epochMs), dayKey, "recording_sample", "application/json", true);
+}
+
+void enqueueRecordingEvent(const String &event, const String &reason) {
+  if (!cloudStatus.runtimeEnabled) return;
+  uint64_t nowEpoch = currentEpochMs();
+  String dayKey = currentDayKey();
+  String stamp = fileSafeTimestamp(nowEpoch);
+  String path = cloudMetaFolder() + "/recording_" + event + "_" + stamp + ".json";
+  DynamicJsonDocument doc(512);
+  doc["event"] = event;
+  doc["ts"] = nowEpoch;
+  doc["iso"] = isoTimestamp(nowEpoch);
+  doc["reason"] = reason;
+  doc["deviceId"] = deviceId();
+  doc["mode"] = cloudConfig.useTls ? "https" : "http";
+  String payload;
+  serializeJson(doc, payload);
+  enqueueCloudJob(path, payload, dayKey, "recording_event", "application/json", false);
+}
+
+void enqueueCloudJob(const String &path, const String &payload, const String &dayKey, const String &kind = "generic", const String &contentType = "application/json", bool replaceByPath = true) {
   if (!cloudConfig.enabled || cloudConfig.baseUrl.length() == 0 || payload.length() == 0) return;
-  String path = cloudDailyPath(dayKey);
-  if (path.length() == 0) return;
+  String finalPath = path.startsWith("/") ? path : (String("/") + path);
   for (auto &job : cloudQueue) {
-    if (job.dayKey == dayKey) {
+    if (replaceByPath && job.path == finalPath) {
       job.payload = payload;
-      job.path = path;
+      job.dayKey = dayKey;
+      job.kind = kind;
+      job.contentType = contentType;
       job.attempts = 0;
+      job.nextAttemptAt = 0;
       cloudStatus.queueSize = cloudQueue.size();
       return;
     }
   }
   CloudJob job;
   job.dayKey = dayKey;
-  job.path = path;
+  job.path = finalPath;
   job.payload = payload;
-  if (cloudQueue.size() >= 8) {
+  job.kind = kind;
+  job.contentType = contentType;
+  if (cloudQueue.size() >= 12) {
     cloudQueue.erase(cloudQueue.begin());
   }
   cloudQueue.push_back(job);
   cloudStatus.queueSize = cloudQueue.size();
+}
+
+void enqueueDailyJob(const String &dayKey, const String &payload) {
+  String path = cloudDailyPath(dayKey);
+  if (path.length() == 0) return;
+  enqueueCloudJob(path, payload, dayKey, "daily", "application/json", true);
 }
 
 void finalizeDayAndQueue(const String &dayKey) {
@@ -917,7 +1098,7 @@ void finalizeDayAndQueue(const String &dayKey) {
     persistDailyHistory();
   }
   String payload = serializeDailyPayload(dayKey);
-  enqueueCloudJob(dayKey, payload);
+  enqueueDailyJob(dayKey, payload);
 }
 
 void addPoint(HistoryPoint *buffer, size_t capacity, size_t &start, size_t &count, uint64_t ts, float value) {
@@ -1106,24 +1287,38 @@ String buildCloudUrl(const String &path) {
   String base = safeBaseUrl();
   if (base.length() == 0) return "";
   String full = base;
-  if (!full.startsWith("http://")) {
-    full = String("http://") + full;
+  String cleanedPath = path;
+  while (cleanedPath.startsWith("//")) cleanedPath.remove(0, 1);
+  if (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
+  String devRoot = cloudDeviceRoot();
+  String rootOnly = String("/") + CLOUD_ROOT_FOLDER;
+  if (full.endsWith(devRoot) || full.endsWith(devRoot + "/")) {
+    if (cleanedPath.startsWith(devRoot.substring(1))) {
+      cleanedPath = cleanedPath.substring(devRoot.length() - 1);
+      while (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
+    }
+  } else if (full.endsWith(rootOnly) || full.endsWith(rootOnly + "/")) {
+    if (cleanedPath.startsWith(rootOnly.substring(1))) {
+      cleanedPath = cleanedPath.substring(rootOnly.length() - 1);
+      while (cleanedPath.startsWith("/")) cleanedPath.remove(0, 1);
+    }
   }
-  bool baseHasSlash = full.endsWith("/");
-  bool pathHasSlash = path.startsWith("/");
-  if (baseHasSlash && pathHasSlash) {
-    full.remove(full.length() - 1);
-  } else if (!baseHasSlash && !pathHasSlash) {
-    full += "/";
-  }
-  full += path;
-  return full;
+  if (!full.endsWith("/")) full += "/";
+  return full + cleanedPath;
 }
 
 bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS) {
   HTTPClient http;
   http.setTimeout(timeoutMs);
-  if (!http.begin(url)) return false;
+  WiFiClient wifiClient;
+  WiFiClientSecure wifiSecure;
+  WiFiClient *client = &wifiClient;
+  bool tls = cloudConfig.useTls || url.startsWith("https://");
+  if (tls) {
+    wifiSecure.setInsecure();
+    client = &wifiSecure;
+  }
+  if (!http.begin(*client, url)) return false;
   if (cloudConfig.username.length() > 0) {
     http.setAuthorization(cloudConfig.username.c_str(), cloudConfig.password.c_str());
   }
@@ -1145,7 +1340,7 @@ bool ensureCollection(const String &url) {
 }
 
 bool pingCloud(bool force = false) {
-  if (!cloudConfig.enabled || cloudConfig.baseUrl.length() == 0) return false;
+  if (!cloudStatus.runtimeEnabled) return false;
   if (WiFi.status() != WL_CONNECTED) {
     markCloudFailure("WiFi disconnected");
     return false;
@@ -1160,7 +1355,7 @@ bool pingCloud(bool force = false) {
   String resp;
   bool ok = webdavRequest("PROPFIND", url, "", "text/plain", code, &resp);
   if (ok && code >= 200 && code < 400) {
-    markCloudSuccess();
+    markCloudSuccess("cloud ping");
     return true;
   }
   markCloudFailure("Conn test failed: " + String(code));
@@ -1221,19 +1416,26 @@ bool uploadCloudJob(const CloudJob &job) {
   String url = buildCloudUrl(fullPath);
   int code = 0;
   String resp;
-  bool ok = webdavRequest("PUT", url, job.payload, "application/json", code, &resp, CLOUD_TEST_TIMEOUT_MS);
+  const char *ctype = job.contentType.length() > 0 ? job.contentType.c_str() : "application/json";
+  bool ok = webdavRequest("PUT", url, job.payload, ctype, code, &resp, CLOUD_TEST_TIMEOUT_MS);
   if (!ok || code < 200 || code >= 300) {
     markCloudFailure("Upload failed: " + String(code));
     return false;
   }
   cloudStatus.lastUploadMs = currentEpochMs();
-  markCloudSuccess();
+  cloudStatus.lastUploadedPath = fullPath;
+  cloudStatus.lastError = "";
+  markCloudSuccess(job.kind.length() > 0 ? job.kind : "upload");
   cloudStatus.queueSize = cloudQueue.size();
   return true;
 }
 
 void processCloudQueue() {
-  if (!cloudConfig.enabled || cloudQueue.empty()) {
+  unsigned long now = millis();
+  if (lastCloudWorkerTickMs != 0 && now - lastCloudWorkerTickMs < CLOUD_WORKER_INTERVAL_MS) return;
+  lastCloudWorkerTickMs = now;
+  cloudStatus.queueSize = cloudQueue.size();
+  if (!cloudStatus.runtimeEnabled || cloudQueue.empty()) {
     refreshStorageMode();
     return;
   }
@@ -1241,16 +1443,20 @@ void processCloudQueue() {
     refreshStorageMode();
     return;
   }
-  unsigned long now = millis();
-  if (lastCloudAttempt != 0 && now - lastCloudAttempt < CLOUD_RETRY_MS) return;
-  lastCloudAttempt = now;
-  CloudJob job = cloudQueue.front();
-  if (uploadCloudJob(job)) {
+  if (nextCloudAttemptAfterMs != 0 && now < nextCloudAttemptAfterMs) return;
+  CloudJob &job = cloudQueue.front();
+  if (job.nextAttemptAt != 0 && now < job.nextAttemptAt) return;
+  bool ok = uploadCloudJob(job);
+  if (ok) {
     cloudQueue.erase(cloudQueue.begin());
     cloudStatus.queueSize = cloudQueue.size();
+    nextCloudAttemptAfterMs = now + CLOUD_WORKER_INTERVAL_MS;
   } else {
-    cloudQueue[0].attempts++;
-    if (cloudQueue[0].attempts > 5) {
+    job.attempts++;
+    unsigned long backoff = job.attempts <= 1 ? CLOUD_BACKOFF_SHORT_MS : (job.attempts <= 3 ? CLOUD_BACKOFF_MED_MS : CLOUD_BACKOFF_LONG_MS);
+    job.nextAttemptAt = now + backoff;
+    nextCloudAttemptAfterMs = job.nextAttemptAt;
+    if (job.attempts > 5) {
       cloudQueue.erase(cloudQueue.begin());
       cloudStatus.queueSize = cloudQueue.size();
     }
@@ -1259,15 +1465,67 @@ void processCloudQueue() {
 }
 
 void maintainCloudHealth() {
-  if (!cloudConfig.enabled) {
-    refreshStorageMode();
+  if (!cloudStatus.runtimeEnabled) {
+    refreshStorageMode("cloud disabled");
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    refreshStorageMode();
+    refreshStorageMode("wifi lost");
     return;
   }
   pingCloud(false);
+}
+
+void tickCloudRecording() {
+  if (!cloudStatus.runtimeEnabled || !cloudConfig.recording) return;
+  uint64_t nowEpoch = currentEpochMs();
+  String minuteKey = minuteKeyFromEpoch(nowEpoch);
+  if (minuteKey.length() == 0) return;
+  if (minuteKey == lastRecordingMinuteKey && lastRecordingEnqueueMs != 0 && millis() - lastRecordingEnqueueMs < CLOUD_RECORDING_INTERVAL_MS) return;
+  enqueueRecordingSample(nowEpoch);
+  lastRecordingMinuteKey = minuteKey;
+  lastRecordingEnqueueMs = millis();
+}
+
+bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String &errorOut) {
+  bytesOut = 0;
+  if (!cloudStatus.runtimeEnabled) {
+    errorOut = "Cloud disabled";
+    return false;
+  }
+  uint64_t nowMs = currentEpochMs();
+  String stamp = fileSafeTimestamp(nowMs);
+  String dayKey = currentDayKey();
+  if (dayKey.length() == 0) dayKey = "unsynced";
+  pathOut = cloudDeviceRoot() + "/TestCloud_" + deviceId() + "_" + stamp + ".txt";
+  if (!cloudEnsureFolders(dayKey)) {
+    errorOut = "Ensure folders failed";
+    return false;
+  }
+  IPAddress ip = apMode ? WiFi.softAPIP() : WiFi.localIP();
+  String body = "timestamp=" + isoTimestamp(nowMs) + "\n";
+  body += "epoch_ms=" + String((unsigned long long)nowMs) + "\n";
+  body += "deviceId=" + deviceId() + "\n";
+  body += "ip=" + ip.toString() + "\n";
+  body += "ssid=" + (WiFi.status() == WL_CONNECTED ? WiFi.SSID() : savedSsid) + "\n";
+  body += "base_url=" + safeBaseUrl() + "\n";
+  body += "mode=" + String(cloudConfig.useTls ? "https" : "http") + "\n";
+  int code = 0;
+  String resp;
+  bytesOut = body.length();
+  bool ok = webdavRequest("PUT", buildCloudUrl(pathOut), body, "text/plain", code, &resp, CLOUD_TEST_TIMEOUT_MS);
+  httpCode = code;
+  if (ok && code >= 200 && code < 300) {
+    cloudStatus.lastTestMs = currentEpochMs();
+    cloudStatus.lastUploadMs = cloudStatus.lastTestMs;
+    cloudStatus.lastUploadedPath = pathOut;
+    cloudStatus.lastError = "";
+    markCloudSuccess("test upload");
+    return true;
+  }
+  errorOut = resp.length() > 0 ? resp : String("HTTP ") + String(code);
+  markCloudFailure("Test upload failed: " + String(code));
+  return false;
 }
 
 void applyTimezoneEnv() {
@@ -1899,7 +2157,7 @@ void readSensors() {
   if (storageMode == StorageMode::CLOUD_PRIMARY && sampleDay != "unsynced") {
     if (lastDailyCheckpointMs == 0 || millis() - lastDailyCheckpointMs >= DAILY_CHECKPOINT_MS) {
       String checkpointPayload = serializeDailyPayload(sampleDay);
-      enqueueCloudJob(sampleDay, checkpointPayload);
+      enqueueDailyJob(sampleDay, checkpointPayload);
       lastDailyCheckpointMs = millis();
     }
   }
@@ -2411,6 +2669,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           <div class="cloud-grid">
             <div>
               <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudEnabled" style="width:auto;"> Cloud Logging aktivieren</label>
+              <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudHttpToggle" style="width:auto;"> Nextcloud lokal (HTTP, kein TLS)</label>
               <label for="cloudUrl">WebDAV Base URL</label>
               <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/GrowSensor/" />
               <label for="cloudUser">Username</label>
@@ -2426,7 +2685,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               </select>
               <div class="row" style="margin-top:10px;">
                 <button id="cloudSave">Speichern</button>
-                <button id="cloudTest" class="ghost">Test Connection</button>
+                <button id="cloudTest" class="ghost">Sende Test</button>
               </div>
               <div class="row" style="margin-top:6px;">
                 <button id="cloudStart">Start Recording</button>
@@ -2436,14 +2695,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             </div>
             <div>
               <div class="cloud-warning" id="cloudHttpWarning" style="display:none;">HTTP (ohne TLS): Zugangsdaten werden unverschlüsselt übertragen. Nur im vertrauenswürdigen LAN nutzen.</div>
+              <p class="hover-hint" id="cloudPathHint" style="margin:4px 0;">Uploads landen in /GrowSensor/&lt;deviceId&gt;/</p>
               <div class="cloud-status">
                 <div class="cloud-pill"><span>Cloud enabled</span><strong id="cloudEnabledState">–</strong></div>
+                <div class="cloud-pill"><span>Runtime</span><strong id="cloudRuntimeState">–</strong></div>
+                <div class="cloud-pill"><span>Recording</span><strong id="cloudRecordingState">–</strong></div>
                 <div class="cloud-pill"><span>Connected</span><strong id="cloudConnected">–</strong></div>
                 <div class="cloud-pill"><span>Queue</span><strong id="cloudQueueSize">0</strong></div>
                 <div class="cloud-pill"><span>Failures</span><strong id="cloudFailures">0</strong></div>
               </div>
               <div class="cloud-status" style="margin-top:8px;">
                 <div class="cloud-pill"><span>Last upload</span><strong id="cloudLastUpload">–</strong></div>
+                <div class="cloud-pill"><span>Last test</span><strong id="cloudLastTest">–</strong></div>
+                <div class="cloud-pill" style="grid-column: span 2;"><span>Last path</span><strong id="cloudUploadPath" style="text-align:right;">–</strong></div>
+                <div class="cloud-pill" style="grid-column: span 2;"><span>State</span><strong id="cloudStateReason" style="text-align:right;">–</strong></div>
                 <div class="cloud-pill" style="grid-column: span 2;"><span>Last error</span><strong id="cloudLastError" style="text-align:right;">–</strong></div>
               </div>
               <p class="hover-hint" style="margin-top:8px;">Empfohlen: Nextcloud App-Passwort nutzen, nicht das Hauptpasswort.</p>
@@ -2785,6 +3050,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const timeBadge = getEl('timeBadge');
       const localTimeText = getEl('localTimeText');
       const cloudEnabledToggle = getEl('cloudEnabled');
+      const cloudHttpToggle = getEl('cloudHttpToggle');
       const cloudUrlInput = getEl('cloudUrl');
       const cloudUserInput = getEl('cloudUser');
       const cloudPassInput = getEl('cloudPass');
@@ -2792,11 +3058,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const cloudStatusMsg = getEl('cloudStatusMsg');
       const cloudHttpWarning = getEl('cloudHttpWarning');
       const cloudEnabledState = getEl('cloudEnabledState');
+      const cloudRuntimeState = getEl('cloudRuntimeState');
+      const cloudRecordingState = getEl('cloudRecordingState');
       const cloudConnected = getEl('cloudConnected');
       const cloudQueueSize = getEl('cloudQueueSize');
       const cloudFailures = getEl('cloudFailures');
       const cloudLastUpload = getEl('cloudLastUpload');
+      const cloudLastTest = getEl('cloudLastTest');
+      const cloudUploadPath = getEl('cloudUploadPath');
+      const cloudStateReason = getEl('cloudStateReason');
       const cloudLastError = getEl('cloudLastError');
+      const cloudPathHint = getEl('cloudPathHint');
       const cloudChartNotice = getEl('cloudChartNotice');
       const cloudRetryBtn = getEl('cloudRetry');
       let detailMetric = null;
@@ -2821,7 +3093,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       };
       const metricDataState = {};
       metrics.forEach(m => metricDataState[m] = { ever:false, last:0 });
-      const cloudState = { enabled:false, connected:false, lastUpload:0, lastPing:0, queue:0, failures:0, lastError:'', storageMode:'local_only' };
+      const cloudState = { enabled:false, runtime:false, recording:false, useTls:true, connected:false, lastUpload:0, lastPing:0, lastFailure:0, lastTest:0, queue:0, failures:0, lastError:'', lastPath:'', lastReason:'', storageMode:'local_only', deviceFolder:'' };
       const TREND_CONFIG = {
         temp: { window: 8, minDelta: 0.08, strong: 0.35, decimals: 1 },
         humidity: { window: 8, minDelta: 0.4, strong: 1.5, decimals: 1 },
@@ -4988,23 +5260,36 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function renderCloudStatus(data = {}) {
-        cloudState.enabled = data.enabled === 1 || data.enabled === true;
+        cloudState.enabled = flag(data.enabled);
+        cloudState.runtime = data.runtime_enabled === undefined ? cloudState.runtime : flag(data.runtime_enabled);
+        cloudState.recording = data.recording === undefined ? cloudState.recording : flag(data.recording);
+        cloudState.useTls = data.use_tls === undefined ? cloudState.useTls : flag(data.use_tls);
         cloudState.storageMode = typeof data.storage_mode === 'string' ? data.storage_mode : cloudState.storageMode;
-        cloudState.connected = (data.connected === 1 || data.connected === true) || cloudState.storageMode === 'cloud_primary';
-        const lastUploadVal = typeof data.last_upload_ms === 'number' ? data.last_upload_ms : parseInt(data.last_upload_ms || '0', 10);
-        const lastPingVal = typeof data.last_ping_ms === 'number' ? data.last_ping_ms : parseInt(data.last_ping_ms || '0', 10);
+        cloudState.connected = flag(data.connected) || cloudState.storageMode === 'cloud_primary';
+        const lastUploadVal = parseMs(data.last_upload_ms);
+        const lastPingVal = parseMs(data.last_ping_ms);
+        const lastFailureVal = parseMs(data.last_failure_ms);
+        const lastTestVal = parseMs(data.last_test_ms);
         cloudState.lastUpload = Number.isFinite(lastUploadVal) ? lastUploadVal : 0;
         cloudState.lastPing = Number.isFinite(lastPingVal) ? lastPingVal : 0;
+        cloudState.lastFailure = Number.isFinite(lastFailureVal) ? lastFailureVal : 0;
+        cloudState.lastTest = Number.isFinite(lastTestVal) ? lastTestVal : 0;
         cloudState.queue = typeof data.queue_size === 'number' ? data.queue_size : parseInt(data.queue_size || '0', 10);
         cloudState.failures = typeof data.failures === 'number' ? data.failures : parseInt(data.failures || '0', 10);
         cloudState.lastError = data.last_error || '';
+        cloudState.lastPath = data.last_uploaded_path || cloudState.lastPath;
+        cloudState.lastReason = data.last_state_reason || cloudState.lastReason;
+        if (typeof data.device_folder === 'string' && data.device_folder) cloudState.deviceFolder = data.device_folder;
         if (cloudEnabledState) cloudEnabledState.textContent = cloudState.enabled ? 'yes' : 'no';
+        if (cloudRuntimeState) cloudRuntimeState.textContent = cloudState.runtime ? 'yes' : 'no';
+        if (cloudRecordingState) cloudRecordingState.textContent = cloudState.recording ? 'yes' : 'no';
         if (cloudConnected) cloudConnected.textContent = cloudState.connected ? 'yes' : 'no';
         if (cloudQueueSize) cloudQueueSize.textContent = String(cloudState.queue);
         if (cloudFailures) cloudFailures.textContent = String(cloudState.failures);
+        if (cloudPathHint) cloudPathHint.textContent = cloudState.deviceFolder ? `Uploads landen in ${cloudState.deviceFolder}/` : 'Uploads landen in /GrowSensor/<deviceId>/';
         if (cloudLastError) cloudLastError.textContent = cloudState.lastError || '–';
         if (cloudLastUpload) {
-          const stamp = cloudState.lastUpload || cloudState.lastPing;
+          const stamp = cloudState.lastUpload || cloudState.lastTest || cloudState.lastPing;
           if (stamp) {
             const secs = Math.round((Date.now() - stamp) / 1000);
             cloudLastUpload.textContent = secs < 5 ? 'gerade eben' : `${secs}s ago`;
@@ -5012,6 +5297,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             cloudLastUpload.textContent = '–';
           }
         }
+        if (cloudLastTest) {
+          if (cloudState.lastTest) {
+            const secs = Math.round((Date.now() - cloudState.lastTest) / 1000);
+            cloudLastTest.textContent = secs < 5 ? 'gerade eben' : `${secs}s ago`;
+          } else {
+            cloudLastTest.textContent = '–';
+          }
+        }
+        if (cloudUploadPath) cloudUploadPath.textContent = cloudState.lastPath || '–';
+        if (cloudStateReason) cloudStateReason.textContent = cloudState.lastReason || cloudState.storageMode || '–';
+        const httpMode = cloudState.useTls === false || (cloudUrlInput?.value || '').startsWith('http://');
+        if (cloudHttpToggle) cloudHttpToggle.checked = httpMode;
+        if (cloudHttpWarning) cloudHttpWarning.style.display = httpMode ? 'block' : 'none';
         const showLongRanges = cloudState.enabled && cloudState.connected;
         const offline = cloudState.enabled && !cloudState.connected;
         if (cloudChartNotice) cloudChartNotice.style.display = offline ? 'flex' : 'none';
@@ -5037,7 +5335,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudUserInput && typeof data.username === 'string') cloudUserInput.value = data.username;
         if (cloudRetentionSelect && data.retention) cloudRetentionSelect.value = String(data.retention);
         if (cloudPassInput) cloudPassInput.value = '';
-        const usesHttp = (cloudUrlInput?.value || '').startsWith('http://');
+        const usesHttp = (cloudUrlInput?.value || '').startsWith('http://') || (data.use_tls === 0 || data.use_tls === false);
+        if (cloudHttpToggle) cloudHttpToggle.checked = usesHttp;
         if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
       }
 
@@ -5060,8 +5359,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudPassInput && !enabledOnly && cloudPassInput.value) body.set('password', cloudPassInput.value);
         const enabledVal = cloudEnabledToggle?.checked ? '1' : '0';
         body.set('enabled', enabledVal);
+        body.set('use_tls', cloudHttpToggle?.checked ? '0' : '1');
+        body.set('recording', cloudState.recording ? '1' : '0');
         if (cloudRetentionSelect && !enabledOnly) body.set('retention', cloudRetentionSelect.value || '1');
-        const usesHttp = urlVal.startsWith('http://');
+        const usesHttp = (cloudHttpToggle?.checked === true) || urlVal.startsWith('http://');
         if (cloudEnabledToggle?.checked && usesHttp) {
           const ok = confirm('HTTP ohne TLS: Zugangsdaten werden unverschlüsselt übertragen. Fortfahren?');
           if (!ok) { cloudEnabledToggle.checked = false; return; }
@@ -5076,16 +5377,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       async function testCloud() {
-        if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Teste...'; cloudStatusMsg.className = 'status'; }
+        if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Sende Test...'; cloudStatusMsg.className = 'status'; }
         try {
-          const res = await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'action=test' });
+          const res = await authedFetch('/api/cloud/test', { method:'POST' });
           const text = await res.text();
-          const ok = res.ok && text.includes('"ok":1');
-          if (cloudStatusMsg) { cloudStatusMsg.textContent = ok ? 'Verbindung OK' : 'Test fehlgeschlagen'; cloudStatusMsg.className = ok ? 'status ok' : 'status err'; }
-          if (ok) renderCloudStatus({ connected:true });
+          let data = {};
+          try { data = text ? JSON.parse(text) : {}; } catch (err) { data = {}; }
+          const ok = res.ok && (data.ok === 1 || data.ok === true);
+          const code = data.httpCode ?? data.http_code ?? res.status;
+          const path = data.path || '';
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = ok ? `Test-Datei gesendet (${code}${path ? ` → ${path}` : ''})` : `Test fehlgeschlagen (${code || 'n/a'})`; cloudStatusMsg.className = ok ? 'status ok' : 'status err'; }
+          if (ok) renderCloudStatus({ connected:true, last_test_ms: Date.now(), last_uploaded_path: path });
         } catch (err) {
           if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Test fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
         }
+        fetchCloudStatus();
       }
 
       async function cloudAction(action) {
@@ -5094,11 +5400,38 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         try {
           await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
           if (action === 'start' && cloudEnabledToggle) cloudEnabledToggle.checked = true;
-          if (action === 'stop' && cloudEnabledToggle) cloudEnabledToggle.checked = false;
+          if (cloudStatusMsg) {
+            cloudStatusMsg.textContent = action === 'start' ? 'Recording gestartet' : 'Recording gestoppt';
+            cloudStatusMsg.className = 'status ok';
+          }
           fetchCloudStatus();
         } catch (err) {
           if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Aktion fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
         }
+      }
+
+      function normalizeHttpUi() {
+        const wantsHttp = cloudHttpToggle?.checked === true;
+        if (!cloudUrlInput) {
+          if (cloudHttpWarning) cloudHttpWarning.style.display = wantsHttp ? 'block' : 'none';
+          return;
+        }
+        let val = cloudUrlInput.value || '';
+        if (val && !val.startsWith('http://') && !val.startsWith('https://')) {
+          val = `${wantsHttp ? 'http://' : 'https://'}${val}`;
+        } else if (wantsHttp && val.startsWith('https://')) {
+          val = `http://${val.slice('https://'.length)}`;
+        } else if (!wantsHttp && val.startsWith('http://')) {
+          val = `https://${val.slice('http://'.length)}`;
+        }
+        cloudUrlInput.value = val;
+        if (cloudHttpWarning) cloudHttpWarning.style.display = wantsHttp ? 'block' : 'none';
+      }
+
+      function syncHttpToggleFromUrl() {
+        const usesHttp = (cloudUrlInput?.value || '').startsWith('http://');
+        if (cloudHttpToggle) cloudHttpToggle.checked = usesHttp;
+        if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
       }
 
       const toggleWifiFormBtn = getEl('toggleWifiForm');
@@ -5117,10 +5450,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (cloudStopBtn) cloudStopBtn.addEventListener('click', () => cloudAction('stop'));
       if (cloudRetryBtn) cloudRetryBtn.addEventListener('click', () => testCloud());
       if (cloudEnabledToggle) cloudEnabledToggle.addEventListener('change', () => saveCloudConfig(true));
-      if (cloudUrlInput) cloudUrlInput.addEventListener('input', () => {
-        const usesHttp = (cloudUrlInput.value || '').startsWith('http://');
-        if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
-      });
+      if (cloudHttpToggle) cloudHttpToggle.addEventListener('change', () => normalizeHttpUi());
+      if (cloudUrlInput) cloudUrlInput.addEventListener('input', () => syncHttpToggleFromUrl());
 
       function setDevVisible() {
         document.querySelectorAll('.dev-only').forEach(el => el.disabled = !devMode);
@@ -5528,25 +5859,54 @@ void handleDailyHistory() {
   server.send(200, "application/json", json);
 }
 
+void handleCloudTest() {
+  if (!enforceAuth()) return;
+  int httpCode = 0;
+  size_t bytes = 0;
+  String path, err;
+  bool ok = sendCloudTestFile(httpCode, bytes, path, err);
+  DynamicJsonDocument doc(256);
+  doc["ok"] = ok ? 1 : 0;
+  doc["httpCode"] = httpCode;
+  doc["path"] = path;
+  doc["bytes"] = (unsigned long)bytes;
+  doc["error"] = err;
+  String payload;
+  serializeJson(doc, payload);
+  server.send(ok ? 200 : 500, "application/json", payload);
+}
+
 void handleCloud() {
   if (!enforceAuth()) return;
   if (server.method() == HTTP_GET) {
     cloudStatus.queueSize = cloudQueue.size();
     refreshStorageMode();
-    String json = "{";
-    json += "\"enabled\":" + String(cloudConfig.enabled ? 1 : 0) + ",";
-    json += "\"base_url\":\"" + cloudConfig.baseUrl + "\",";
-    json += "\"username\":\"" + cloudConfig.username + "\",";
-    json += "\"retention\":" + String(cloudConfig.retentionMonths) + ",";
-    json += "\"connected\":" + String(cloudStatus.connected ? 1 : 0) + ",";
-    json += "\"last_upload_ms\":" + String((unsigned long long)cloudStatus.lastUploadMs) + ",";
-    json += "\"last_ping_ms\":" + String((unsigned long long)cloudStatus.lastPingMs) + ",";
-    json += "\"queue_size\":" + String(cloudQueue.size()) + ",";
-    json += "\"failures\":" + String(cloudStatus.failureCount) + ",";
-    json += "\"last_error\":\"" + cloudStatus.lastError + "\",";
-    json += "\"storage_mode\":\"" + String(storageModeName(storageMode)) + "\"";
-    json += "}";
-    server.send(200, "application/json", json);
+    DynamicJsonDocument doc(1024);
+    doc["enabled"] = cloudConfig.enabled;
+    doc["runtime_enabled"] = cloudStatus.runtimeEnabled;
+    doc["recording"] = cloudStatus.recording;
+    doc["base_url"] = cloudConfig.baseUrl;
+    doc["username"] = cloudConfig.username;
+    doc["use_tls"] = cloudConfig.useTls;
+    doc["retention"] = cloudConfig.retentionMonths;
+    doc["connected"] = cloudStatus.connected;
+    doc["last_upload_ms"] = (uint64_t)cloudStatus.lastUploadMs;
+    doc["last_uploaded_path"] = cloudStatus.lastUploadedPath;
+    doc["last_ping_ms"] = (uint64_t)cloudStatus.lastPingMs;
+    doc["last_failure_ms"] = (uint64_t)cloudStatus.lastFailureMs;
+    doc["last_test_ms"] = (uint64_t)cloudStatus.lastTestMs;
+    doc["last_config_ms"] = (uint64_t)cloudStatus.lastConfigSaveMs;
+    doc["last_state_ms"] = (uint64_t)cloudStatus.lastStateChangeMs;
+    doc["queue_size"] = (uint32_t)cloudQueue.size();
+    doc["failures"] = cloudStatus.failureCount;
+    doc["last_error"] = cloudStatus.lastError;
+    doc["last_state_reason"] = cloudStatus.lastStateReason;
+    doc["device_folder"] = cloudStatus.deviceFolder;
+    doc["device_id"] = deviceId();
+    doc["storage_mode"] = storageModeName(storageMode);
+    String payload;
+    serializeJson(doc, payload);
+    server.send(200, "application/json", payload);
     return;
   }
 
@@ -5556,29 +5916,47 @@ void handleCloud() {
     if (server.hasArg("username")) cloudConfig.username = server.arg("username");
     if (server.hasArg("password") && server.arg("password").length() > 0) cloudConfig.password = server.arg("password");
     if (server.hasArg("enabled")) cloudConfig.enabled = server.arg("enabled") == "1";
+    if (server.hasArg("recording")) cloudConfig.recording = server.arg("recording") == "1";
+    if (server.hasArg("use_tls")) cloudConfig.useTls = !(server.arg("use_tls") == "0");
     if (server.hasArg("retention")) {
       int r = server.arg("retention").toInt();
       cloudConfig.retentionMonths = (uint8_t)std::max(1, std::min(4, r));
     }
-    saveCloudConfig();
+    saveCloudConfig("ui save");
     server.send(200, "text/plain", "saved");
     return;
   }
   if (action == "test") {
-    bool ok = testCloudConnection();
-    server.send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":1}" : "{\"ok\":0}");
+    int httpCode = 0;
+    size_t bytes = 0;
+    String path, err;
+    bool ok = sendCloudTestFile(httpCode, bytes, path, err);
+    DynamicJsonDocument doc(256);
+    doc["ok"] = ok ? 1 : 0;
+    doc["httpCode"] = httpCode;
+    doc["path"] = path;
+    doc["bytes"] = (unsigned long)bytes;
+    doc["error"] = err;
+    String payload;
+    serializeJson(doc, payload);
+    server.send(ok ? 200 : 500, "application/json", payload);
     return;
   }
   if (action == "start") {
-    cloudConfig.enabled = true;
-    saveCloudConfig();
-    server.send(200, "application/json", "{\"enabled\":1}");
+    setCloudEnabled(true, "ui start");
+    setRecordingActive(true, "ui start");
+    refreshStorageMode("ui start");
+    enqueueRecordingEvent("start", "UI toggle");
+    enqueueRecordingSample(currentEpochMs());
+    saveCloudConfig("ui start");
+    server.send(200, "application/json", "{\"enabled\":1,\"recording\":1}");
     return;
   }
   if (action == "stop") {
-    cloudConfig.enabled = false;
-    saveCloudConfig();
-    server.send(200, "application/json", "{\"enabled\":0}");
+    setRecordingActive(false, "ui stop");
+    saveCloudConfig("ui stop");
+    enqueueRecordingEvent("stop", "UI toggle");
+    server.send(200, "application/json", "{\"recording\":0,\"enabled\":" + String(cloudConfig.enabled ? 1 : 0) + "}");
     return;
   }
   server.send(400, "text/plain", "unsupported");
@@ -6035,6 +6413,7 @@ void setupServer() {
   server.on("/api/sensors/config", HTTP_POST, handleSensorsConfig);
   server.on("/api/cloud", HTTP_GET, handleCloud);
   server.on("/api/cloud", HTTP_POST, handleCloud);
+  server.on("/api/cloud/test", HTTP_POST, handleCloudTest);
   server.on("/api/pins", HTTP_GET, handlePins);
   server.on("/api/pins", HTTP_POST, handlePins);
   server.on("/api/logs", HTTP_GET, handleLogs);
@@ -6074,6 +6453,7 @@ void loop() {
   maintainWifiConnection();
   maintainTimeSync();
   maintainCloudHealth();
+  tickCloudRecording();
   processCloudQueue();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
