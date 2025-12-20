@@ -4,8 +4,9 @@
 
 ### Hotfix v0.2.6
 - Adds NTP-backed real-time clocks with timezone selection in the header and a visible “Zeit nicht synchron” badge until sync succeeds.
-- History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels.
-- Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.google.com, time.cloudflare.com) and graceful fallback to relative time until synced.
+- History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels; hover overlays now show full axes with start/mid/end labels instead of cropped canvases.
+- Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.nist.gov, time.google.com) and graceful fallback to relative time until synced.
+- New bucketed charting: Live/6h views aggregate into 5-minute buckets, 24h charts aggregate into 15-minute buckets (stored on-device to avoid RAM spikes). The dashboard’s large chart is now a 24h/15m view with a metric dropdown.
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
@@ -55,8 +56,9 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 ## v0.2.6 Changes
 - Dashboard tiles can now be collapsed or expanded via a small eye icon; collapsed tiles shrink to a header-only view (no values or hover charts) and clicks expand them without opening the detail modal. State is stored per tile in `localStorage` (`tile_visibility_v026`) and defaults to visible for all metrics.
 - Hotfix: restored broken UI interactions (dashboard navigation, dev mode modal, hover/detail charts) and Wi‑Fi information (connected state, SSID/IP, RSSI bars, static-IP toggle).
-- NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).
-- `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts.
+- NTP sync (pool.ntp.org, time.nist.gov, time.google.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).
+- `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts. Hover mini-charts now draw full-size canvases with X/Y axes and time labels.
+- Chart ranges are bucketed to save memory: Live/6h use 5-minute buckets, 24h uses 15-minute buckets. The detail modal gains a 24h tab, and the dashboard’s big chart now shows a selectable metric over the last 24h (15m resolution).
 - Header timezone dropdown with persistent selection and live clock.
   (v0.2.6 remains untested – please use with care.)
 
