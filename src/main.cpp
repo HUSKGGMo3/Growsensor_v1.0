@@ -101,6 +101,12 @@ uint64_t mapTimestampToEpochMs(uint32_t monotonicTs);
 uint64_t currentEpochMs();
 String cloudRootPath();
 String normalizeCloudBaseUrl(String url);
+String buildWebDavBaseUrl();
+enum class CloudProtocol : uint8_t { HTTP = 0, HTTPS = 1 };
+CloudProtocol cloudProtocol();
+const char *cloudProtocolLabel();
+struct CloudRequestClients;
+bool beginCloudRequest(HTTPClient &http, const String &fullUrl, CloudRequestClients &clients);
 String ensureTrailingSlash(String s);
 String joinUrl(const String &base, const String &rel);
 float safeFloat(float v, float fallback = 0.0f);
@@ -329,6 +335,7 @@ struct CloudConfig {
   bool recording = false;
   bool persistCredentials = true;
   uint8_t retentionMonths = 1;
+  uint8_t protocol = 0;
 };
 
 struct CloudStatus {
@@ -412,7 +419,7 @@ void pruneLogsIfLowMemory(bool allowNotice = true);
 void appendLogLine(const String &line);
 void logEvent(const String &msg, const String &level = "info", const String &source = "system");
 String deviceId();
-String buildCloudUrl(const String &path);
+String buildWebDavUrl(const String &pathRelative);
 bool ensureCollection(const String &path, const char *label);
 bool webdavRequestFollowRedirects(const String &method, const String &url, const String &payload, const char *contentType, int &outCode, String &outLocationShort, String &outBodyShort, String *chainOut = nullptr, bool *redirectedToHttps = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS);
 
@@ -485,6 +492,26 @@ String lastRecordingMinuteKey;
 // ----------------------------
 // Helpers
 // ----------------------------
+struct CloudRequestClients {
+  WiFiClient http;
+  WiFiClientSecure https;
+};
+
+CloudProtocol cloudProtocol() {
+  return cloudConfig.protocol == 1 ? CloudProtocol::HTTPS : CloudProtocol::HTTP;
+}
+
+const char *cloudProtocolLabel() {
+  return cloudProtocol() == CloudProtocol::HTTPS ? "https" : "http";
+}
+
+bool beginCloudRequest(HTTPClient &http, const String &fullUrl, CloudRequestClients &clients) {
+  if (cloudProtocol() == CloudProtocol::HTTPS) {
+    clients.https.setInsecure();
+    return http.begin(clients.https, fullUrl);
+  }
+  return http.begin(clients.http, fullUrl);
+}
 String lightChannelName() {
   switch (channel) {
   case LightChannel::FullSpectrum:
@@ -698,6 +725,7 @@ void saveCloudConfig(const String &reason = "config save") {
   prefsCloud.putBool("enabled", cloudConfig.enabled);
   prefsCloud.putBool("recording", cloudConfig.recording);
   prefsCloud.putUChar("retention", cloudConfig.retentionMonths);
+  prefsCloud.putUChar("protocol", cloudConfig.protocol);
   prefsCloud.end();
   cloudStatus.enabled = cloudConfig.enabled;
   cloudStatus.runtimeEnabled = cloudConfig.enabled && cloudConfig.baseUrl.length() > 0;
@@ -724,8 +752,10 @@ void loadCloudConfig() {
   cloudConfig.enabled = prefsCloud.getBool("enabled", false);
   cloudConfig.recording = prefsCloud.getBool("recording", false);
   cloudConfig.retentionMonths = prefsCloud.getUChar("retention", 1);
+  cloudConfig.protocol = prefsCloud.getUChar("protocol", 0);
   if (cloudConfig.retentionMonths < 1) cloudConfig.retentionMonths = 1;
   if (cloudConfig.retentionMonths > 4) cloudConfig.retentionMonths = 4;
+  if (cloudConfig.protocol > 1) cloudConfig.protocol = 0;
   prefsCloud.end();
   cloudConfig.baseUrl = normalizeCloudBaseUrl(cloudConfig.baseUrl);
   cloudStatus.enabled = cloudConfig.enabled;
@@ -912,16 +942,16 @@ int hourFromEpoch(uint64_t epochMs) {
 }
 
 String safeBaseUrl() {
-  return normalizeCloudBaseUrl(cloudConfig.baseUrl);
+  return buildWebDavBaseUrl();
 }
 
 String normalizeCloudBaseUrl(String url) {
   url.trim();
   if (url.length() == 0) return "";
-  if (url.startsWith("https://")) {
-    url = "http://" + url.substring(strlen("https://"));
-  } else if (!url.startsWith("http://")) {
-    url = "http://" + url;
+  if (url.startsWith("http://")) {
+    url = url.substring(strlen("http://"));
+  } else if (url.startsWith("https://")) {
+    url = url.substring(strlen("https://"));
   }
   String rootTag = String("/") + CLOUD_ROOT_FOLDER;
   int idx = url.lastIndexOf(rootTag);
@@ -931,7 +961,23 @@ String normalizeCloudBaseUrl(String url) {
       url = url.substring(0, idx);
     }
   }
-  return ensureTrailingSlash(url);
+  while (url.endsWith("/")) url.remove(url.length() - 1);
+  return url;
+}
+
+String buildWebDavBaseUrl() {
+  String base = normalizeCloudBaseUrl(cloudConfig.baseUrl);
+  if (base.length() == 0) return "";
+  String full = String(cloudProtocolLabel()) + "://" + base;
+  return ensureTrailingSlash(full);
+}
+
+String buildWebDavUrl(const String &pathRelative) {
+  String base = buildWebDavBaseUrl();
+  if (base.length() == 0) return "";
+  String cleanedPath = pathRelative;
+  while (cleanedPath.startsWith("//")) cleanedPath.remove(0, 1);
+  return joinUrl(base, cleanedPath);
 }
 
 String ensureTrailingSlash(String s) {
@@ -1444,17 +1490,13 @@ void flushCloudLogs(bool force = false) {
   enqueueCloudJob(path, payload, dayKey, "logs", "text/plain", false);
 }
 
-String buildCloudUrl(const String &path) {
-  String base = safeBaseUrl();
-  if (base.length() == 0) return "";
-  String cleanedPath = path;
-  while (cleanedPath.startsWith("//")) cleanedPath.remove(0, 1);
-  return joinUrl(base, cleanedPath);
-}
-
 String cloudShortPath(const String &path) {
   if (path.length() == 0) return "/";
   return path.startsWith("/") ? path : (String("/") + path);
+}
+
+String cloudRequestStateText(const char *op, const String &label, int code) {
+  return String(op) + " " + label + " -> " + String(code) + " (" + cloudProtocolLabel() + ")";
 }
 
 void setCloudRequestNote(const char *op, const String &label, const String &path, int code, const String &chain, bool httpsRedirected) {
@@ -1462,7 +1504,7 @@ void setCloudRequestNote(const char *op, const String &label, const String &path
   cloudStatus.lastUrl = cloudShortPath(path);
   cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
   if (chain.length() > 0) {
-    cloudStatus.lastError = String(op) + " " + label + " -> " + chain;
+    cloudStatus.lastError = String(op) + " " + label + " -> " + chain + " (" + cloudProtocolLabel() + ")";
   }
 }
 
@@ -1470,9 +1512,11 @@ void setCloudError(const char *op, const String &label, const String &path, int 
   cloudStatus.lastHttpCode = code;
   cloudStatus.lastUrl = cloudShortPath(path);
   String msg = String(op) + " " + label + " -> " + String(code);
+  if (detail.length() > 0 && code <= 0) msg += String(" ") + detail;
 #if CLOUD_DIAG
-  if (detail.length() > 0) msg += String(" ") + detail;
+  if (detail.length() > 0 && code > 0) msg += String(" ") + detail;
 #endif
+  msg += String(" (") + cloudProtocolLabel() + ")";
   markCloudFailure(msg);
   cloudStatus.lastErrorSuffix = suffix;
 }
@@ -1480,13 +1524,12 @@ void setCloudError(const char *op, const String &label, const String &path, int 
 bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS, String *location = nullptr) {
   HTTPClient http;
   http.setTimeout(timeoutMs);
-  WiFiClient client;
-  if (url.startsWith("https://")) {
+  CloudRequestClients clients;
+  if (!beginCloudRequest(http, url, clients)) {
     code = -1;
-    if (resp) *resp = "HTTPS disabled";
+    if (resp) *resp = cloudProtocol() == CloudProtocol::HTTPS ? "HTTPS connect failed" : "HTTP connect failed";
     return false;
   }
-  if (!http.begin(client, url)) return false;
   if (location) {
     const char *headers[] = {"Location"};
     http.collectHeaders(headers, 1);
@@ -1504,6 +1547,13 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
     code = http.sendRequest(method.c_str(), (uint8_t *)body.c_str(), body.length());
   } else {
     code = http.sendRequest(method.c_str(), body);
+  }
+  if (code <= 0) {
+    if (resp) {
+      *resp = cloudProtocol() == CloudProtocol::HTTPS ? "TLS handshake failed" : "HTTP request failed";
+    }
+    http.end();
+    return false;
   }
   if (resp) {
     String out = http.getString();
@@ -1574,7 +1624,13 @@ bool webdavRequestFollowRedirects(const String &method, const String &url, const
         return false;
       }
       if (loc.startsWith("https://")) {
-        httpsRedirected = true;
+        if (cloudProtocol() != CloudProtocol::HTTPS) {
+          httpsRedirected = true;
+          if (chainOut) *chainOut = chain;
+          if (redirectedToHttps) *redirectedToHttps = httpsRedirected;
+          return false;
+        }
+      } else if (loc.startsWith("http://") && cloudProtocol() == CloudProtocol::HTTPS) {
         if (chainOut) *chainOut = chain;
         if (redirectedToHttps) *redirectedToHttps = httpsRedirected;
         return false;
@@ -1601,7 +1657,7 @@ bool webdavRequestFollowRedirects(const String &method, const String &url, const
 }
 
 bool ensureCollection(const String &path, const char *label) {
-  String url = buildCloudUrl(path);
+  String url = buildWebDavUrl(path);
   int code = 0;
   String resp;
   String location;
@@ -1659,7 +1715,7 @@ bool pingCloud(bool force = false) {
   if (!cloudEnsureFolders("")) {
     return false;
   }
-  markCloudSuccess("cloud ok");
+  markCloudSuccess(cloudRequestStateText("PROPFIND", "base", code));
   if (chain.length() > 0) {
     cloudStatus.lastError = String("PROPFIND base -> ") + chain;
   }
@@ -1672,7 +1728,7 @@ bool testCloudConnection() {
 
 bool cloudGet(const String &path, String &resp, int &code) {
   String fullPath = path.startsWith("/") ? path : (String("/") + path);
-  String url = buildCloudUrl(fullPath);
+  String url = buildWebDavUrl(fullPath);
   return webdavRequest("GET", url, "", nullptr, code, &resp, CLOUD_TEST_TIMEOUT_MS);
 }
 
@@ -1695,7 +1751,7 @@ bool fetchCloudDailyPoint(const String &dayKey, const String &metric, DailyPoint
     markCloudFailure("Daily JSON parse failed");
     return false;
   }
-  markCloudSuccess();
+  markCloudSuccess(cloudRequestStateText("GET", "daily", code));
   JsonObject sensors = doc["sensors"];
   if (!sensors.containsKey(metric)) return false;
   JsonObject m = sensors[metric];
@@ -1716,7 +1772,7 @@ bool uploadCloudJob(const CloudJob &job) {
   if (!cloudEnsureFolders(job.dayKey)) {
     return false;
   }
-  String url = buildCloudUrl(fullPath);
+  String url = buildWebDavUrl(fullPath);
   int code = 0;
   String resp;
   const char *ctype = job.contentType.length() > 0 ? job.contentType.c_str() : "application/json";
@@ -1737,7 +1793,7 @@ bool uploadCloudJob(const CloudJob &job) {
   cloudStatus.lastUploadMs = currentEpochMs();
   cloudStatus.lastUploadedPath = fullPath;
   cloudStatus.lastError = "";
-  markCloudSuccess(job.kind.length() > 0 ? job.kind : "upload");
+  markCloudSuccess(cloudRequestStateText("PUT", "upload", code));
   if (chain.length() > 0) {
     cloudStatus.lastError = String("PUT upload -> ") + chain;
   }
@@ -1829,7 +1885,7 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
   String location;
   String chain;
   bool httpsRedirected = false;
-  bool ok = webdavRequestFollowRedirects("PUT", buildCloudUrl(pathOut), body, "text/plain", code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
+  bool ok = webdavRequestFollowRedirects("PUT", buildWebDavUrl(pathOut), body, "text/plain", code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
   setCloudRequestNote("PUT", "test", pathOut, code, chain, httpsRedirected);
   httpCode = code;
   if (ok) {
@@ -1837,7 +1893,7 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
     cloudStatus.lastUploadMs = cloudStatus.lastTestMs;
     cloudStatus.lastUploadedPath = pathOut;
     cloudStatus.lastError = "";
-    markCloudSuccess("test upload");
+    markCloudSuccess(cloudRequestStateText("PUT", "test", code));
     if (chain.length() > 0) {
       cloudStatus.lastError = String("PUT test -> ") + chain;
     }
@@ -2993,7 +3049,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       <div id="view-cloud" class="view">
         <section class="card">
-          <h3 style="margin-top:0">Cloud (Nextcloud WebDAV, HTTP)</h3>
+          <h3 style="margin-top:0">Cloud (Nextcloud WebDAV, HTTP/HTTPS)</h3>
           <div class="cloud-grid">
             <div>
               <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudEnabled" style="width:auto;"> Cloud Logging aktivieren</label>
@@ -3009,6 +3065,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
                 <div class="cloud-credentials-body" id="cloudCredentialsBody">
                   <label for="cloudUrl">WebDAV Base URL</label>
                   <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/" />
+                  <label for="cloudProtocol">Protokoll</label>
+                  <select id="cloudProtocol">
+                    <option value="http">http (Standard)</option>
+                    <option value="https">https</option>
+                  </select>
+                  <p class="hover-hint" style="margin:4px 0 8px;">Hinweis: https erfordert funktionierendes Zertifikat der Nextcloud (Self-Signed im LAN ok, aber der ESP prüft nur eingeschränkt).</p>
                   <label for="cloudUser">Username</label>
                   <input id="cloudUser" placeholder="Nextcloud Username" />
                   <label for="cloudPass">App-Passwort / Token</label>
@@ -3391,6 +3453,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const localTimeText = getEl('localTimeText');
       const cloudEnabledToggle = getEl('cloudEnabled');
       const cloudUrlInput = getEl('cloudUrl');
+      const cloudProtocolSelect = getEl('cloudProtocol');
       const cloudUserInput = getEl('cloudUser');
       const cloudPassInput = getEl('cloudPass');
       const cloudRetentionSelect = getEl('cloudRetention');
@@ -5721,6 +5784,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function renderCloudForm(data = {}) {
         if (cloudEnabledToggle) cloudEnabledToggle.checked = data.enabled === true || data.enabled === 1;
         if (cloudUrlInput && typeof data.base_url === 'string') cloudUrlInput.value = data.base_url;
+        if (cloudProtocolSelect && typeof data.protocol === 'string') cloudProtocolSelect.value = data.protocol;
         if (cloudUserInput && typeof data.username === 'string') cloudUserInput.value = data.username;
         if (cloudRetentionSelect && data.retention) cloudRetentionSelect.value = String(data.retention);
         if (cloudPassInput) cloudPassInput.value = '';
@@ -5742,6 +5806,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         body.set('action', 'save');
         const urlVal = cloudUrlInput?.value?.trim() || '';
         if (cloudUrlInput && !enabledOnly) body.set('base_url', urlVal);
+        if (cloudProtocolSelect && !enabledOnly) body.set('protocol', cloudProtocolSelect.value || 'http');
         if (cloudUserInput && !enabledOnly) body.set('username', cloudUserInput.value || '');
         if (cloudPassInput && !enabledOnly && cloudPassInput.value) body.set('password', cloudPassInput.value);
         if (cloudPersistToggle && !enabledOnly) body.set('persist_credentials', cloudPersistToggle.checked ? '1' : '0');
@@ -6371,6 +6436,7 @@ void handleCloud() {
     doc["username"] = cloudConfig.username;
     doc["persist_credentials"] = cloudConfig.persistCredentials;
     doc["retention"] = cloudConfig.retentionMonths;
+    doc["protocol"] = cloudProtocolLabel();
     doc["connected"] = cloudStatus.connected;
     doc["last_upload_ms"] = (uint64_t)cloudStatus.lastUploadMs;
     doc["last_uploaded_path"] = cloudStatus.lastUploadedPath;
@@ -6403,6 +6469,9 @@ void handleCloud() {
     if (server.hasArg("enabled")) cloudConfig.enabled = server.arg("enabled") == "1";
     if (server.hasArg("recording")) cloudConfig.recording = server.arg("recording") == "1";
     if (server.hasArg("persist_credentials")) cloudConfig.persistCredentials = server.arg("persist_credentials") == "1";
+    if (server.hasArg("protocol")) {
+      cloudConfig.protocol = server.arg("protocol") == "https" ? 1 : 0;
+    }
     if (server.hasArg("retention")) {
       int r = server.arg("retention").toInt();
       cloudConfig.retentionMonths = (uint8_t)std::max(1, std::min(4, r));
