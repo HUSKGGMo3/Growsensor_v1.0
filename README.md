@@ -98,6 +98,9 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Sensor templates expanded with MH-Z14 (CO₂) mapped to the existing UART driver.
   (v0.2.6 remains untested – please use with care.)
 
+## v0.3.2a Changes
+- Fix: ArduinoJson null handling in recording payload; removed duplicate default args to restore compilation.
+
 ## v0.2.5 Changes
 - VPD korrekt: Targets statt Skalierung + Apply Button für Stages.
 - VPD Heatmap klein/groß konsistent mit rotem Live-Punkt.

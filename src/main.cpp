@@ -69,7 +69,7 @@ static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
 static constexpr unsigned long CLOUD_HEALTH_WINDOW_MS = 60000;
 static constexpr unsigned long CLOUD_PING_INTERVAL_MS = 30000;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
-static const char *FIRMWARE_VERSION = "v0.3.2";
+static const char *FIRMWARE_VERSION = "v0.3.2a";
 static const char *CLOUD_ROOT_FOLDER = "GrowSensor";
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
