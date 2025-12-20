@@ -12,9 +12,11 @@
 #include <math.h>
 #include <ArduinoJson.h>
 #include <cstring>
+#include <HTTPClient.h>
 #include <time.h>
 #include <sys/time.h>
 #include <vector>
+#include <algorithm>
 #include <esp_system.h>
 
 // ----------------------------
@@ -57,6 +59,8 @@ static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4
 static constexpr unsigned long TIME_SYNC_RETRY_MS = 60000;      // retry NTP every 60s until synced
 static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offset every 5 minutes
 static constexpr time_t TIME_VALID_AFTER = 1672531200;          // 2023-01-01 UTC safeguard
+static constexpr unsigned long CLOUD_RETRY_MS = 15000;
+static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
 static const char *NTP_SERVER_2 = "time.nist.gov";
@@ -237,6 +241,49 @@ struct MetricSampleInfo {
   uint64_t lastEpochMs = 0;
 };
 
+struct DailyAggregate {
+  String dayKey;
+  uint32_t count = 0;
+  float sum = 0.0f;
+  float min = NAN;
+  float max = NAN;
+  float last = NAN;
+};
+
+struct DailyPoint {
+  String dayKey;
+  float avg = NAN;
+  float min = NAN;
+  float max = NAN;
+  float last = NAN;
+  uint32_t count = 0;
+};
+
+struct CloudJob {
+  String dayKey;
+  String path;
+  String payload;
+  int attempts = 0;
+};
+
+struct CloudConfig {
+  String baseUrl;
+  String username;
+  String password;
+  bool enabled = false;
+  uint8_t retentionMonths = 1;
+};
+
+struct CloudStatus {
+  bool connected = false;
+  bool enabled = false;
+  unsigned long lastUploadMs = 0;
+  unsigned long lastFailureMs = 0;
+  uint32_t failureCount = 0;
+  String lastError;
+  size_t queueSize = 0;
+};
+
 // Globals
 BH1750 lightMeter;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -288,6 +335,7 @@ bool logPruneNoted = false;
 // Forward declarations
 void pruneLogsIfLowMemory(bool allowNotice = true);
 void appendLogLine(const String &line);
+String deviceId();
 
 // Sensor toggles (persisted)
 bool enableLight = true;
@@ -309,6 +357,8 @@ unsigned long lastLightSampleMs = 0;
 unsigned long lastClimateSampleMs = 0;
 unsigned long lastLeafSampleMs = 0;
 unsigned long lastCo2SampleMs = 0;
+String activeDayKey;
+unsigned long lastCloudAttempt = 0;
 
 const VpdProfile VPD_PROFILES[] = {
     {"seedling", "Steckling/Sämling", 0.4f, 0.8f},
@@ -335,6 +385,13 @@ MetricDef HISTORY_METRICS[] = {
 };
 const size_t HISTORY_METRIC_COUNT = sizeof(HISTORY_METRICS) / sizeof(HISTORY_METRICS[0]);
 MetricSampleInfo SAMPLE_INFO[HISTORY_METRIC_COUNT];
+DailyAggregate DAILY_AGG[HISTORY_METRIC_COUNT];
+std::vector<DailyPoint> DAILY_HISTORY[HISTORY_METRIC_COUNT];
+
+CloudConfig cloudConfig;
+CloudStatus cloudStatus;
+std::vector<CloudJob> cloudQueue;
+Preferences prefsCloud;
 
 // ----------------------------
 // Helpers
@@ -443,6 +500,221 @@ MetricSampleInfo *sampleInfoById(const String &id) {
   return nullptr;
 }
 
+int metricIndex(const String &id) {
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    if (id == HISTORY_METRICS[i].id) return (int)i;
+  }
+  return -1;
+}
+
+String dayKeyForEpoch(uint64_t epochMs) {
+  if (epochMs == 0) return "";
+  struct tm t;
+  time_t secs = epochMs / 1000ULL;
+  if (localtime_r(&secs, &t) == nullptr) return "";
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+  return String(buf);
+}
+
+String currentDayKey() {
+  uint64_t epochMs = currentEpochMs();
+  if (!timeSynced) {
+    epochMs = mapTimestampToEpochMs(millis());
+  }
+  return dayKeyForEpoch(epochMs);
+}
+
+uint16_t retentionDays() {
+  uint8_t months = cloudConfig.retentionMonths;
+  if (months < 1) months = 1;
+  if (months > 4) months = 4;
+  return (uint16_t)(months * 30);
+}
+
+void saveCloudConfig() {
+  prefsCloud.begin("cloud", false);
+  prefsCloud.putString("base", cloudConfig.baseUrl);
+  prefsCloud.putString("user", cloudConfig.username);
+  prefsCloud.putString("pass", cloudConfig.password);
+  prefsCloud.putBool("enabled", cloudConfig.enabled);
+  prefsCloud.putUChar("retention", cloudConfig.retentionMonths);
+  prefsCloud.end();
+}
+
+void loadCloudConfig() {
+  prefsCloud.begin("cloud", true);
+  cloudConfig.baseUrl = prefsCloud.getString("base", "");
+  cloudConfig.username = prefsCloud.getString("user", "");
+  cloudConfig.password = prefsCloud.getString("pass", "");
+  cloudConfig.enabled = prefsCloud.getBool("enabled", false);
+  cloudConfig.retentionMonths = prefsCloud.getUChar("retention", 1);
+  if (cloudConfig.retentionMonths < 1) cloudConfig.retentionMonths = 1;
+  if (cloudConfig.retentionMonths > 4) cloudConfig.retentionMonths = 4;
+  prefsCloud.end();
+}
+
+void persistDailyHistory() {
+  prefsCloud.begin("cloud", false);
+  DynamicJsonDocument doc(16384);
+  JsonArray arr = doc.to<JsonArray>();
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    JsonObject obj = arr.createNestedObject();
+    obj["id"] = HISTORY_METRICS[i].id;
+    JsonArray series = obj.createNestedArray("days");
+    for (const auto &p : DAILY_HISTORY[i]) {
+      JsonObject d = series.createNestedObject();
+      d["day"] = p.dayKey;
+      d["avg"] = p.avg;
+      d["min"] = p.min;
+      d["max"] = p.max;
+      d["last"] = p.last;
+      d["count"] = p.count;
+    }
+  }
+  String out;
+  serializeJson(doc, out);
+  prefsCloud.putString("daily", out);
+  prefsCloud.end();
+}
+
+void loadDailyHistory() {
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    DAILY_HISTORY[i].clear();
+    DAILY_AGG[i] = DailyAggregate();
+  }
+  prefsCloud.begin("cloud", true);
+  String raw = prefsCloud.getString("daily", "");
+  prefsCloud.end();
+  if (raw.length() == 0) return;
+  DynamicJsonDocument doc(16384);
+  if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    String id = obj["id"] | "";
+    int idx = metricIndex(id);
+    if (idx < 0) continue;
+    JsonArray series = obj["days"].as<JsonArray>();
+    for (JsonObject d : series) {
+      DailyPoint p;
+      p.dayKey = d["day"] | "";
+      p.avg = d["avg"] | NAN;
+      p.min = d["min"] | NAN;
+      p.max = d["max"] | NAN;
+      p.last = d["last"] | NAN;
+      p.count = d["count"] | 0;
+      if (p.dayKey.length() > 0) DAILY_HISTORY[idx].push_back(p);
+    }
+  }
+}
+
+void trimDailyHistory(size_t idx) {
+  if (idx >= HISTORY_METRIC_COUNT) return;
+  uint16_t days = retentionDays();
+  if (DAILY_HISTORY[idx].size() > days) {
+    DAILY_HISTORY[idx].erase(DAILY_HISTORY[idx].begin(), DAILY_HISTORY[idx].begin() + (DAILY_HISTORY[idx].size() - days));
+  }
+}
+
+void finalizeDaily(const String &dayKey) {
+  if (dayKey.length() == 0) return;
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    if (DAILY_AGG[i].dayKey != dayKey || DAILY_AGG[i].count == 0) continue;
+    DailyPoint p;
+    p.dayKey = dayKey;
+    p.count = DAILY_AGG[i].count;
+    p.min = DAILY_AGG[i].min;
+    p.max = DAILY_AGG[i].max;
+    p.last = DAILY_AGG[i].last;
+    p.avg = DAILY_AGG[i].count > 0 ? (DAILY_AGG[i].sum / DAILY_AGG[i].count) : NAN;
+    DAILY_HISTORY[i].push_back(p);
+    trimDailyHistory(i);
+  }
+}
+
+void resetDailyAgg(int idx, const String &dayKey) {
+  if (idx < 0 || idx >= (int)HISTORY_METRIC_COUNT) return;
+  DAILY_AGG[idx].dayKey = dayKey;
+  DAILY_AGG[idx].count = 0;
+  DAILY_AGG[idx].sum = 0;
+  DAILY_AGG[idx].min = NAN;
+  DAILY_AGG[idx].max = NAN;
+  DAILY_AGG[idx].last = NAN;
+}
+
+void accumulateDaily(int idx, float value, const String &dayKey) {
+  if (idx < 0 || idx >= (int)HISTORY_METRIC_COUNT || dayKey.length() == 0 || isnan(value)) return;
+  if (DAILY_AGG[idx].dayKey != dayKey) {
+    if (DAILY_AGG[idx].dayKey.length() > 0) {
+      finalizeDaily(DAILY_AGG[idx].dayKey);
+    }
+    resetDailyAgg(idx, dayKey);
+  }
+  auto &agg = DAILY_AGG[idx];
+  agg.dayKey = dayKey;
+  agg.count++;
+  agg.sum += value;
+  if (isnan(agg.min) || value < agg.min) agg.min = value;
+  if (isnan(agg.max) || value > agg.max) agg.max = value;
+  agg.last = value;
+}
+
+bool dailyPointFor(int idx, const String &dayKey, DailyPoint &out) {
+  if (idx < 0 || idx >= (int)HISTORY_METRIC_COUNT) return false;
+  for (auto it = DAILY_HISTORY[idx].rbegin(); it != DAILY_HISTORY[idx].rend(); ++it) {
+    if (it->dayKey == dayKey) { out = *it; return true; }
+  }
+  return false;
+}
+
+String safeBaseUrl() {
+  String b = cloudConfig.baseUrl;
+  b.trim();
+  while (b.endsWith("/")) b.remove(b.length() - 1);
+  return b;
+}
+
+void enqueueCloudJob(const String &dayKey) {
+  if (!cloudConfig.enabled || cloudConfig.baseUrl.length() == 0) return;
+  DynamicJsonDocument doc(1024);
+  JsonObject root = doc.to<JsonObject>();
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    DailyPoint p;
+    if (!dailyPointFor(i, dayKey, p)) continue;
+    JsonObject m = root.createNestedObject(HISTORY_METRICS[i].id);
+    m["count"] = p.count;
+    m["avg"] = p.avg;
+    m["min"] = p.min;
+    m["max"] = p.max;
+    m["last"] = p.last;
+  }
+  String payload;
+  serializeJson(root, payload);
+  if (payload.length() == 0) return;
+  String base = safeBaseUrl();
+  if (base.length() == 0) return;
+  bool hasRoot = base.endsWith("GrowSensor");
+  String prefix = hasRoot ? "" : "/GrowSensor";
+  String path = prefix + "/" + deviceId() + "/daily/" + dayKey;
+  path.replace("-", "/");
+  path += ".json";
+  CloudJob job;
+  job.dayKey = dayKey;
+  job.path = path;
+  job.payload = payload;
+  if (cloudQueue.size() >= 8) {
+    cloudQueue.erase(cloudQueue.begin());
+  }
+  cloudQueue.push_back(job);
+  cloudStatus.queueSize = cloudQueue.size();
+}
+
+void finalizeDayAndQueue(const String &dayKey) {
+  if (dayKey.length() == 0) return;
+  finalizeDaily(dayKey);
+  persistDailyHistory();
+  enqueueCloudJob(dayKey);
+}
+
 void addPoint(HistoryPoint *buffer, size_t capacity, size_t &start, size_t &count, uint64_t ts, float value) {
   if (capacity == 0)
     return;
@@ -520,6 +792,14 @@ int safeInt(int v, int fallback = 0) { return v < 0 ? fallback : v; }
 
 float currentPpfdFactor() {
   return luxToPPFD(1.0f, channel);
+}
+
+String deviceId() {
+  if (deviceHostname.length() > 0) return deviceHostname;
+  char buf[16];
+  uint64_t chipid = ESP.getEfuseMac();
+  snprintf(buf, sizeof(buf), "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
+  return String(buf);
 }
 
 bool enforceAuth() {
@@ -615,6 +895,117 @@ void logEvent(const String &msg) {
   line += "s: ";
   line += msg;
   appendLogLine(line);
+}
+
+String buildCloudUrl(const String &path) {
+  String base = safeBaseUrl();
+  if (base.length() == 0) return "";
+  String full = base;
+  if (!full.startsWith("http://")) {
+    full = String("http://") + full;
+  }
+  bool baseHasSlash = full.endsWith("/");
+  bool pathHasSlash = path.startsWith("/");
+  if (baseHasSlash && pathHasSlash) {
+    full.remove(full.length() - 1);
+  } else if (!baseHasSlash && !pathHasSlash) {
+    full += "/";
+  }
+  full += path;
+  return full;
+}
+
+bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS) {
+  HTTPClient http;
+  http.setTimeout(timeoutMs);
+  if (!http.begin(url)) return false;
+  if (cloudConfig.username.length() > 0) {
+    http.setAuthorization(cloudConfig.username.c_str(), cloudConfig.password.c_str());
+  }
+  if (contentType) http.addHeader("Content-Type", contentType);
+  if (method == "PROPFIND") http.addHeader("Depth", "0");
+  code = http.sendRequest(method.c_str(), body);
+  if (resp) *resp = http.getString();
+  http.end();
+  return code > 0;
+}
+
+bool ensureCollection(const String &url) {
+  int code = 0;
+  String resp;
+  bool ok = webdavRequest("MKCOL", url, "", "text/plain", code, &resp);
+  if (!ok) return false;
+  if (code == 201 || code == 200 || code == 204 || code == 405 || code == 409) return true;
+  return false;
+}
+
+bool testCloudConnection() {
+  if (cloudConfig.baseUrl.length() == 0) return false;
+  String url = buildCloudUrl("/");
+  int code = 0;
+  String resp;
+  bool ok = webdavRequest("PROPFIND", url, "", "text/plain", code, &resp);
+  if (!ok) return false;
+  cloudStatus.connected = code >= 200 && code < 400;
+  if (!cloudStatus.connected) {
+    cloudStatus.lastError = "Conn test failed: " + String(code);
+    cloudStatus.failureCount++;
+    cloudStatus.lastFailureMs = millis();
+  }
+  return cloudStatus.connected;
+}
+
+bool uploadCloudJob(const CloudJob &job) {
+  String base = safeBaseUrl();
+  if (base.length() == 0) return false;
+  String fullPath = job.path;
+  if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
+  String url = buildCloudUrl(fullPath);
+  // ensure collections
+  int lastSlash = fullPath.lastIndexOf('/');
+  String dir = fullPath.substring(0, lastSlash);
+  String accum = "";
+  int start = 0;
+  while (start < dir.length()) {
+    int next = dir.indexOf('/', start + 1);
+    if (next < 0) next = dir.length();
+    accum = dir.substring(0, next);
+    if (accum.length() > 0) {
+      String partial = buildCloudUrl(accum);
+      ensureCollection(partial);
+    }
+    start = next;
+  }
+  int code = 0;
+  String resp;
+  bool ok = webdavRequest("PUT", url, job.payload, "application/json", code, &resp, CLOUD_TEST_TIMEOUT_MS);
+  if (!ok || code < 200 || code >= 300) {
+    cloudStatus.lastError = "Upload failed: " + String(code);
+    cloudStatus.failureCount++;
+    cloudStatus.lastFailureMs = millis();
+    return false;
+  }
+  cloudStatus.lastUploadMs = currentEpochMs();
+  cloudStatus.connected = true;
+  cloudStatus.queueSize = cloudQueue.size();
+  return true;
+}
+
+void processCloudQueue() {
+  if (!cloudConfig.enabled || cloudQueue.empty()) return;
+  unsigned long now = millis();
+  if (lastCloudAttempt != 0 && now - lastCloudAttempt < CLOUD_RETRY_MS) return;
+  lastCloudAttempt = now;
+  CloudJob job = cloudQueue.front();
+  if (uploadCloudJob(job)) {
+    cloudQueue.erase(cloudQueue.begin());
+    cloudStatus.queueSize = cloudQueue.size();
+  } else {
+    cloudQueue[0].attempts++;
+    if (cloudQueue[0].attempts > 5) {
+      cloudQueue.erase(cloudQueue.begin());
+    }
+  }
 }
 
 void applyTimezoneEnv() {
@@ -1181,22 +1572,39 @@ void readSensors() {
   }
 
   uint64_t sampleTs = currentEpochMs();
+  String sampleDay = dayKeyForEpoch(sampleTs);
+  if (activeDayKey.length() == 0) {
+    activeDayKey = sampleDay;
+  } else if (sampleDay.length() > 0 && sampleDay != activeDayKey) {
+    finalizeDayAndQueue(activeDayKey);
+    activeDayKey = sampleDay;
+    for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+      resetDailyAgg(i, sampleDay);
+    }
+  }
   if (lightSampled) {
     pushHistoryValue("lux", latest.lux, sampleTs);
     pushHistoryValue("ppfd", latest.ppfd, sampleTs);
+    accumulateDaily(metricIndex("lux"), latest.lux, sampleDay);
+    accumulateDaily(metricIndex("ppfd"), latest.ppfd, sampleDay);
   }
   if (co2Sampled) {
     pushHistoryValue("co2", static_cast<float>(latest.co2ppm), sampleTs);
+    accumulateDaily(metricIndex("co2"), static_cast<float>(latest.co2ppm), sampleDay);
   }
   if (climateSampled) {
     pushHistoryValue("temp", latest.ambientTempC, sampleTs);
     pushHistoryValue("humidity", latest.humidity, sampleTs);
+    accumulateDaily(metricIndex("temp"), latest.ambientTempC, sampleDay);
+    accumulateDaily(metricIndex("humidity"), latest.humidity, sampleDay);
   }
   if (leafSampled) {
     pushHistoryValue("leaf", latest.leafTempC, sampleTs);
+    accumulateDaily(metricIndex("leaf"), latest.leafTempC, sampleDay);
   }
   if (vpdUpdated && !isnan(latest.vpd)) {
     pushHistoryValue("vpd", latest.vpd, sampleTs);
+    accumulateDaily(metricIndex("vpd"), latest.vpd, sampleDay);
   }
 
   unsigned long now = millis();
@@ -1227,7 +1635,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.3</title>
+    <title>GrowSensor v0.3.1</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
@@ -1343,6 +1751,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .wifi-bar { width:4px; background:#334155; border-radius:2px; }
       .wifi-bar.active { background:#22c55e; }
       .reconnect-panel { margin-top:10px; padding:10px; border:1px dashed #334155; border-radius:10px; background:rgba(15,23,42,0.55); }
+      .cloud-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
+      .cloud-warning { background:#7c2d12; color:#fecdd3; padding:10px; border-radius:10px; border:1px solid #b45309; }
+      .cloud-status { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-top:8px; }
+      .cloud-pill { background:#0b1220; border:1px solid #1f2937; border-radius:10px; padding:8px; display:flex; justify-content:space-between; align-items:center; }
       .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
       .error-banner ul { margin: 0; padding-left: 18px; }
       .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -1355,12 +1767,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .legend-item { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:#0b1220; border:1px solid #1f2937; }
       .color-select { width:auto; min-width:150px; }
       .legend-color-select { min-width:120px; padding:6px 8px; }
-      .kpi-bar { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:8px; margin-top:12px; align-items:stretch; position:sticky; top:0; z-index:11; background:#111827; padding:4px 0; }
+      .kpi-wrap { display:flex; justify-content:center; width:100%; }
+      .kpi-bar { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:8px; margin-top:12px; align-items:stretch; position:sticky; top:0; z-index:11; background:#111827; padding:4px 0; max-width:720px; width:100%; }
       .kpi-item { background:#0b1220; border:1px solid #1f2937; border-radius:10px; padding:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; box-shadow:0 6px 14px rgba(0,0,0,0.25); min-height:56px; }
       .kpi-text { display:flex; flex-direction:column; gap:4px; }
       .kpi-label { font-size:0.9rem; color:#cbd5e1; }
-      .kpi-value { font-size:1.1rem; font-variant-numeric:tabular-nums; color:#e2e8f0; }
-      .kpi-trend { font-size:1.1rem; font-weight:700; display:flex; align-items:center; gap:6px; }
+      .kpi-value { font-size:1.1rem; font-variant-numeric:tabular-nums; color:#e2e8f0; display:inline-flex; align-items:center; gap:6px; }
+      .kpi-trend { font-size:1.1rem; font-weight:700; display:inline-flex; align-items:center; gap:6px; }
       .trend-up { color:#22c55e; }
       .trend-down { color:#f87171; }
       .trend-flat { color:#e5e7eb; }
@@ -1380,7 +1793,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.3</h1>
+          <h1>GrowSensor – v0.3.1</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1406,39 +1819,38 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <span class="badge badge-warn" id="timeBadge">Zeit nicht synchron</span>
         <span class="time-text" id="localTimeText">–</span>
       </div>
-      <div class="kpi-bar" id="kpiBar">
-        <div class="kpi-item" data-metric="temp">
-          <div class="kpi-text">
-            <div class="kpi-label">Temp (°C)</div>
-            <div class="kpi-value" id="kpiTemp">–</div>
+      <div class="kpi-wrap">
+        <div class="kpi-bar" id="kpiBar">
+          <div class="kpi-item" data-metric="temp">
+            <div class="kpi-text">
+              <div class="kpi-label">Temp (°C)</div>
+              <div class="kpi-value"><span id="kpiTemp">–</span><span class="kpi-trend" id="kpiTempTrend">–</span></div>
+            </div>
           </div>
-          <div class="kpi-trend" id="kpiTempTrend">→</div>
-        </div>
-        <div class="kpi-item" data-metric="humidity">
-          <div class="kpi-text">
-            <div class="kpi-label">Humidity (%)</div>
-            <div class="kpi-value" id="kpiHumidity">–</div>
+          <div class="kpi-item" data-metric="humidity">
+            <div class="kpi-text">
+              <div class="kpi-label">Humidity (%)</div>
+              <div class="kpi-value"><span id="kpiHumidity">–</span><span class="kpi-trend" id="kpiHumidityTrend">–</span></div>
+            </div>
           </div>
-          <div class="kpi-trend" id="kpiHumidityTrend">→</div>
-        </div>
-        <div class="kpi-item" data-metric="co2">
-          <div class="kpi-text">
-            <div class="kpi-label">CO₂ (ppm)</div>
-            <div class="kpi-value" id="kpiCo2">–</div>
+          <div class="kpi-item" data-metric="co2">
+            <div class="kpi-text">
+              <div class="kpi-label">CO₂ (ppm)</div>
+              <div class="kpi-value"><span id="kpiCo2">–</span><span class="kpi-trend" id="kpiCo2Trend">–</span></div>
+            </div>
           </div>
-          <div class="kpi-trend" id="kpiCo2Trend">→</div>
-        </div>
-        <div class="kpi-item" data-metric="vpd">
-          <div class="kpi-text">
-            <div class="kpi-label">VPD (kPa)</div>
-            <div class="kpi-value" id="kpiVpd">–</div>
+          <div class="kpi-item" data-metric="vpd">
+            <div class="kpi-text">
+              <div class="kpi-label">VPD (kPa)</div>
+              <div class="kpi-value"><span id="kpiVpd">–</span><span class="kpi-trend" id="kpiVpdTrend">–</span></div>
+            </div>
           </div>
-          <div class="kpi-trend" id="kpiVpdTrend">→</div>
         </div>
       </div>
       <nav>
         <button id="navDashboard" class="menu-btn">Dashboard</button>
         <button id="navSensors" class="menu-btn">Sensoren</button>
+        <button id="navCloud" class="menu-btn">Cloud</button>
       </nav>
     </header>
     <div id="errorBanner" class="error-banner">
@@ -1568,7 +1980,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
         <section class="card">
         <div class="card-header" style="padding:0; margin-bottom:8px; align-items:center; gap:10px;">
-          <h3 style="margin:0;">24h Verlauf (15m)</h3>
+          <h3 style="margin:0;">Verlauf</h3>
           <label for="chartMetricSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
             Metrik
             <select id="chartMetricSelect" style="width:auto; min-width:150px;">
@@ -1582,6 +1994,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         </div>
         <div class="row" style="justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
           <div id="mainChartLegend" class="chart-legend"></div>
+          <label for="chartRangeSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
+            Range
+            <select id="chartRangeSelect" class="color-select">
+              <option value="24h">24h</option>
+              <option value="30d" class="cloud-range">1M</option>
+              <option value="90d" class="cloud-range">3M</option>
+              <option value="120d" class="cloud-range">4M</option>
+            </select>
+          </label>
           <label for="chartColorSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
             Farbe
             <select id="chartColorSelect" class="color-select"></select>
@@ -1682,6 +2103,54 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         </section>
       </div>
 
+      <div id="view-cloud" class="view">
+        <section class="card">
+          <h3 style="margin-top:0">Cloud (Nextcloud WebDAV, LAN HTTP)</h3>
+          <p class="hover-hint" id="cloudHttpHint">HTTP (ohne TLS): Zugangsdaten werden unverschlüsselt übertragen. Nur im vertrauenswürdigen LAN nutzen.</p>
+          <div class="cloud-grid">
+            <div>
+              <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudEnabled" style="width:auto;"> Cloud Logging aktivieren</label>
+              <label for="cloudUrl">WebDAV Base URL</label>
+              <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/GrowSensor/" />
+              <label for="cloudUser">Username</label>
+              <input id="cloudUser" placeholder="Nextcloud Username" />
+              <label for="cloudPass">App-Passwort / Token</label>
+              <input id="cloudPass" type="password" placeholder="App-Passwort" />
+              <label for="cloudRetention">Retention (Monate)</label>
+              <select id="cloudRetention">
+                <option value="1">1 Monat</option>
+                <option value="2">2 Monate</option>
+                <option value="3">3 Monate</option>
+                <option value="4">4 Monate</option>
+              </select>
+              <div class="row" style="margin-top:10px;">
+                <button id="cloudSave">Speichern</button>
+                <button id="cloudTest" class="ghost">Test Connection</button>
+              </div>
+              <div class="row" style="margin-top:6px;">
+                <button id="cloudStart">Start Recording</button>
+                <button id="cloudStop" class="ghost">Stop Recording</button>
+              </div>
+              <p id="cloudStatusMsg" class="status" style="margin-top:8px;"></p>
+            </div>
+            <div>
+              <div class="cloud-warning" id="cloudHttpWarning" style="display:none;">HTTP (ohne TLS): Zugangsdaten werden unverschlüsselt übertragen. Nur im vertrauenswürdigen LAN nutzen.</div>
+              <div class="cloud-status">
+                <div class="cloud-pill"><span>Cloud enabled</span><strong id="cloudEnabledState">–</strong></div>
+                <div class="cloud-pill"><span>Connected</span><strong id="cloudConnected">–</strong></div>
+                <div class="cloud-pill"><span>Queue</span><strong id="cloudQueueSize">0</strong></div>
+                <div class="cloud-pill"><span>Failures</span><strong id="cloudFailures">0</strong></div>
+              </div>
+              <div class="cloud-status" style="margin-top:8px;">
+                <div class="cloud-pill"><span>Last upload</span><strong id="cloudLastUpload">–</strong></div>
+                <div class="cloud-pill" style="grid-column: span 2;"><span>Last error</span><strong id="cloudLastError" style="text-align:right;">–</strong></div>
+              </div>
+              <p class="hover-hint" style="margin-top:8px;">Empfohlen: Nextcloud App-Passwort nutzen, nicht das Hauptpasswort.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+
       <section class="card">
         <h3 style="margin-top:0">Logs (letzte 6h)</h3>
         <button id="refreshLogs">Aktualisieren</button>
@@ -1703,7 +2172,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.3 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.3.1 (experimental) • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1729,6 +2198,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           <button id="tabLive" class="active">Live</button>
           <button id="tabLast6h">Letzte 6h</button>
           <button id="tabLast24h">Letzte 24h</button>
+          <button id="tabLast30d" class="cloud-range" style="display:none;">1M</button>
+          <button id="tabLast90d" class="cloud-range" style="display:none;">3M</button>
+          <button id="tabLast120d" class="cloud-range" style="display:none;">4M</button>
         </div>
         <div class="row" style="align-items:center; gap:8px; flex-wrap:wrap; justify-content:space-between;">
           <label for="detailColorSelect" style="display:flex; align-items:center; gap:6px; font-size:0.9rem;">
@@ -2004,12 +2476,26 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const wifiBars = getEl('wifiBars');
       const timezoneSelect = getEl('timezoneSelect');
       const chartMetricSelect = getEl('chartMetricSelect');
+      const chartRangeSelect = getEl('chartRangeSelect');
       const chartColorSelect = getEl('chartColorSelect');
       const detailColorSelect = getEl('detailColorSelect');
       const mainChartLegend = getEl('mainChartLegend');
       const detailLegend = getEl('detailLegend');
       const timeBadge = getEl('timeBadge');
       const localTimeText = getEl('localTimeText');
+      const cloudEnabledToggle = getEl('cloudEnabled');
+      const cloudUrlInput = getEl('cloudUrl');
+      const cloudUserInput = getEl('cloudUser');
+      const cloudPassInput = getEl('cloudPass');
+      const cloudRetentionSelect = getEl('cloudRetention');
+      const cloudStatusMsg = getEl('cloudStatusMsg');
+      const cloudHttpWarning = getEl('cloudHttpWarning');
+      const cloudEnabledState = getEl('cloudEnabledState');
+      const cloudConnected = getEl('cloudConnected');
+      const cloudQueueSize = getEl('cloudQueueSize');
+      const cloudFailures = getEl('cloudFailures');
+      const cloudLastUpload = getEl('cloudLastUpload');
+      const cloudLastError = getEl('cloudLastError');
       let detailMetric = null;
       let detailMode = 'live';
       let detailVpdView = 'heatmap';
@@ -2032,12 +2518,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       };
       const metricDataState = {};
       metrics.forEach(m => metricDataState[m] = { ever:false, last:0 });
+      const cloudState = { enabled:false, connected:false, lastUpload:0, queue:0, failures:0, lastError:'' };
       const TREND_CONFIG = {
-        temp: { window: 5, threshold: 0.1, decimals: 1 },
-        humidity: { window: 5, threshold: 0.5, decimals: 1 },
-        co2: { window: 5, threshold: 25, decimals: 0 },
-        vpd: { window: 5, threshold: 0.02, decimals: 3 }
+        temp: { window: 8, minDelta: 0.08, strong: 0.35, decimals: 1 },
+        humidity: { window: 8, minDelta: 0.4, strong: 1.5, decimals: 1 },
+        co2: { window: 8, minDelta: 15, strong: 50, decimals: 0 },
+        vpd: { window: 8, minDelta: 0.01, strong: 0.05, decimals: 3 }
       };
+      const TREND_MEMORY = {};
       const chartLayouts = {};
       const hoverState = { main: null, detail: null, tiles: {} };
       const tooltipEl = getEl('chartTooltip');
@@ -2078,7 +2566,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return now - state.last <= windowMs;
       }
       function hasDataInRange(metric, mode) {
-        const data = getSeriesData(metric, mode);
+        let data = [];
+        if (mode === '30d' || mode === '90d' || mode === '120d') {
+          const key = `${metric}-${mode}`;
+          data = detailCache[key] || [];
+        } else {
+          data = getSeriesData(metric, mode);
+        }
         return data.some(p => p && p.v !== null && typeof p.t === 'number');
       }
       function refreshMetricOptions() {
@@ -2252,6 +2746,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const KNOWN_TIMEZONES = ['Europe/Berlin','UTC','Europe/London','America/New_York','Asia/Tokyo','Australia/Sydney'];
       let chartMetric = 'temp';
       if (chartMetricSelect && chartMetricSelect.value) chartMetric = chartMetricSelect.value;
+      let chartRange = chartRangeSelect && chartRangeSelect.value ? chartRangeSelect.value : '24h';
 
       function authedFetch(url, options = {}) { return fetch(url, options); }
       function flag(val, fallback = false) { if (val === undefined || val === null) return fallback; return val === true || val === 1 || val === "1"; }
@@ -2458,33 +2953,39 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function metricTrend(metric) {
-        const cfg = TREND_CONFIG[metric] || { window: 4, threshold: 0.1, decimals: 1 };
+        const cfg = TREND_CONFIG[metric] || { window: 6, minDelta: 0.1, strong: 0.25, decimals: 1 };
         const data = getSeriesData(metric, 'live').filter(p => p && typeof p.t === 'number' && typeof p.v === 'number' && !Number.isNaN(p.v));
         if (data.length < 2) return { dir:'flat', latest: null, delta: 0 };
         const windowed = data.slice(-cfg.window);
         if (windowed.length < 2) return { dir:'flat', latest: windowed[windowed.length - 1]?.v ?? null, delta: 0 };
         const latest = windowed[windowed.length - 1].v;
-        const prevVals = windowed.slice(0, -1).map(p => p.v);
-        const baseline = prevVals.reduce((a,b)=>a+b,0) / prevVals.length;
-        const diff = latest - baseline;
-        const dir = Math.abs(diff) < cfg.threshold ? 'flat' : (diff > 0 ? 'up' : 'down');
+        const first = windowed[0].v;
+        const diff = latest - first;
+        const mag = Math.abs(diff);
+        const hysteresis = cfg.minDelta * 0.4;
+        const prevDir = TREND_MEMORY[metric] || 'flat';
+        let dir = 'flat';
+        if (mag > cfg.minDelta) dir = diff > 0 ? 'up' : 'down';
+        else if (mag > cfg.minDelta - hysteresis && (prevDir === 'up' || prevDir === 'down')) dir = prevDir;
+        TREND_MEMORY[metric] = dir;
         let targetDir = null;
-        if (metric === 'vpd' && prevVals.length) {
-          const distPrev = vpdDistance(prevVals[prevVals.length - 1]);
+        if (metric === 'vpd') {
+          const distPrev = vpdDistance(first);
           const distNow = vpdDistance(latest);
           if (distPrev !== null && distNow !== null) {
-            if (distNow < distPrev - cfg.threshold) targetDir = 'toward';
-            else if (distNow > distPrev + cfg.threshold) targetDir = 'away';
-            else targetDir = 'neutral';
+            const delta = distPrev - distNow;
+            if (Math.abs(delta) < cfg.minDelta) targetDir = 'neutral';
+            else targetDir = delta > 0 ? 'toward' : 'away';
           }
         }
-        return { dir, latest, delta: diff, baseline, targetDir };
+        const strength = mag >= cfg.strong ? 'strong' : (mag >= cfg.minDelta ? 'soft' : 'flat');
+        return { dir, latest, delta: diff, strength, targetDir };
       }
 
       function trendArrow(dir) {
         if (dir === 'up') return '↑';
         if (dir === 'down') return '↓';
-        return '→';
+        return '';
       }
 
       function renderKpi(metric, value, trend) {
@@ -2507,13 +3008,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (metric === 'vpd') {
           if (trend?.targetDir === 'toward') cls = 'kpi-trend trend-good';
           else if (trend?.targetDir === 'away') cls = 'kpi-trend trend-bad';
-          else cls = 'kpi-trend trend-warn';
+          else if (dir !== 'flat') cls = 'kpi-trend trend-warn';
         } else {
-          if (dir === 'up') cls = 'kpi-trend trend-up';
-          else if (dir === 'down') cls = 'kpi-trend trend-down';
+          if (dir !== 'flat') {
+            cls = trend?.strength === 'strong' ? 'kpi-trend trend-good' : 'kpi-trend trend-warn';
+          }
         }
         trendEl.className = cls;
-        trendEl.textContent = trendArrow(dir);
+        const arrow = trendArrow(dir);
+        trendEl.textContent = arrow || '–';
       }
 
       function updateKpiBar(telemetry = lastTelemetryPayload) {
@@ -2595,6 +3098,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function normalizeMode(mode) {
         if (mode === '24h') return '24h';
         if (mode === '6h') return '6h';
+        if (mode === '30d' || mode === '90d' || mode === '120d') return mode;
         return 'live';
       }
 
@@ -3002,23 +3506,29 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         canvas.addEventListener('touchend', leaveHandler);
       }
 
-      function drawChart() {
+      async function drawChart() {
         if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
         const colorSelectWrapper = chartColorSelect ? chartColorSelect.closest('label') : null;
         if (colorSelectWrapper) colorSelectWrapper.style.display = 'flex';
         let ok = false;
-        const available = metrics.filter(m => metricHasData(m) && hasDataInRange(m, '24h'));
+        const available = metrics.filter(m => metricHasData(m));
         if (!available.includes(chartMetric) && available.length) {
           chartMetric = available[0];
           if (chartMetricSelect) chartMetricSelect.value = chartMetric;
         }
         const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
-        const data = getSeriesData(chartMetric, '24h');
+        const dayMs = 24 * 60 * 60 * 1000;
+        let data = [];
+        if (chartRange === '30d' || chartRange === '90d' || chartRange === '120d') {
+          data = await loadDetailHistory(chartMetric, chartRange);
+        } else {
+          data = getSeriesData(chartMetric, chartRange);
+        }
         const deviceId = deviceIdForMetric(chartMetric);
         const color = colorForMetricDevice(chartMetric, deviceId);
         const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
         const hover = (hoverState.main && hoverState.main.metric === chartMetric) ? hoverState.main : null;
-        const res = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone, hover });
+        const res = drawLineChart(chartCanvas, ctx, data, chartRange, meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone, hover, windowMs: chartRange === '30d' ? dayMs*30 : chartRange === '90d' ? dayMs*90 : chartRange === '120d' ? dayMs*120 : DAY_MS });
         ok = !!res;
         if (ok && res.layout) {
           chartLayouts.main = { ...res.layout, meta, metric: chartMetric, unit: meta.unit, label: meta.label || chartMetric.toUpperCase() };
@@ -3101,7 +3611,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!detailCtx || !metric || !detailChartCanvas) return false;
         const deviceId = deviceIdForMetric(metric);
         const color = colorForMetricDevice(metric, deviceId);
-        const tickBounds = mode === 'live' ? { minXTicks:5, maxXTicks:8, windowMs: LIVE_WINDOW_MS } : (mode === '6h' ? { minXTicks:6, maxXTicks:10, windowMs: SIX_H_MS } : { minXTicks:6, maxXTicks:10, windowMs: DAY_MS });
+        const dayMs = 24 * 60 * 60 * 1000;
+        const tickBounds = mode === 'live' ? { minXTicks:5, maxXTicks:8, windowMs: LIVE_WINDOW_MS } :
+          (mode === '6h' ? { minXTicks:6, maxXTicks:10, windowMs: SIX_H_MS } :
+          (mode === '30d' ? { minXTicks:6, maxXTicks:10, windowMs: dayMs * 30 } :
+          (mode === '90d' ? { minXTicks:6, maxXTicks:10, windowMs: dayMs * 90 } :
+          (mode === '120d' ? { minXTicks:6, maxXTicks:10, windowMs: dayMs * 120 } :
+            { minXTicks:6, maxXTicks:10, windowMs: DAY_MS }))));
         const hover = (hoverState.detail && hoverState.detail.metric === metric && hoverState.detail.mode === mode) ? hoverState.detail : null;
         const res = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, {
           series:[{ id: deviceId, label:`GeräteID: ${deviceId}`, color, points }],
@@ -3150,16 +3666,28 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const key = `${metric}-${normalized}`;
         if (!detailCache[key]) detailCache[key] = [];
         try {
-          const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized}`);
-          const mapped = (data.points || []).map(p => {
-            const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
-            const ts = parseMs(p[0]);
-            return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
-          });
+          let mapped = [];
+          if (normalized === '30d' || normalized === '90d' || normalized === '120d') {
+            const days = normalized === '30d' ? 30 : (normalized === '90d' ? 90 : 120);
+            const data = await fetchJson(`/api/history/daily?metric=${metric}&days=${days}`);
+            mapped = (data.points || []).map(p => {
+              const ts = parseMs(p[0]);
+              const valObj = p[1] || {};
+              const val = typeof valObj.avg === 'number' ? valObj.avg : null;
+              return { t: ts !== null ? ts : Date.now(), v: val };
+            });
+          } else {
+            const data = await fetchJson(`/api/history?metric=${metric}&range=${normalized}`);
+            mapped = (data.points || []).map(p => {
+              const val = (p[1] === null || Number.isNaN(p[1])) ? null : parseFloat(p[1]);
+              const ts = parseMs(p[0]);
+              return { t: ts !== null ? ts : Date.now(), v: (typeof val === 'number' && !Number.isNaN(val)) ? val : null };
+            });
+            const syncedFlag = flag(data.time_synced);
+            if (normalized === 'live' || normalized === '6h' || normalized === '24h') mergeHistory(metric, mapped, normalized, syncedFlag);
+            clearErrors('API /api/history');
+          }
           detailCache[key] = mapped;
-          const syncedFlag = flag(data.time_synced);
-          if (normalized === 'live' || normalized === '6h' || normalized === '24h') mergeHistory(metric, mapped, normalized, syncedFlag);
-          clearErrors('API /api/history');
         } catch (err) {
           console.warn('history error', err);
           pushError(`API /api/history failed: ${err.message}`);
@@ -4004,6 +4532,33 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (tabLast6h) tabLast6h.classList.remove('active');
         renderDetail();
       });
+      const tabLast30dBtn = getEl('tabLast30d');
+      if (tabLast30dBtn) tabLast30dBtn.addEventListener('click', () => {
+        detailMode = '30d';
+        hoverState.detail = null;
+        hideTooltip();
+        tabLast30dBtn.classList.add('active');
+        ['tabLive','tabLast6h','tabLast24h','tabLast90d','tabLast120d'].forEach(id => { const el = getEl(id); if (el && el !== tabLast30dBtn) el.classList.remove('active'); });
+        renderDetail();
+      });
+      const tabLast90dBtn = getEl('tabLast90d');
+      if (tabLast90dBtn) tabLast90dBtn.addEventListener('click', () => {
+        detailMode = '90d';
+        hoverState.detail = null;
+        hideTooltip();
+        tabLast90dBtn.classList.add('active');
+        ['tabLive','tabLast6h','tabLast24h','tabLast30d','tabLast120d'].forEach(id => { const el = getEl(id); if (el && el !== tabLast90dBtn) el.classList.remove('active'); });
+        renderDetail();
+      });
+      const tabLast120dBtn = getEl('tabLast120d');
+      if (tabLast120dBtn) tabLast120dBtn.addEventListener('click', () => {
+        detailMode = '120d';
+        hoverState.detail = null;
+        hideTooltip();
+        tabLast120dBtn.classList.add('active');
+        ['tabLive','tabLast6h','tabLast24h','tabLast30d','tabLast90d'].forEach(id => { const el = getEl(id); if (el && el !== tabLast120dBtn) el.classList.remove('active'); });
+        renderDetail();
+      });
       const tabHeatmapBtn = getEl('tabHeatmap');
       if (tabHeatmapBtn) tabHeatmapBtn.addEventListener('click', () => {
         detailVpdView = 'heatmap';
@@ -4033,9 +4588,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
       const navSensors = getEl('navSensors');
       if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
+      const navCloud = getEl('navCloud');
+      if (navCloud) navCloud.addEventListener('click', () => switchView('view-cloud'));
       if (chartMetricSelect) {
         chartMetricSelect.addEventListener('change', () => {
           chartMetric = chartMetricSelect.value || 'temp';
+          hoverState.main = null;
+          hideTooltip();
+          drawChart();
+        });
+      }
+      if (chartRangeSelect) {
+        chartRangeSelect.addEventListener('change', () => {
+          chartRange = chartRangeSelect.value || '24h';
           hoverState.main = null;
           hideTooltip();
           drawChart();
@@ -4115,10 +4680,123 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
       }
 
+      function renderCloudStatus(data = {}) {
+        cloudState.enabled = data.enabled === 1 || data.enabled === true;
+        cloudState.connected = data.connected === 1 || data.connected === true;
+        cloudState.lastUpload = data.last_upload_ms || 0;
+        cloudState.queue = data.queue_size || 0;
+        cloudState.failures = data.failures || 0;
+        cloudState.lastError = data.last_error || '';
+        if (cloudEnabledState) cloudEnabledState.textContent = cloudState.enabled ? 'yes' : 'no';
+        if (cloudConnected) cloudConnected.textContent = cloudState.connected ? 'yes' : 'no';
+        if (cloudQueueSize) cloudQueueSize.textContent = String(cloudState.queue);
+        if (cloudFailures) cloudFailures.textContent = String(cloudState.failures);
+        if (cloudLastError) cloudLastError.textContent = cloudState.lastError || '–';
+        if (cloudLastUpload) {
+          if (cloudState.lastUpload) {
+            const secs = Math.round((Date.now() - cloudState.lastUpload) / 1000);
+            cloudLastUpload.textContent = secs < 5 ? 'gerade eben' : `${secs}s ago`;
+          } else {
+            cloudLastUpload.textContent = '–';
+          }
+        }
+        const showLongRanges = cloudState.enabled && (cloudState.connected || cloudState.lastUpload > 0);
+        document.querySelectorAll('.cloud-range').forEach(btn => btn.style.display = showLongRanges ? 'inline-block' : 'none');
+        if (!showLongRanges && chartRange !== '24h') {
+          chartRange = '24h';
+          if (chartRangeSelect) chartRangeSelect.value = '24h';
+          drawChart();
+        }
+      }
+
+      function renderCloudForm(data = {}) {
+        if (cloudEnabledToggle) cloudEnabledToggle.checked = data.enabled === true || data.enabled === 1;
+        if (cloudUrlInput && typeof data.base_url === 'string') cloudUrlInput.value = data.base_url;
+        if (cloudUserInput && typeof data.username === 'string') cloudUserInput.value = data.username;
+        if (cloudRetentionSelect && data.retention) cloudRetentionSelect.value = String(data.retention);
+        if (cloudPassInput) cloudPassInput.value = '';
+        const usesHttp = (cloudUrlInput?.value || '').startsWith('http://');
+        if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
+      }
+
+      async function fetchCloudStatus() {
+        try {
+          const res = await fetchJson('/api/cloud');
+          renderCloudForm(res);
+          renderCloudStatus(res);
+        } catch (err) {
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = err.message || 'Cloud read failed'; cloudStatusMsg.className = 'status err'; }
+        }
+      }
+
+      async function saveCloudConfig(enabledOnly = false) {
+        const body = new URLSearchParams();
+        body.set('action', 'save');
+        const urlVal = cloudUrlInput?.value?.trim() || '';
+        if (cloudUrlInput && !enabledOnly) body.set('base_url', urlVal);
+        if (cloudUserInput && !enabledOnly) body.set('username', cloudUserInput.value || '');
+        if (cloudPassInput && !enabledOnly && cloudPassInput.value) body.set('password', cloudPassInput.value);
+        const enabledVal = cloudEnabledToggle?.checked ? '1' : '0';
+        body.set('enabled', enabledVal);
+        if (cloudRetentionSelect && !enabledOnly) body.set('retention', cloudRetentionSelect.value || '1');
+        const usesHttp = urlVal.startsWith('http://');
+        if (cloudEnabledToggle?.checked && usesHttp) {
+          const ok = confirm('HTTP ohne TLS: Zugangsdaten werden unverschlüsselt übertragen. Fortfahren?');
+          if (!ok) { cloudEnabledToggle.checked = false; return; }
+        }
+        try {
+          await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Gespeichert'; cloudStatusMsg.className = 'status ok'; }
+        } catch (err) {
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Speichern fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
+        }
+        fetchCloudStatus();
+      }
+
+      async function testCloud() {
+        if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Teste...'; cloudStatusMsg.className = 'status'; }
+        try {
+          const res = await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'action=test' });
+          const text = await res.text();
+          const ok = res.ok && text.includes('"ok":1');
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = ok ? 'Verbindung OK' : 'Test fehlgeschlagen'; cloudStatusMsg.className = ok ? 'status ok' : 'status err'; }
+          if (ok) renderCloudStatus({ connected:true });
+        } catch (err) {
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Test fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
+        }
+      }
+
+      async function cloudAction(action) {
+        const body = new URLSearchParams();
+        body.set('action', action);
+        try {
+          await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
+          if (action === 'start' && cloudEnabledToggle) cloudEnabledToggle.checked = true;
+          if (action === 'stop' && cloudEnabledToggle) cloudEnabledToggle.checked = false;
+          fetchCloudStatus();
+        } catch (err) {
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Aktion fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
+        }
+      }
+
       const toggleWifiFormBtn = getEl('toggleWifiForm');
       if (toggleWifiFormBtn) toggleWifiFormBtn.addEventListener('click', () => {
         wifiFormOpen = !wifiFormOpen;
         applyWifiState(lastTelemetryPayload);
+      });
+
+      const cloudSaveBtn = getEl('cloudSave');
+      if (cloudSaveBtn) cloudSaveBtn.addEventListener('click', () => saveCloudConfig(false));
+      const cloudTestBtn = getEl('cloudTest');
+      if (cloudTestBtn) cloudTestBtn.addEventListener('click', () => testCloud());
+      const cloudStartBtn = getEl('cloudStart');
+      if (cloudStartBtn) cloudStartBtn.addEventListener('click', () => cloudAction('start'));
+      const cloudStopBtn = getEl('cloudStop');
+      if (cloudStopBtn) cloudStopBtn.addEventListener('click', () => cloudAction('stop'));
+      if (cloudEnabledToggle) cloudEnabledToggle.addEventListener('change', () => saveCloudConfig(true));
+      if (cloudUrlInput) cloudUrlInput.addEventListener('input', () => {
+        const usesHttp = (cloudUrlInput.value || '').startsWith('http://');
+        if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
       });
 
       function setDevVisible() {
@@ -4227,6 +4905,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       loadSettings();
       scanNetworks();
       loadLogs();
+      fetchCloudStatus();
       loadPartners();
       primeHistory();
       fetchData();
@@ -4454,6 +5133,114 @@ void handleHistory() {
   bool syncedFlag = timeSynced;
   json += "],\"time_synced\":" + String(syncedFlag ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(syncedFlag ? currentEpochMs() : 0)) + "}";
   server.send(200, "application/json", json);
+}
+
+time_t parseDayKey(const String &dayKey) {
+  int y, m, d;
+  if (sscanf(dayKey.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return 0;
+  struct tm t = {};
+  t.tm_year = y - 1900;
+  t.tm_mon = m - 1;
+  t.tm_mday = d;
+  return mktime(&t);
+}
+
+void handleDailyHistory() {
+  if (!enforceAuth()) return;
+  String metric = server.hasArg("metric") ? server.arg("metric") : "";
+  int days = server.hasArg("days") ? server.arg("days").toInt() : 30;
+  if (days < 1) days = 1;
+  if (days > 120) days = 120;
+  int idx = metricIndex(metric);
+  if (idx < 0) { server.send(400, "text/plain", "invalid metric"); return; }
+  pruneLogsIfLowMemory(false);
+  String json;
+  json.reserve(256);
+  json = "{\"metric\":\"" + metric + "\",\"points\":[";
+  bool first = true;
+  auto appendPoint = [&](const DailyPoint &p) {
+    if (p.dayKey.length() == 0 || p.count == 0) return;
+    time_t ts = parseDayKey(p.dayKey);
+    if (!first) json += ",";
+    first = false;
+    json += "[" + String((unsigned long long)ts * 1000ULL) + ",";
+    json += "{\"avg\":" + String((double)p.avg, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"min\":" + String((double)p.min, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"max\":" + String((double)p.max, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"last\":" + String((double)p.last, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"count\":" + String(p.count) + "}";
+    json += "]";
+  };
+  const auto &hist = DAILY_HISTORY[idx];
+  int start = hist.size() > (size_t)days ? hist.size() - days : 0;
+  for (size_t i = start; i < hist.size(); i++) appendPoint(hist[i]);
+  DailyAggregate agg = DAILY_AGG[idx];
+  if (agg.count > 0 && agg.dayKey.length() > 0) {
+    DailyPoint p;
+    p.dayKey = agg.dayKey;
+    p.count = agg.count;
+    p.avg = agg.sum / agg.count;
+    p.min = agg.min;
+    p.max = agg.max;
+    p.last = agg.last;
+    appendPoint(p);
+  }
+  json += "],\"time_synced\":" + String(timeSynced ? 1 : 0) + "}";
+  server.send(200, "application/json", json);
+}
+
+void handleCloud() {
+  if (!enforceAuth()) return;
+  if (server.method() == HTTP_GET) {
+    String json = "{";
+    json += "\"enabled\":" + String(cloudConfig.enabled ? 1 : 0) + ",";
+    json += "\"base_url\":\"" + cloudConfig.baseUrl + "\",";
+    json += "\"username\":\"" + cloudConfig.username + "\",";
+    json += "\"retention\":" + String(cloudConfig.retentionMonths) + ",";
+    json += "\"connected\":" + String(cloudStatus.connected ? 1 : 0) + ",";
+    json += "\"last_upload_ms\":" + String(cloudStatus.lastUploadMs) + ",";
+    json += "\"queue_size\":" + String(cloudQueue.size()) + ",";
+    json += "\"failures\":" + String(cloudStatus.failureCount) + ",";
+    json += "\"last_error\":\"" + cloudStatus.lastError + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  String action = server.hasArg("action") ? server.arg("action") : "";
+  if (action == "save") {
+    if (server.hasArg("base_url")) cloudConfig.baseUrl = server.arg("base_url");
+    if (server.hasArg("username")) cloudConfig.username = server.arg("username");
+    if (server.hasArg("password") && server.arg("password").length() > 0) cloudConfig.password = server.arg("password");
+    if (server.hasArg("enabled")) cloudConfig.enabled = server.arg("enabled") == "1";
+    if (server.hasArg("retention")) {
+      int r = server.arg("retention").toInt();
+      cloudConfig.retentionMonths = (uint8_t)std::max(1, std::min(4, r));
+    }
+    saveCloudConfig();
+    for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) trimDailyHistory(i);
+    persistDailyHistory();
+    server.send(200, "text/plain", "saved");
+    return;
+  }
+  if (action == "test") {
+    bool ok = testCloudConnection();
+    server.send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":1}" : "{\"ok\":0}");
+    return;
+  }
+  if (action == "start") {
+    cloudConfig.enabled = true;
+    saveCloudConfig();
+    server.send(200, "application/json", "{\"enabled\":1}");
+    return;
+  }
+  if (action == "stop") {
+    cloudConfig.enabled = false;
+    saveCloudConfig();
+    server.send(200, "application/json", "{\"enabled\":0}");
+    return;
+  }
+  server.send(400, "text/plain", "unsupported");
 }
 
 void handlePins() {
@@ -4903,10 +5690,13 @@ void setupServer() {
   server.on("/api/sensors", HTTP_POST, handleSensorsApi);
   server.on("/api/sensors/config", HTTP_GET, handleSensorsConfig);
   server.on("/api/sensors/config", HTTP_POST, handleSensorsConfig);
+  server.on("/api/cloud", HTTP_GET, handleCloud);
+  server.on("/api/cloud", HTTP_POST, handleCloud);
   server.on("/api/pins", HTTP_GET, handlePins);
   server.on("/api/pins", HTTP_POST, handlePins);
   server.on("/api/logs", HTTP_GET, handleLogs);
   server.on("/api/history", HTTP_GET, handleHistory);
+  server.on("/api/history/daily", HTTP_GET, handleDailyHistory);
    server.on("/api/partners", HTTP_GET, handlePartners);
    server.on("/api/partners", HTTP_POST, handlePartners);
   server.onNotFound(handleNotFound);
@@ -4921,6 +5711,12 @@ void setup() {
   delay(200);
   Serial.println("\nGrowSensor booting...");
 
+  loadCloudConfig();
+  loadDailyHistory();
+  activeDayKey = currentDayKey();
+  for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
+    resetDailyAgg(i, activeDayKey);
+  }
   loadPinsFromPrefs();
   loadSensorConfigs();
   initSensors();
@@ -4936,6 +5732,7 @@ void loop() {
   server.handleClient();
   maintainWifiConnection();
   maintainTimeSync();
+  processCloudQueue();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
     lastSensorMillis = millis();

@@ -1,6 +1,12 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.3 (ungetestet / Community-Preview)**
+**Aktuelle Version: v0.3.1 (experimentell / ungetestet)**
+
+### Patch v0.3.1 (experimentell, HTTP-only im LAN)
+- Neuer **Cloud**-Tab (für alle sichtbar) zum Konfigurieren von Nextcloud-WebDAV-Logging im lokalen LAN über HTTP. Credentials werden im eigenen `cloud`-Namespace gespeichert, Wi-Fi/Settings bleiben unangetastet. Test/Start/Stop-Buttons, Queue-/Fehler-Zähler und Retention-Auswahl (1–4 Monate) sind integriert; bei HTTP erscheint ein deutlicher Hinweis/Confirm (Klartext-Übertragung).
+- Tägliche Aggregationen pro Metrik (avg/min/max/last/count) werden lokal gepuffert & persistiert, beim Tageswechsel als JSON nach `/GrowSensor/<device>/daily/YYYY/MM/DD.json` hochgeladen (MKCOL + PUT). Upload-Queue ist begrenzt und wird mit Backoff retried. Long-Term-Ranges (1M/3M/4M) in Dashboard-Chart & Detail-Modal nutzen die lokalen Daily-Aggregate und erscheinen nur, wenn Cloud aktiv/verbunden ist – die UI bleibt offline-fähig.
+- KPI-Bar im Header ist zentriert; Trendpfeile stehen direkt neben den Werten und nutzen robustere Schwellen/Hysterese. Temp/Feuchte/CO₂ färben starke Trends grün, leichte gelb; VPD zeigt Richtung mit Pfeil, Farbe signalisiert Annäherung (grün) oder Entfernung (rot) vom Zielband.
+- Sensor-Polling bleibt auf max. 2 Messungen/Minute gedrosselt; Version auf v0.3.1 angehoben.
 
 ### Patch v0.3 (ungetestet)
 - Chart-Hover snappt jetzt auf den nächsten Zeitstempel, zeigt einen vertikalen Cursor und farbige Tooltipps direkt am Mauszeiger in allen Charts (Detail, 24h-Chart, Mini-Hover).

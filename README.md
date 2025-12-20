@@ -1,6 +1,12 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3 (untested / community preview)**
+**Current release: v0.3.1 (experimental / untested)**
+
+### Patch v0.3.1 (experimental, HTTP-only LAN cloud)
+- New **Cloud** tab (visible for all users) to configure LAN-only Nextcloud WebDAV logging over HTTP. Stores credentials in a dedicated `cloud` namespace, never wipes Wi‑Fi/settings, and warns when using HTTP (plaintext). Includes Test/Start/Stop controls, queue/failure counters, and a retention selector (1–4 months).
+- Daily aggregates per metric (avg/min/max/last/count) are kept locally (ring buffer, persisted) and uploaded once per day as JSON to `/GrowSensor/<device>/daily/YYYY/MM/DD.json`. Upload queue is bounded and retried with backoff; directories are created via idempotent MKCOL. UI long-range charts (1M/3M/4M) read local aggregates, appear only when cloud is enabled/connected, and keep the app offline-capable.
+- Header KPI bar centered; trend arrows sit inline with values and use hardened trend detection with thresholds/hysteresis. Temp/Humidity/CO₂ show green (strong) / yellow (soft) trends; VPD arrows show direction while color indicates “toward target” (green), “away” (red), or neutral.
+- Sensor reads stay rate-limited to max 2/min (cooldowns already enforced), and version banner bumped to v0.3.1.
 
 ### Patch v0.3 (untested)
 - Chart hover now snaps to the nearest timestamp with a series-colored tooltip, vertical cursor line, and marker dot on all charts (detail modal, 24h main chart, and mini hover charts). Tooltips stay next to the cursor and use client-side data only.
