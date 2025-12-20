@@ -53,7 +53,8 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    ```
 
 ## v0.2.6 Changes
-- Tiles can now be collapsed or expanded directly on each dashboard tile via the top-right toggle; the control shows a pulsing green dot when expanded and a red dot when collapsed.
+- Tiles can now be collapsed or expanded directly on each dashboard tile via the top-right toggle; the control shows green only when the tile is expanded *and* the related sensor is present, enabled, healthy, and serving valid data (otherwise it stays red).
+- Collapsed tiles now shrink to a compact height (only the header stays visible), hide hover charts, and do not open the detail modal when clicked.
 - New metrics default to expanded and are inserted near the top of the dashboard (first two rows) via an explicit tile order.
 - The collapsed state is persisted in the browser (`localStorage`) and survives reloads/reboots; this only changes what is shown, not sensor collection.
 - NTP sync (pool.ntp.org, time.google.com, time.cloudflare.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).

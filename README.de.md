@@ -53,7 +53,8 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
    ```
 
 ## v0.2.6 Changes
-- Dashboard-Kacheln können direkt auf der Kachel ein- und ausgeklappt werden (Toggle oben rechts mit grünem pulsierendem Punkt im expandierten Zustand bzw. rotem Punkt im eingeklappten Zustand).
+- Dashboard-Kacheln können direkt auf der Kachel ein- und ausgeklappt werden; der Toggle wird nur grün, wenn die Kachel ausgeklappt ist *und* der zugehörige Sensor vorhanden, aktiviert, gesund und mit gültigen Daten versorgt ist (sonst bleibt er rot).
+- Eingeklappte Kacheln sind jetzt wirklich kompakt (nur Header sichtbar), zeigen keine Hover-Charts und öffnen beim Klicken kein Detail-Modal.
 - Neue Metriken sind standardmäßig aufgeklappt und werden automatisch im oberen Dashboard-Bereich (erste zwei Reihen) einsortiert – gesteuert über eine explizite Kachel-Reihenfolge.
 - Der eingeklappte/ausgeklappte Zustand wird im Browser (`localStorage`) gespeichert und überlebt Reloads/Neustarts; Sensoren bleiben weiterhin aktiv, es geht nur um die Anzeige.
 - NTP-Synchronisation nach Wi-Fi-Verbindung mit periodischem Refresh, drei Zeitservern und persistenter Zeitzone (Preferences/NVS).
