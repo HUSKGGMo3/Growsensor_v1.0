@@ -53,10 +53,9 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
    ```
 
 ## v0.2.6 Changes
-- Dashboard-Kacheln lassen sich pro Metrik ein- und ausblenden; der Toggle zeigt einen grünen, pulsierenden Punkt (an) bzw. einen roten Punkt (aus).
-- Neue Metriken werden standardmäßig sichtbar gehalten und automatisch im oberen Dashboard-Bereich (erste zwei Reihen) einsortiert – gesteuert über eine explizite Kachel-Reihenfolge plus Sichtbarkeits-Map.
-- Die Einstellung liegt auf dem Dashboard unter **„Dashboard anpassen“** mit kurzen Beschreibungen je Kachel sowie einem optionalen Reset-Button für das Standardlayout.
-- Die Sichtbarkeit speichert der Browser in `localStorage` (persistiert über Reloads/Neustarts); Sensoren bleiben weiterhin aktiv, es geht nur um die Anzeige.
+- Dashboard-Kacheln können direkt auf der Kachel ein- und ausgeklappt werden (Toggle oben rechts mit grünem pulsierendem Punkt im expandierten Zustand bzw. rotem Punkt im eingeklappten Zustand).
+- Neue Metriken sind standardmäßig aufgeklappt und werden automatisch im oberen Dashboard-Bereich (erste zwei Reihen) einsortiert – gesteuert über eine explizite Kachel-Reihenfolge.
+- Der eingeklappte/ausgeklappte Zustand wird im Browser (`localStorage`) gespeichert und überlebt Reloads/Neustarts; Sensoren bleiben weiterhin aktiv, es geht nur um die Anzeige.
 - NTP-Synchronisation nach Wi-Fi-Verbindung mit periodischem Refresh, drei Zeitservern und persistenter Zeitzone (Preferences/NVS).
 - `/api/telemetry` und `/api/history` geben Epoch-Millisekunden zurück; Haupt-/Hover-/Detail-Charts zeigen lokale Uhrzeit (HH:MM bzw. HH:MM:SS) und fallen bei fehlender Synchronisation auf relative Zeiten zurück.
 - Zeitzonen-Dropdown im Header + Live-Uhranzeige; unsynced-Status klar sichtbar per Badge.
