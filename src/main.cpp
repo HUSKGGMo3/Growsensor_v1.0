@@ -1126,6 +1126,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .ghost { background:transparent; border:1px solid #1f2937; color:#e2e8f0; }
       main { padding: 16px; display: grid; gap: 12px; }
       .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.25); position: relative; overflow:hidden; }
+      .sensor-card { position:relative; overflow:hidden; min-height:180px; display:flex; flex-direction:column; }
       .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
       .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
       label { display: block; margin-top: 8px; font-size: 0.9rem; }
@@ -1147,22 +1148,25 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tile-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
       .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; padding-bottom:48px; }
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
-      .tile-body { position:relative; transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; min-height:156px; display:flex; flex-direction:column; gap:6px; }
+      .tile-content { position:relative; z-index:2; display:flex; flex-direction:column; gap:8px; pointer-events:auto; height:100%; }
+      .tile-body { position:relative; transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; min-height:156px; display:flex; flex-direction:column; gap:8px; z-index:2; }
+      .value-panel { background: linear-gradient(180deg, rgba(15,23,42,0.86), rgba(15,23,42,0.6)); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border:1px solid rgba(148,163,184,0.16); box-shadow: 0 10px 28px rgba(0,0,0,0.38); border-radius: 12px; padding: 10px 12px; display:inline-flex; flex-direction:column; gap:4px; max-width:100%; }
+      .tile-subtext { font-size:0.9rem; color:#cbd5e1; line-height:1.3; }
       .metric-tile.collapsed { max-height:96px; min-height:64px; padding-bottom:16px; opacity:0.98; transform:translateY(0); }
       .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); display:none; }
-      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
+      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { opacity:0 !important; visibility:hidden !important; pointer-events:none; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:4; opacity:0; visibility:hidden; transition:opacity 140ms ease; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:radial-gradient(circle at 20% 20%, rgba(34,211,238,0.05), rgba(15,23,42,0.55)), rgba(15,23,42,0.72); border:1px solid #1f2937; border-radius:12px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:1; opacity:0; visibility:hidden; transition:opacity 160ms ease, visibility 160ms ease; }
       .metric-tile:hover .hover-chart { opacity:1; visibility:visible; }
-      .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; }
+      .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; z-index:3; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
       .tile-eye:active { transform:translateY(0); }
       .tile-eye svg { width:18px; height:18px; display:block; }
       .tile-eye .eye-closed { display:none; }
       .metric-tile.collapsed .tile-eye .eye-open { display:none; }
       .metric-tile.collapsed .tile-eye .eye-closed { display:block; }
-      .hover-chart canvas { width:100%; height:100%; display:block; flex:1 1 auto; }
+      .hover-chart canvas { width:100%; height:100%; min-height:100%; display:block; flex:1 1 auto; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
       .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
@@ -1186,7 +1190,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .legend-swatch { width:16px; height:10px; border-radius:4px; display:inline-block; }
       .vpd-marker { width:12px; height:12px; border-radius:50%; border:2px solid #0f172a; box-shadow:0 0 0 4px rgba(14,165,233,0.35); background:#fbbf24; }
       .vpd-no-data { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#94a3b8; backdrop-filter:blur(1px); background:rgba(15,23,42,0.65); }
-      .sensor-card { border:1px solid #1f2937; border-radius:10px; padding:10px; margin-bottom:8px; background:#0b1220; }
       .sensor-card .row { align-items:flex-start; }
       .sensor-desc { color:#94a3b8; font-size:0.9rem; }
       .sensor-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
@@ -1271,80 +1274,108 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <main>
       <div id="view-dashboard" class="view active">
         <section class="grid metrics">
-        <article class="card metric-tile" data-metric="lux">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="lux">–</div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="lux" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="ppfd">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="ppfd">–</div>
-            <div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="ppfd" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="co2">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="co2">–</div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="co2" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="temp">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="temp">–</div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="temp" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="humidity">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="humidity">–</div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="humidity" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="leaf">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="leaf">–</div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="leaf" width="320" height="140"></canvas></div>
-          </div>
-        </article>
-        <article class="card metric-tile" data-metric="vpd">
-          <div class="card-header tile-header">
-            <div class="tile-title"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
-          </div>
-          <div class="tile-body">
-            <div class="value" id="vpd">–</div>
-            <div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div>
-            <div class="vpd-chart" id="vpdTileChart">
-              <canvas id="vpdTileCanvas" class="vpd-canvas"></canvas>
-              <div class="vpd-overlay">
-                <div id="vpdTileLegend" class="vpd-legend"></div>
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                  <div id="vpdTileTarget" class="vpd-legend"></div>
-                  <div id="vpdTileStatus" style="font-weight:600;"></div>
-                </div>
-              </div>
-              <div id="vpdTileNoData" class="vpd-no-data" style="display:none;">keine Daten</div>
+        <article class="card metric-tile sensor-card" data-metric="lux">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="lux" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
             </div>
-            <div class="hover-chart"><canvas class="hover-canvas" data-metric="vpd" width="320" height="140"></canvas></div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="lux">–</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="ppfd">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="ppfd" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="ppfd">–</div>
+                <div class="tile-subtext">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="co2">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="co2" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="co2">–</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="temp">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="temp" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="temp">–</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="humidity">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="humidity" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="humidity">–</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="leaf">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="leaf" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="leaf">–</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="card metric-tile sensor-card" data-metric="vpd">
+          <div class="hover-chart"><canvas class="hover-canvas" data-metric="vpd" width="320" height="140"></canvas></div>
+          <div class="tile-content">
+            <div class="card-header tile-header">
+              <div class="tile-title"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
+            </div>
+            <div class="tile-body">
+              <div class="value-panel">
+                <div class="value" id="vpd">–</div>
+                <div id="vpdStatus" class="tile-subtext"></div>
+              </div>
+              <div class="vpd-chart" id="vpdTileChart">
+                <canvas id="vpdTileCanvas" class="vpd-canvas"></canvas>
+                <div class="vpd-overlay">
+                  <div id="vpdTileLegend" class="vpd-legend"></div>
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div id="vpdTileTarget" class="vpd-legend"></div>
+                    <div id="vpdTileStatus" style="font-weight:600;"></div>
+                  </div>
+                </div>
+                <div id="vpdTileNoData" class="vpd-no-data" style="display:none;">keine Daten</div>
+              </div>
+            </div>
           </div>
         </article>
       </section>
@@ -1741,6 +1772,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       loadTileVisibility();
       ensureTileEyes();
       applyTileVisibility();
+
+      function refreshHover(metric) {
+        drawHover(metric);
+        requestAnimationFrame(() => drawHover(metric));
+      }
+
+      function setupHoverHandlers() {
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const metric = tile.dataset.metric;
+          if (!metric) return;
+          tile.addEventListener('mouseenter', () => refreshHover(metric));
+        });
+      }
+
+      setupHoverHandlers();
 
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
@@ -2147,6 +2193,24 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           tile.classList.toggle('collapsed', !expanded);
           updateEyeVisual(tile.querySelector('.tile-eye'), expanded);
         });
+      }
+
+      function setVpdTargets(low, high, opts = {}) {
+        const next = {
+          low: (typeof low === 'number' && !Number.isNaN(low)) ? low : null,
+          high: (typeof high === 'number' && !Number.isNaN(high)) ? high : null
+        };
+        const changed = next.low !== lastVpdTargets.low || next.high !== lastVpdTargets.high;
+        lastVpdTargets = next;
+        if (changed && opts.silent !== true) refreshVpdHeatmaps(true);
+        return changed;
+      }
+
+      function refreshVpdHeatmaps(forceDetail = false, opts = {}) {
+        if (!opts.skipTile) renderVpdTile(lastTelemetryPayload);
+        if (detailMetric === 'vpd' && detailVpdView === 'heatmap' && (forceDetail || detailMetric)) {
+          renderDetail();
+        }
       }
 
       function updateConnectionStatus(apMode = false, wifiConnected = false) {
@@ -2567,6 +2631,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
       }
 
+      let hoverResizeRaf = null;
+      window.addEventListener('resize', () => {
+        if (hoverResizeRaf) cancelAnimationFrame(hoverResizeRaf);
+        hoverResizeRaf = requestAnimationFrame(() => {
+          tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
+          hoverResizeRaf = null;
+        });
+      });
+
       function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
         const deviceId = deviceIdForMetric(metric);
@@ -2705,6 +2778,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       function drawVpdHeatmap(ctxDraw, canvas, mode, targets, overlayEl, markerData) {
+        if (!ctxDraw || !canvas) return;
         resizeCanvas(canvas, ctxDraw);
         const w = canvas.width;
         const h = canvas.height;
@@ -2825,7 +2899,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             else if (status > 0) { statusEl.textContent = 'über Ziel'; statusEl.style.color = '#f87171'; }
             else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
           }
-          lastVpdTargets = { low: data.vpd_low ?? null, high: data.vpd_high ?? null };
+          const targetsChanged = setVpdTargets(data.vpd_low, data.vpd_high, { silent: true });
           applyDeviceIdsFromTelemetry(data);
           updateTileHeaderStates(data);
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
@@ -2834,6 +2908,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
           renderVpdTile(data);
           renderDetail();
+          if (targetsChanged && detailMetric === 'vpd' && detailVpdView === 'heatmap') {
+            requestAnimationFrame(() => refreshVpdHeatmaps(true, { skipTile: true }));
+          }
           applyWifiState(data);
         } catch (err) {
           console.warn('telemetry failed', err);
@@ -3538,6 +3615,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (detailColorSelect) renderColorSelect(detailColorSelect, colorForMetricDevice(detailMetric, deviceIdForMetric(detailMetric)));
           const points = collectPaired(detailMode);
           drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points);
+          requestAnimationFrame(() => drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points));
         } else {
           const historyPoints = await loadDetailHistory(detailMetric, detailMode);
           const ok = drawDetailChart(detailMetric, detailMode, historyPoints, meta);
@@ -3545,7 +3623,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
       }
 
-      function renderVpdTile(data) {
+      function renderVpdTile(data = lastTelemetryPayload || {}) {
         const temp = typeof data.temp === 'number' ? data.temp : null;
         const hum = typeof data.humidity === 'number' ? data.humidity : null;
         const vpd = typeof data.vpd === 'number' && !Number.isNaN(data.vpd) ? data.vpd : null;
@@ -3561,6 +3639,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         tileNoData.style.display = 'none';
         tileStatus.textContent = `VPD ${vpd.toFixed(2)} kPa`;
         drawVpdHeatmap(vpdTileCtx, vpdTileCanvas, 'live', lastVpdTargets, getEl('vpdTileChart'), points);
+        requestAnimationFrame(() => drawVpdHeatmap(vpdTileCtx, vpdTileCanvas, 'live', lastVpdTargets, getEl('vpdTileChart'), points));
         const targetText = lastVpdTargets.low && lastVpdTargets.high ? `${lastVpdTargets.low.toFixed(2)}–${lastVpdTargets.high.toFixed(2)} kPa` : '–';
         const vpdTileTarget = getEl('vpdTileTarget');
         if (vpdTileTarget) vpdTileTarget.innerHTML = `<span class=\"legend-swatch\" style=\"background:${vpdColor(lastVpdTargets.low || 0.8)}\"></span> Ziel ${targetText}`;

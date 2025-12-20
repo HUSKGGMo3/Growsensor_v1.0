@@ -10,6 +10,7 @@
 - Hotfix v0.2.6 (ungetestet): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
 - Hotfix v0.2.6 (ungetestet): Mehr X-Achsen-Ticks mit automatischem Skip, gepufferte Y-Achsen (sichtbare Ein-Punkt-Linien), Hover-Charts über die ganze Kachel sowie Farb-Dropdowns pro Gerät (Palette in `localStorage` gespeichert) plus Legende mit Geräte-ID.
 - Hotfix v0.2.6 (ungetestet): MH-Z14 (CO₂) zur Sensor-Vorlage hinzugefügt (UART, nutzt den MH-Z19-Treiberpfad).
+- Hotfix v0.2.6 (ungetestet): VPD-Heatmap rendert bei Faktor-/Zielwert-Änderungen komplett neu, sodass Zielband (grün) und Heatmap-Overlay synchron bleiben.
 
 Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet Sensordaten, PPFD/VPD-Auswertung, Wi-Fi-Setup und ein Partner/Supporter-Modul. Keine Aktorsteuerung vorhanden.
 

@@ -10,6 +10,7 @@
 - Hotfix v0.2.6 (untested): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
 - Hotfix v0.2.6 (untested): Time-axis tick strategy with more (auto-skipped) labels, padded Y-axes so single values are visible, full-height hover charts, and per-device color dropdowns (persisted in `localStorage`) with legends showing the device ID.
 - Hotfix v0.2.6 (untested): MH-Z14 (CO₂) added to the sensor templates (UART, mapped to the MH-Z19 driver path).
+- Hotfix v0.2.6 (untested): VPD heatmap fully re-renders when VPD factors/targets change so the green target zone and heatmap overlay stay in sync.
 
 Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
