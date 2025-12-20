@@ -69,7 +69,10 @@ static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
 static constexpr unsigned long CLOUD_HEALTH_WINDOW_MS = 60000;
 static constexpr unsigned long CLOUD_PING_INTERVAL_MS = 30000;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
-static const char *FIRMWARE_VERSION = "v0.3.2a";
+static constexpr unsigned long CLOUD_LOG_FLUSH_INTERVAL_MS = 30000;
+static constexpr size_t CLOUD_LOG_CAPACITY = 120;
+static constexpr size_t CLOUD_LOG_FLUSH_LINES = 24;
+static const char *FIRMWARE_VERSION = "v0.3.3";
 static const char *CLOUD_ROOT_FOLDER = "GrowSensor";
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
@@ -312,6 +315,7 @@ struct CloudConfig {
   bool enabled = false;
   bool recording = false;
   bool useTls = true;
+  bool persistCredentials = true;
   uint8_t retentionMonths = 1;
 };
 
@@ -382,10 +386,16 @@ String logBuffer[LOG_CAPACITY];
 size_t logStart = 0;
 size_t logCount = 0;
 bool logPruneNoted = false;
+String cloudLogBuffer[CLOUD_LOG_CAPACITY];
+size_t cloudLogStart = 0;
+size_t cloudLogCount = 0;
+unsigned long lastCloudLogFlushMs = 0;
+uint32_t cloudLogSeq = 0;
 
 // Forward declarations
 void pruneLogsIfLowMemory(bool allowNotice = true);
 void appendLogLine(const String &line);
+void logEvent(const String &msg, const String &level = "info", const String &source = "system");
 String deviceId();
 String buildCloudUrl(const String &path);
 bool ensureCollection(const String &url);
@@ -599,6 +609,14 @@ bool cloudHealthOk() {
   return millis() - lastCloudOkMs <= CLOUD_HEALTH_WINDOW_MS;
 }
 
+bool cloudStorageActive() {
+  return cloudConfig.enabled && cloudConfig.recording && cloudHealthOk();
+}
+
+bool cloudLoggingActive() {
+  return cloudConfig.enabled && cloudHealthOk();
+}
+
 void refreshStorageMode(const String &reason = "") {
   bool runtimeActive = cloudConfig.enabled && cloudConfig.baseUrl.length() > 0;
   StorageMode next = StorageMode::LOCAL_ONLY;
@@ -642,6 +660,7 @@ void markCloudFailure(const String &msg) {
   cloudStatus.connected = false;
   cloudStatus.lastStateReason = msg;
   cloudStatus.lastStateChangeMs = currentEpochMs();
+  logEvent("Cloud error: " + msg, "error", "cloud");
   refreshStorageMode(msg);
 }
 
@@ -652,9 +671,16 @@ void saveCloudConfig(const String &reason = "config save") {
   if (cloudConfig.baseUrl.startsWith("http://")) cloudConfig.useTls = false;
   else if (cloudConfig.baseUrl.startsWith("https://")) cloudConfig.useTls = true;
   prefsCloud.begin("cloud", false);
-  prefsCloud.putString("base", cloudConfig.baseUrl);
-  prefsCloud.putString("user", cloudConfig.username);
-  prefsCloud.putString("pass", cloudConfig.password);
+  prefsCloud.putBool("persist", cloudConfig.persistCredentials);
+  if (cloudConfig.persistCredentials) {
+    prefsCloud.putString("base", cloudConfig.baseUrl);
+    prefsCloud.putString("user", cloudConfig.username);
+    prefsCloud.putString("pass", cloudConfig.password);
+  } else {
+    prefsCloud.remove("base");
+    prefsCloud.remove("user");
+    prefsCloud.remove("pass");
+  }
   prefsCloud.putBool("enabled", cloudConfig.enabled);
   prefsCloud.putBool("recording", cloudConfig.recording);
   prefsCloud.putBool("tls", cloudConfig.useTls);
@@ -672,9 +698,17 @@ void saveCloudConfig(const String &reason = "config save") {
 
 void loadCloudConfig() {
   prefsCloud.begin("cloud", true);
-  cloudConfig.baseUrl = prefsCloud.getString("base", "");
-  cloudConfig.username = prefsCloud.getString("user", "");
-  cloudConfig.password = prefsCloud.getString("pass", "");
+  bool persist = prefsCloud.getBool("persist", true);
+  cloudConfig.persistCredentials = persist;
+  if (cloudConfig.persistCredentials) {
+    cloudConfig.baseUrl = prefsCloud.getString("base", "");
+    cloudConfig.username = prefsCloud.getString("user", "");
+    cloudConfig.password = prefsCloud.getString("pass", "");
+  } else {
+    cloudConfig.baseUrl = "";
+    cloudConfig.username = "";
+    cloudConfig.password = "";
+  }
   cloudConfig.enabled = prefsCloud.getBool("enabled", false);
   cloudConfig.recording = prefsCloud.getBool("recording", false);
   cloudConfig.useTls = prefsCloud.getBool("tls", true);
@@ -946,7 +980,9 @@ bool cloudEnsureFolders(const String &dayKey) {
   String dailyPath = deviceRoot + "/daily";
   String samplesPath = deviceRoot + "/samples";
   String samplesDayPath = dayKey.length() > 0 ? samplesPath + "/" + dayKey : "";
-  const String paths[] = {baseRoot, deviceRoot, metaPath, dailyPath, samplesPath, samplesDayPath, monthPath};
+  String logsPath = deviceRoot + "/logs";
+  String logsChunksPath = logsPath + "/chunks";
+  const String paths[] = {baseRoot, deviceRoot, metaPath, dailyPath, samplesPath, samplesDayPath, monthPath, logsPath, logsChunksPath};
   bool ok = true;
   for (const auto &p : paths) {
     if (p.length() == 0) continue;
@@ -1131,8 +1167,10 @@ void finalizeDayAndQueue(const String &dayKey) {
   if (storageMode == StorageMode::LOCAL_ONLY) {
     persistDailyHistory();
   }
-  String payload = serializeDailyPayload(dayKey);
-  enqueueDailyJob(dayKey, payload);
+  if (cloudLoggingActive()) {
+    String payload = serializeDailyPayload(dayKey);
+    enqueueDailyJob(dayKey, payload);
+  }
 }
 
 void addPoint(HistoryPoint *buffer, size_t capacity, size_t &start, size_t &count, uint64_t ts, float value) {
@@ -1276,6 +1314,25 @@ void appendLogLine(const String &line) {
   logBuffer[idx] = line;
 }
 
+void appendCloudLogLine(const String &line) {
+  size_t idx = (cloudLogStart + cloudLogCount) % CLOUD_LOG_CAPACITY;
+  if (cloudLogCount == CLOUD_LOG_CAPACITY) {
+    cloudLogStart = (cloudLogStart + 1) % CLOUD_LOG_CAPACITY;
+    idx = (cloudLogStart + cloudLogCount - 1) % CLOUD_LOG_CAPACITY;
+  } else {
+    cloudLogCount++;
+  }
+  cloudLogBuffer[idx] = line;
+}
+
+String sanitizeLogField(const String &value) {
+  String out = value;
+  out.replace("\n", " ");
+  out.replace("\r", " ");
+  out.trim();
+  return out;
+}
+
 void pruneLogsIfLowMemory(bool allowNotice) {
   static bool pruning = false;
   if (pruning)
@@ -1307,7 +1364,7 @@ void pruneLogsIfLowMemory(bool allowNotice) {
   pruning = false;
 }
 
-void logEvent(const String &msg) {
+void logEvent(const String &msg, const String &level, const String &source) {
   pruneLogsIfLowMemory(true);
   String line;
   line.reserve(msg.length() + 12);
@@ -1315,6 +1372,40 @@ void logEvent(const String &msg) {
   line += "s: ";
   line += msg;
   appendLogLine(line);
+
+  if (cloudLoggingActive()) {
+    String iso = isTimeSynced() ? isoTimestamp(currentEpochMs()) : "";
+    if (iso.length() == 0) iso = String(millis() / 1000) + "s";
+    String cloudLine = iso + " | " + sanitizeLogField(level) + " | " + sanitizeLogField(source) + " | " + sanitizeLogField(msg);
+    appendCloudLogLine(cloudLine);
+  }
+}
+
+void flushCloudLogs(bool force = false) {
+  if (!cloudLoggingActive()) return;
+  if (cloudLogCount == 0) return;
+  unsigned long now = millis();
+  if (!force && (cloudLogCount < CLOUD_LOG_FLUSH_LINES) && (lastCloudLogFlushMs != 0) && (now - lastCloudLogFlushMs < CLOUD_LOG_FLUSH_INTERVAL_MS)) {
+    return;
+  }
+  uint64_t nowEpoch = currentEpochMs();
+  String dayKey = currentDayKey();
+  if (dayKey.length() == 0) dayKey = "unsynced";
+  size_t count = cloudLogCount;
+  String payload;
+  payload.reserve(count * 64);
+  for (size_t i = 0; i < count; i++) {
+    size_t idx = (cloudLogStart + i) % CLOUD_LOG_CAPACITY;
+    payload += cloudLogBuffer[idx];
+    if (i < count - 1) payload += "\n";
+  }
+  cloudLogStart = 0;
+  cloudLogCount = 0;
+  lastCloudLogFlushMs = now;
+  cloudLogSeq++;
+  String stamp = fileSafeTimestamp(nowEpoch);
+  String path = cloudDeviceRoot() + "/logs/chunks/log_" + stamp + "_" + String(cloudLogSeq) + ".log";
+  enqueueCloudJob(path, payload, dayKey, "logs", "text/plain", false);
 }
 
 String buildCloudUrl(const String &path) {
@@ -2188,7 +2279,7 @@ void readSensors() {
     accumulateDaily(metricIndex("vpd"), latest.vpd, sampleDay, sampleHour);
   }
 
-  if (storageMode == StorageMode::CLOUD_PRIMARY && sampleDay != "unsynced") {
+  if (cloudStorageActive() && sampleDay != "unsynced") {
     if (lastDailyCheckpointMs == 0 || millis() - lastDailyCheckpointMs >= DAILY_CHECKPOINT_MS) {
       String checkpointPayload = serializeDailyPayload(sampleDay);
       enqueueDailyJob(sampleDay, checkpointPayload);
@@ -2224,7 +2315,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.3.2</title>
+    <title>GrowSensor v0.3.3</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
@@ -2344,6 +2435,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .cloud-warning { background:#7c2d12; color:#fecdd3; padding:10px; border-radius:10px; border:1px solid #b45309; }
       .cloud-status { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-top:8px; }
       .cloud-pill { background:#0b1220; border:1px solid #1f2937; border-radius:10px; padding:8px; display:flex; justify-content:space-between; align-items:center; }
+      .cloud-credentials { margin-top:10px; border:1px solid #1f2937; border-radius:12px; padding:10px; background:#0b1220; }
+      .cloud-credentials.collapsed .cloud-credentials-body { display:none; }
+      .cloud-credentials-header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
       .error-banner { position: sticky; top: 0; z-index: 90; background: #7f1d1d; color: #fecdd3; padding: 8px 12px; border-bottom: 1px solid #b91c1c; display: none; align-items: center; gap: 12px; font-size: 0.9rem; }
       .error-banner ul { margin: 0; padding-left: 18px; }
       .error-banner button { background: transparent; border: 1px solid #fca5a5; color: #fecdd3; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -2382,7 +2476,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.3.2</h1>
+          <h1>GrowSensor – v0.3.3</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -2598,7 +2692,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           </label>
         </div>
         <div id="cloudChartNotice" class="status err" style="display:none; align-items:center; gap:10px; margin-top:4px;">
-          Cloud offline — zeige lokale 24h
+          <span id="cloudChartNoticeText">Cloud offline — zeige lokale 24h</span>
           <button id="cloudRetry" class="ghost" style="width:auto; padding:6px 10px; margin:0;">Retry</button>
         </div>
         <div class="chart"><canvas id="chart"></canvas></div>
@@ -2704,24 +2798,34 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             <div>
               <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudEnabled" style="width:auto;"> Cloud Logging aktivieren</label>
               <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="cloudHttpToggle" style="width:auto;"> Nextcloud lokal (HTTP, kein TLS)</label>
-              <label for="cloudUrl">WebDAV Base URL</label>
-              <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/GrowSensor/" />
-              <label for="cloudUser">Username</label>
-              <input id="cloudUser" placeholder="Nextcloud Username" />
-              <label for="cloudPass">App-Passwort / Token</label>
-              <input id="cloudPass" type="password" placeholder="App-Passwort" />
-              <label for="cloudRetention">Retention (Monate)</label>
-              <select id="cloudRetention">
-                <option value="1">1 Monat</option>
-                <option value="2">2 Monate</option>
-                <option value="3">3 Monate</option>
-                <option value="4">4 Monate</option>
-              </select>
-              <div class="row" style="margin-top:10px;">
-                <button id="cloudSave">Speichern</button>
-                <button id="cloudTest" class="ghost">Sende Test</button>
+              <div class="cloud-credentials" id="cloudCredentials">
+                <div class="cloud-credentials-header">
+                  <strong>Login-Daten</strong>
+                  <button id="cloudEdit" class="ghost" style="width:auto;">Edit</button>
+                </div>
+                <div class="cloud-credentials-body" id="cloudCredentialsBody">
+                  <label for="cloudUrl">WebDAV Base URL</label>
+                  <input id="cloudUrl" placeholder="http://host/remote.php/dav/files/user/GrowSensor/" />
+                  <label for="cloudUser">Username</label>
+                  <input id="cloudUser" placeholder="Nextcloud Username" />
+                  <label for="cloudPass">App-Passwort / Token</label>
+                  <input id="cloudPass" type="password" placeholder="App-Passwort" />
+                  <label for="cloudRetention">Retention (Monate)</label>
+                  <select id="cloudRetention">
+                    <option value="1">1 Monat</option>
+                    <option value="2">2 Monate</option>
+                    <option value="3">3 Monate</option>
+                    <option value="4">4 Monate</option>
+                  </select>
+                  <label style="display:flex;align-items:center;gap:8px;margin-top:10px;"><input type="checkbox" id="cloudPersist" style="width:auto;"> Login-Daten dauerhaft speichern</label>
+                  <div class="row" style="margin-top:10px;">
+                    <button id="cloudSave">Speichern</button>
+                    <button id="cloudTest" class="ghost">Sende Test</button>
+                  </div>
+                  <button id="cloudForget" class="ghost" style="margin-top:6px;">Forget credentials</button>
+                </div>
               </div>
-              <div class="row" style="margin-top:6px;">
+              <div class="row" style="margin-top:10px;">
                 <button id="cloudStart">Start Recording</button>
                 <button id="cloudStop" class="ghost">Stop Recording</button>
               </div>
@@ -2772,7 +2876,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.3.2 (experimental) • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.3.3 (experimental) • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -3089,6 +3193,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const cloudUserInput = getEl('cloudUser');
       const cloudPassInput = getEl('cloudPass');
       const cloudRetentionSelect = getEl('cloudRetention');
+      const cloudPersistToggle = getEl('cloudPersist');
+      const cloudCredentials = getEl('cloudCredentials');
+      const cloudCredentialsBody = getEl('cloudCredentialsBody');
+      const cloudEditBtn = getEl('cloudEdit');
+      const cloudForgetBtn = getEl('cloudForget');
       const cloudStatusMsg = getEl('cloudStatusMsg');
       const cloudHttpWarning = getEl('cloudHttpWarning');
       const cloudEnabledState = getEl('cloudEnabledState');
@@ -3104,12 +3213,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const cloudLastError = getEl('cloudLastError');
       const cloudPathHint = getEl('cloudPathHint');
       const cloudChartNotice = getEl('cloudChartNotice');
+      const cloudChartNoticeText = getEl('cloudChartNoticeText');
       const cloudRetryBtn = getEl('cloudRetry');
       let detailMetric = null;
       let detailMode = 'live';
       let detailVpdView = 'heatmap';
       let clickDebug = false;
       let lastVpdTargets = { low: null, high: null };
+      let cloudCredentialsOverride = false;
       let wifiFormOpen = false;
       let reconnectTimer = null;
       let reconnectDeadline = 0;
@@ -3127,7 +3238,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       };
       const metricDataState = {};
       metrics.forEach(m => metricDataState[m] = { ever:false, last:0 });
-      const cloudState = { enabled:false, runtime:false, recording:false, useTls:true, connected:false, lastUpload:0, lastPing:0, lastFailure:0, lastTest:0, queue:0, failures:0, lastError:'', lastPath:'', lastReason:'', storageMode:'local_only', deviceFolder:'' };
+      const cloudState = { enabled:false, runtime:false, recording:false, useTls:true, connected:false, persist:true, lastUpload:0, lastPing:0, lastFailure:0, lastTest:0, queue:0, failures:0, lastError:'', lastPath:'', lastReason:'', storageMode:'local_only', deviceFolder:'' };
       const TREND_CONFIG = {
         temp: { window: 8, minDelta: 0.08, strong: 0.35, decimals: 1 },
         humidity: { window: 8, minDelta: 0.4, strong: 1.5, decimals: 1 },
@@ -3711,6 +3822,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return 'live';
       }
 
+      function formatDayKey(date) {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      }
+
+      function dayRangeForDays(days) {
+        const end = new Date();
+        const start = new Date();
+        start.setDate(end.getDate() - (days - 1));
+        return { from: formatDayKey(start), to: formatDayKey(end) };
+      }
+
       function pushBucket(list, cap, point) {
         if (!point) return;
         list.push(point);
@@ -4274,7 +4399,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const normalized = normalizeMode(mode);
         const key = `${metric}-${normalized}`;
         if (!detailCache[key]) detailCache[key] = [];
-        if ((normalized === '30d' || normalized === '90d' || normalized === '120d') && !(cloudState.enabled && cloudState.connected)) {
+        if ((normalized === '30d' || normalized === '90d' || normalized === '120d') && !(cloudState.enabled && cloudState.connected && cloudState.recording)) {
           detailCache[key] = [];
           return detailCache[key];
         }
@@ -4282,7 +4407,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           let mapped = [];
           if (normalized === '30d' || normalized === '90d' || normalized === '120d') {
             const days = normalized === '30d' ? 30 : (normalized === '90d' ? 90 : 120);
-            const data = await fetchJson(`/api/history/daily?metric=${metric}&days=${days}`);
+            const range = dayRangeForDays(days);
+            const data = await fetchJson(`/api/cloud/daily?sensor=${metric}&from=${range.from}&to=${range.to}`);
             mapped = (data.points || []).map(p => {
               const ts = parseMs(p[0]);
               const valObj = p[1] || {};
@@ -4303,7 +4429,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           detailCache[key] = mapped;
         } catch (err) {
           console.warn('history error', err);
-          pushError(`API /api/history failed: ${err.message}`);
+          const prefix = (normalized === '30d' || normalized === '90d' || normalized === '120d') ? 'API /api/cloud/daily failed' : 'API /api/history failed';
+          pushError(`${prefix}: ${err.message}`);
           detailCache[key] = [];
         }
         return detailCache[key];
@@ -5298,6 +5425,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         cloudState.runtime = data.runtime_enabled === undefined ? cloudState.runtime : flag(data.runtime_enabled);
         cloudState.recording = data.recording === undefined ? cloudState.recording : flag(data.recording);
         cloudState.useTls = data.use_tls === undefined ? cloudState.useTls : flag(data.use_tls);
+        cloudState.persist = data.persist_credentials === undefined ? cloudState.persist : flag(data.persist_credentials, true);
         cloudState.storageMode = typeof data.storage_mode === 'string' ? data.storage_mode : cloudState.storageMode;
         cloudState.connected = flag(data.connected) || cloudState.storageMode === 'cloud_primary';
         const lastUploadVal = parseMs(data.last_upload_ms);
@@ -5325,8 +5453,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudLastUpload) {
           const stamp = cloudState.lastUpload || cloudState.lastTest || cloudState.lastPing;
           if (stamp) {
+            const stampDate = new Date(stamp);
             const secs = Math.round((Date.now() - stamp) / 1000);
-            cloudLastUpload.textContent = secs < 5 ? 'gerade eben' : `${secs}s ago`;
+            const age = secs < 5 ? 'gerade eben' : `${secs}s ago`;
+            cloudLastUpload.textContent = `${stampDate.toLocaleString()} (${age})`;
           } else {
             cloudLastUpload.textContent = '–';
           }
@@ -5344,14 +5474,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const httpMode = cloudState.useTls === false || (cloudUrlInput?.value || '').startsWith('http://');
         if (cloudHttpToggle) cloudHttpToggle.checked = httpMode;
         if (cloudHttpWarning) cloudHttpWarning.style.display = httpMode ? 'block' : 'none';
-        const showLongRanges = cloudState.enabled && cloudState.connected;
-        const offline = cloudState.enabled && !cloudState.connected;
-        if (cloudChartNotice) cloudChartNotice.style.display = offline ? 'flex' : 'none';
-        if (cloudRetryBtn) cloudRetryBtn.disabled = !offline;
-        if (cloudStatusMsg && offline) {
-          cloudStatusMsg.textContent = 'Cloud offline — zeige lokale 24h';
+        const showLongRanges = cloudState.enabled && cloudState.connected && cloudState.recording;
+        const longRangeBlocked = cloudState.enabled && (!cloudState.connected || !cloudState.recording);
+        if (cloudChartNotice) {
+          cloudChartNotice.style.display = longRangeBlocked ? 'flex' : 'none';
+          if (longRangeBlocked) {
+            const reason = !cloudState.connected ? 'Cloud offline' : 'Recording inaktiv';
+            if (cloudChartNoticeText) cloudChartNoticeText.textContent = `${reason} — zeige lokale 24h`;
+          }
+        }
+        if (cloudRetryBtn) cloudRetryBtn.disabled = !(cloudState.enabled && !cloudState.connected);
+        if (cloudStatusMsg && longRangeBlocked) {
+          const reason = !cloudState.connected ? 'Cloud offline' : 'Recording inaktiv';
+          cloudStatusMsg.textContent = `${reason} — zeige lokale 24h`;
           cloudStatusMsg.className = 'status err';
-        } else if (cloudStatusMsg && !offline && cloudStatusMsg.textContent.includes('Cloud offline')) {
+        } else if (cloudStatusMsg && !longRangeBlocked && (cloudStatusMsg.textContent.includes('Cloud offline') || cloudStatusMsg.textContent.includes('Recording inaktiv'))) {
           cloudStatusMsg.textContent = '';
           cloudStatusMsg.className = 'status';
         }
@@ -5361,6 +5498,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (chartRangeSelect) chartRangeSelect.value = '24h';
           drawChart();
         }
+        if (!cloudState.connected || !cloudState.enabled) cloudCredentialsOverride = false;
+        const shouldCollapse = cloudState.connected && !cloudCredentialsOverride;
+        if (cloudCredentials) {
+          cloudCredentials.classList.toggle('collapsed', shouldCollapse);
+        }
+        if (cloudCredentialsBody) cloudCredentialsBody.style.display = cloudCredentials?.classList.contains('collapsed') ? 'none' : 'block';
+        if (cloudEditBtn) cloudEditBtn.style.display = cloudCredentials?.classList.contains('collapsed') ? 'inline-flex' : 'none';
       }
 
       function renderCloudForm(data = {}) {
@@ -5369,6 +5513,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudUserInput && typeof data.username === 'string') cloudUserInput.value = data.username;
         if (cloudRetentionSelect && data.retention) cloudRetentionSelect.value = String(data.retention);
         if (cloudPassInput) cloudPassInput.value = '';
+        if (cloudPersistToggle) cloudPersistToggle.checked = data.persist_credentials !== undefined ? flag(data.persist_credentials, true) : true;
         const usesHttp = (cloudUrlInput?.value || '').startsWith('http://') || (data.use_tls === 0 || data.use_tls === false);
         if (cloudHttpToggle) cloudHttpToggle.checked = usesHttp;
         if (cloudHttpWarning) cloudHttpWarning.style.display = usesHttp ? 'block' : 'none';
@@ -5391,6 +5536,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (cloudUrlInput && !enabledOnly) body.set('base_url', urlVal);
         if (cloudUserInput && !enabledOnly) body.set('username', cloudUserInput.value || '');
         if (cloudPassInput && !enabledOnly && cloudPassInput.value) body.set('password', cloudPassInput.value);
+        if (cloudPersistToggle && !enabledOnly) body.set('persist_credentials', cloudPersistToggle.checked ? '1' : '0');
         const enabledVal = cloudEnabledToggle?.checked ? '1' : '0';
         body.set('enabled', enabledVal);
         body.set('use_tls', cloudHttpToggle?.checked ? '0' : '1');
@@ -5444,6 +5590,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
       }
 
+      async function forgetCloudCredentials() {
+        if (!confirm('Cloud-Credentials wirklich löschen?')) return;
+        const body = new URLSearchParams();
+        body.set('action', 'forget');
+        try {
+          await authedFetch('/api/cloud', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
+          if (cloudUrlInput) cloudUrlInput.value = '';
+          if (cloudUserInput) cloudUserInput.value = '';
+          if (cloudPassInput) cloudPassInput.value = '';
+          if (cloudPersistToggle) cloudPersistToggle.checked = false;
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Credentials gelöscht'; cloudStatusMsg.className = 'status ok'; }
+        } catch (err) {
+          if (cloudStatusMsg) { cloudStatusMsg.textContent = 'Löschen fehlgeschlagen'; cloudStatusMsg.className = 'status err'; }
+        }
+        fetchCloudStatus();
+      }
+
       function normalizeHttpUi() {
         const wantsHttp = cloudHttpToggle?.checked === true;
         if (!cloudUrlInput) {
@@ -5486,6 +5649,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (cloudEnabledToggle) cloudEnabledToggle.addEventListener('change', () => saveCloudConfig(true));
       if (cloudHttpToggle) cloudHttpToggle.addEventListener('change', () => normalizeHttpUi());
       if (cloudUrlInput) cloudUrlInput.addEventListener('input', () => syncHttpToggleFromUrl());
+      if (cloudEditBtn) cloudEditBtn.addEventListener('click', () => {
+        cloudCredentialsOverride = true;
+        if (cloudCredentials) cloudCredentials.classList.remove('collapsed');
+        if (cloudCredentialsBody) cloudCredentialsBody.style.display = 'block';
+        if (cloudEditBtn) cloudEditBtn.style.display = 'none';
+      });
+      if (cloudForgetBtn) cloudForgetBtn.addEventListener('click', () => forgetCloudCredentials());
 
       function setDevVisible() {
         document.querySelectorAll('.dev-only').forEach(el => el.disabled = !devMode);
@@ -5847,8 +6017,34 @@ std::vector<String> recentDayKeys(int days) {
   return keys;
 }
 
+String formatDayKey(time_t ts) {
+  struct tm t;
+  if (localtime_r(&ts, &t) == nullptr) return "";
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+  return String(buf);
+}
+
+std::vector<String> dayKeysBetween(const String &from, const String &to) {
+  std::vector<String> keys;
+  if (!isTimeSynced()) return keys;
+  time_t start = parseDayKey(from);
+  time_t end = parseDayKey(to);
+  if (start == 0 || end == 0 || start > end) return keys;
+  const time_t daySec = 24 * 60 * 60;
+  for (time_t t = start; t <= end; t += daySec) {
+    String key = formatDayKey(t);
+    if (key.length() > 0) keys.push_back(key);
+  }
+  return keys;
+}
+
 void handleDailyHistory() {
   if (!enforceAuth()) return;
+  if (!cloudStorageActive()) {
+    server.send(403, "text/plain", "cloud inactive");
+    return;
+  }
   String metric = server.hasArg("metric") ? server.arg("metric") : "";
   int days = server.hasArg("days") ? server.arg("days").toInt() : 30;
   if (days < 1) days = 1;
@@ -5857,7 +6053,7 @@ void handleDailyHistory() {
   int idx = metricIndex(metric);
   if (idx < 0) { server.send(400, "text/plain", "invalid metric"); return; }
   pruneLogsIfLowMemory(false);
-  bool cloudOk = cloudConfig.enabled && cloudHealthOk();
+  bool cloudOk = cloudStorageActive();
   std::vector<DailyPoint> points;
   DAILY_HISTORY[idx].clear();
   if (cloudOk) {
@@ -5893,6 +6089,66 @@ void handleDailyHistory() {
   server.send(200, "application/json", json);
 }
 
+void handleCloudDaily() {
+  if (!enforceAuth()) return;
+  if (!cloudStorageActive()) {
+    server.send(403, "text/plain", "cloud inactive");
+    return;
+  }
+  String sensor = server.hasArg("sensor") ? server.arg("sensor") : "";
+  if (sensor.length() == 0 && server.hasArg("metric")) sensor = server.arg("metric");
+  String from = server.hasArg("from") ? server.arg("from") : "";
+  String to = server.hasArg("to") ? server.arg("to") : "";
+  if (sensor.length() == 0 || from.length() == 0 || to.length() == 0) {
+    server.send(400, "text/plain", "missing sensor/from/to");
+    return;
+  }
+  int idx = metricIndex(sensor);
+  if (idx < 0) {
+    server.send(400, "text/plain", "invalid sensor");
+    return;
+  }
+  static String lastQuery;
+  static String lastResponse;
+  static unsigned long lastQueryAt = 0;
+  String queryKey = sensor + "|" + from + "|" + to;
+  unsigned long now = millis();
+  if (queryKey == lastQuery && lastResponse.length() > 0 && now - lastQueryAt < 20000) {
+    server.send(200, "application/json", lastResponse);
+    return;
+  }
+  auto keys = dayKeysBetween(from, to);
+  std::vector<DailyPoint> points;
+  points.reserve(keys.size());
+  for (const auto &k : keys) {
+    DailyPoint p;
+    if (fetchCloudDailyPoint(k, sensor, p)) {
+      points.push_back(p);
+    }
+  }
+  String json;
+  json.reserve(256 + points.size() * 64);
+  json = "{\"sensor\":\"" + sensor + "\",\"points\":[";
+  bool first = true;
+  for (const auto &p : points) {
+    if (p.dayKey.length() == 0 || p.count == 0) continue;
+    time_t ts = parseDayKey(p.dayKey);
+    if (!first) json += ",";
+    first = false;
+    json += "[" + String((unsigned long long)ts * 1000ULL) + ",";
+    json += "{\"avg\":" + String((double)p.avg, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"min\":" + String((double)p.min, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"max\":" + String((double)p.max, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"last\":" + String((double)p.last, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "\"count\":" + String(p.count) + "}]";
+  }
+  json += "],\"time_synced\":" + String(isTimeSynced() ? 1 : 0) + ",\"cloud\":1}";
+  lastQuery = queryKey;
+  lastResponse = json;
+  lastQueryAt = now;
+  server.send(200, "application/json", json);
+}
+
 void handleCloudTest() {
   if (!enforceAuth()) return;
   int httpCode = 0;
@@ -5922,6 +6178,7 @@ void handleCloud() {
     doc["base_url"] = cloudConfig.baseUrl;
     doc["username"] = cloudConfig.username;
     doc["use_tls"] = cloudConfig.useTls;
+    doc["persist_credentials"] = cloudConfig.persistCredentials;
     doc["retention"] = cloudConfig.retentionMonths;
     doc["connected"] = cloudStatus.connected;
     doc["last_upload_ms"] = (uint64_t)cloudStatus.lastUploadMs;
@@ -5952,12 +6209,22 @@ void handleCloud() {
     if (server.hasArg("enabled")) cloudConfig.enabled = server.arg("enabled") == "1";
     if (server.hasArg("recording")) cloudConfig.recording = server.arg("recording") == "1";
     if (server.hasArg("use_tls")) cloudConfig.useTls = !(server.arg("use_tls") == "0");
+    if (server.hasArg("persist_credentials")) cloudConfig.persistCredentials = server.arg("persist_credentials") == "1";
     if (server.hasArg("retention")) {
       int r = server.arg("retention").toInt();
       cloudConfig.retentionMonths = (uint8_t)std::max(1, std::min(4, r));
     }
     saveCloudConfig("ui save");
     server.send(200, "text/plain", "saved");
+    return;
+  }
+  if (action == "forget") {
+    cloudConfig.baseUrl = "";
+    cloudConfig.username = "";
+    cloudConfig.password = "";
+    cloudConfig.persistCredentials = false;
+    saveCloudConfig("ui forget");
+    server.send(200, "application/json", "{\"forgot\":1}");
     return;
   }
   if (action == "test") {
@@ -6453,6 +6720,7 @@ void setupServer() {
   server.on("/api/logs", HTTP_GET, handleLogs);
   server.on("/api/history", HTTP_GET, handleHistory);
   server.on("/api/history/daily", HTTP_GET, handleDailyHistory);
+  server.on("/api/cloud/daily", HTTP_GET, handleCloudDaily);
    server.on("/api/partners", HTTP_GET, handlePartners);
    server.on("/api/partners", HTTP_POST, handlePartners);
   server.onNotFound(handleNotFound);
@@ -6488,6 +6756,7 @@ void loop() {
   maintainTimeSync();
   maintainCloudHealth();
   tickCloudRecording();
+  flushCloudLogs();
   processCloudQueue();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {

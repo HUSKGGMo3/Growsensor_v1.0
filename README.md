@@ -1,6 +1,13 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.2 (experimental / untested)**
+**Current release: v0.3.3 (experimental / untested)**
+
+### Patch v0.3.3 (experimental, Cloud-first storage + cloud-gated long charts)
+- Cloud UI now exposes connected/enabled/recording states, last upload/error timestamps, and collapses credentials behind an Edit toggle once connected. Optional “Login-Daten dauerhaft speichern” keeps base URL/user/app password across reboots; “Forget credentials” clears only cloud keys.
+- Cloud-first storage mode: when `cloudStorageActive` (enabled + connected + recording) the device keeps only RAM buffers and cloud upload queues, while offline fallback retains local 24h history.
+- Long-range charts (1–4 months) are cloud-gated in both UI and API; `/api/cloud/daily` proxies daily aggregates with short RAM caching and returns 403 when cloud is inactive.
+- Cloud logs are streamed to `/GrowSensor/<deviceId>/logs/chunks/` as timestamped chunk files (ISO | level | source | message), avoiding WebDAV append limitations.
+- Daily aggregates remain JSON per day (`/GrowSensor/<deviceId>/daily/YYYY-MM/YYYY-MM-DD.json`) with avg/min/max/last/samples for each metric, and long charts request them via `/api/cloud/daily?sensor=...&from=YYYY-MM-DD&to=YYYY-MM-DD`.
 
 ### Patch v0.3.2 (experimental, Cloud Primary mode)
 - Storage modes (`LOCAL_ONLY`, `CLOUD_PRIMARY`, `LOCAL_FALLBACK`) gate persistence: when the cloud is online the ESP keeps only RAM ring buffers (live/6h/24h) and blocks local history writes, while 15-minute checkpoints upload the active day and daily rollovers queue JSON for the cloud.
