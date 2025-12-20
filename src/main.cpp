@@ -1894,6 +1894,8 @@ String reportAssessment(float tempMin, float tempMax, float vpdAvg, float vpdMin
   return "Klima insgesamt solide mit kleinen Schwankungen";
 }
 
+std::vector<String> dayKeysBetween(const String &from, const String &to);
+
 bool buildGrowReport(String &pathOut, String &payloadOut, String &errorOut) {
   if (!cloudConnected()) {
     errorOut = "cloud inactive";
@@ -3030,7 +3032,15 @@ std::vector<String> dayKeysBetween(const String &from, const String &to) {
   const time_t daySec = 24 * 60 * 60;
   for (time_t t = start; t <= end; t += daySec) {
     String key = formatDayKey(t);
-    if (key.length() > 0) keys.push_back(key);
+    if (key.length() == 0) continue;
+    String path = cloudDailyPath(key);
+    if (path.length() == 0) continue;
+    int code = 0;
+    String url = buildWebDavUrl(path);
+    if (!webdavRequest("HEAD", url, "", nullptr, code, nullptr, CLOUD_TEST_TIMEOUT_MS)) continue;
+    if (code >= 200 && code < 300) {
+      keys.push_back(key);
+    }
   }
   return keys;
 }
