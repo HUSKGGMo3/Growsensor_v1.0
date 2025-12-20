@@ -58,7 +58,7 @@ static constexpr size_t LOG_HEAP_THRESHOLD = 24000;             // prune logs wh
 static constexpr unsigned long STALL_LIMIT_MS = 4UL * 60UL * 60UL * 1000UL; // 4h stall watchdog
 static constexpr unsigned long TIME_SYNC_RETRY_MS = 60000;      // retry NTP every 60s until synced
 static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offset every 5 minutes
-static constexpr time_t TIME_VALID_AFTER = 1672531200;          // 2023-01-01 UTC safeguard
+static constexpr time_t TIME_VALID_AFTER = 1700000000;          // ~2023-11-14 UTC safeguard
 static constexpr unsigned long CLOUD_RETRY_MS = 15000;
 static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
 
@@ -68,9 +68,14 @@ static const char *NTP_SERVER_3 = "time.google.com";
 
 String timezoneName = "Europe/Berlin";
 bool timeSynced = false;
-uint64_t epochOffsetMs = 0; // epoch_ms - millis() for stable mapping
+uint64_t bootEpochMs = 0;      // epoch_ms - millis() baseline after sync
+uint32_t bootMillisAtSync = 0; // millis() captured when epoch baseline set
 unsigned long lastTimeSyncAttempt = 0;
 unsigned long lastTimeSyncOk = 0;
+bool isTimeSynced();
+void onTimeSynchronized(uint64_t epochNowMs, uint32_t monotonicNowMs);
+uint64_t mapTimestampToEpochMs(uint32_t monotonicTs);
+uint64_t currentEpochMs();
 // Auth
 // Lux to PPFD conversion factors (approximate for common horticulture spectra)
 enum class LightChannel {
@@ -518,11 +523,8 @@ String dayKeyForEpoch(uint64_t epochMs) {
 }
 
 String currentDayKey() {
-  uint64_t epochMs = currentEpochMs();
-  if (!timeSynced) {
-    epochMs = mapTimestampToEpochMs(millis());
-  }
-  return dayKeyForEpoch(epochMs);
+  if (!isTimeSynced()) return "unsynced";
+  return dayKeyForEpoch(currentEpochMs());
 }
 
 uint16_t retentionDays() {
@@ -1014,15 +1016,34 @@ void applyTimezoneEnv() {
   tzset();
 }
 
+bool isTimeSynced() {
+  time_t now = time(nullptr);
+  if (now < 0) return false;
+  struct tm utcTm;
+  if (gmtime_r(&now, &utcTm) == nullptr) return false;
+  if (now < 1700000000 && (utcTm.tm_year + 1900) < 2024) return false;
+  return true;
+}
+
+void onTimeSynchronized(uint64_t epochNowMs, uint32_t monotonicNowMs) {
+  bool wasSynced = timeSynced;
+  bootMillisAtSync = monotonicNowMs;
+  bootEpochMs = epochNowMs > bootMillisAtSync ? (epochNowMs - bootMillisAtSync) : 0ULL;
+  lastTimeSyncOk = monotonicNowMs;
+  timeSynced = true;
+  if (!wasSynced) {
+    logEvent("Time synced: bootEpochMs baseline updated");
+  }
+}
+
 bool captureTimeOffset() {
   struct timeval tv;
   if (gettimeofday(&tv, nullptr) != 0) return false;
   if (tv.tv_sec < TIME_VALID_AFTER) return false;
+  if (!isTimeSynced()) return false;
   uint64_t nowMs = (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
-  uint64_t mono = millis();
-  epochOffsetMs = nowMs > mono ? (nowMs - mono) : 0;
-  timeSynced = true;
-  lastTimeSyncOk = millis();
+  uint32_t mono = millis();
+  onTimeSynchronized(nowMs, mono);
   return true;
 }
 
@@ -1035,29 +1056,37 @@ void startNtpSync() {
 }
 
 void maintainTimeSync() {
+  unsigned long now = millis();
+  bool currentlySynced = isTimeSynced();
+  if (currentlySynced && !timeSynced) {
+    onTimeSynchronized(currentEpochMs(), now);
+  } else if (!currentlySynced) {
+    timeSynced = false;
+  }
   if (WiFi.status() != WL_CONNECTED)
     return;
-  unsigned long now = millis();
   bool needKick = (!timeSynced && (now - lastTimeSyncAttempt >= TIME_SYNC_RETRY_MS)) || lastTimeSyncAttempt == 0;
   if (needKick) {
     startNtpSync();
   }
   bool shouldRefresh = (!timeSynced && now - lastTimeSyncAttempt >= 1500) || (timeSynced && (now - lastTimeSyncOk >= TIME_SYNC_REFRESH_MS));
   if (shouldRefresh) {
-    bool wasSynced = timeSynced;
-    bool ok = captureTimeOffset();
-    if (ok && !wasSynced) {
-      logEvent("Time synced via NTP");
-    }
+    captureTimeOffset();
   }
 }
 
-uint64_t mapTimestampToEpochMs(uint64_t monotonicTs) {
-  if (!timeSynced) return monotonicTs;
-  return epochOffsetMs + monotonicTs;
+uint64_t mapTimestampToEpochMs(uint32_t monotonicTs) {
+  if (bootEpochMs != 0) return bootEpochMs + monotonicTs;
+  return (uint64_t)monotonicTs;
 }
 
 uint64_t currentEpochMs() {
+  if (isTimeSynced()) {
+    struct timeval tv;
+    if (gettimeofday(&tv, nullptr) == 0) {
+      return (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
+    }
+  }
   return mapTimestampToEpochMs(millis());
 }
 
@@ -1572,7 +1601,7 @@ void readSensors() {
   }
 
   uint64_t sampleTs = currentEpochMs();
-  String sampleDay = dayKeyForEpoch(sampleTs);
+  String sampleDay = isTimeSynced() ? dayKeyForEpoch(sampleTs) : String("unsynced");
   if (activeDayKey.length() == 0) {
     activeDayKey = sampleDay;
   } else if (sampleDay.length() > 0 && sampleDay != activeDayKey) {
@@ -4998,7 +5027,8 @@ void handleTelemetry() {
   bool co2Ok = enableCo2 && co2Health.present && co2Health.healthy && latest.co2ppm > 0 && latest.co2ppm < 5000;
   bool vpdOk = !isnan(latest.vpd);
   unsigned long now = millis();
-  uint64_t epochMs = mapTimestampToEpochMs(now);
+  uint64_t epochMs = currentEpochMs();
+  bool syncedFlag = isTimeSynced();
   auto ageMs = [&](unsigned long t) -> unsigned long { return t == 0 ? 0UL : (now - t); };
   auto sensorLabel = [](String v) { v.toUpperCase(); return v; };
   String luxDev = sensorLabel(findSensor("lux") ? findSensor("lux")->type : "BH1750");
@@ -5035,7 +5065,7 @@ void handleTelemetry() {
            lightHealth.present ? 1 : 0, co2Health.present ? 1 : 0, climateHealth.present ? 1 : 0, leafHealth.present ? 1 : 0,
            enableLight ? 1 : 0, enableCo2 ? 1 : 0, enableClimate ? 1 : 0, enableLeaf ? 1 : 0,
            ageMs(lightHealth.lastUpdate), ageMs(co2Health.lastUpdate), ageMs(climateHealth.lastUpdate), ageMs(leafHealth.lastUpdate),
-           now, now, (unsigned long long)epochMs, timeSynced ? 1 : 0, timezoneName.c_str(),
+           now, now, (unsigned long long)epochMs, syncedFlag ? 1 : 0, timezoneName.c_str(),
            luxDev.c_str(), climateDev.c_str(), leafDev.c_str(), co2Dev.c_str(),
            sampleTsFor("lux"), sampleTsFor("co2"), sampleTsFor("temp"), sampleTsFor("humidity"), sampleTsFor("leaf"), sampleTsFor("vpd"),
            everFor("lux"), everFor("co2"), everFor("temp"), everFor("humidity"), everFor("leaf"), everFor("vpd"));
@@ -5130,7 +5160,7 @@ void handleHistory() {
     }
   }
 
-  bool syncedFlag = timeSynced;
+  bool syncedFlag = isTimeSynced();
   json += "],\"time_synced\":" + String(syncedFlag ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(syncedFlag ? currentEpochMs() : 0)) + "}";
   server.send(200, "application/json", json);
 }
@@ -5185,7 +5215,7 @@ void handleDailyHistory() {
     p.last = agg.last;
     appendPoint(p);
   }
-  json += "],\"time_synced\":" + String(timeSynced ? 1 : 0) + "}";
+  json += "],\"time_synced\":" + String(isTimeSynced() ? 1 : 0) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -5301,6 +5331,8 @@ void handleSettings() {
     int rssi = wifiConnected ? WiFi.RSSI() : 0;
     String ssidActive = wifiConnected ? WiFi.SSID() : (apMode ? String(AP_SSID) : savedSsid);
     IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
+    bool syncedFlag = isTimeSynced();
+    timeSynced = syncedFlag;
     String json = "{";
     json += "\"channel\":\"" + lightChannelName() + "\",";
     json += "\"vpd_stage\":\"" + vpdStageId + "\",";
@@ -5312,7 +5344,7 @@ void handleSettings() {
     json += "\"rssi\":" + String(rssi) + ",";
     json += "\"ip_active\":\"" + activeIp.toString() + "\",";
     json += "\"timezone\":\"" + timezoneName + "\",";
-    json += "\"time_synced\":" + String(timeSynced ? 1 : 0) + ",";
+    json += "\"time_synced\":" + String(syncedFlag ? 1 : 0) + ",";
     json += "\"epoch_ms\":" + String((unsigned long long)currentEpochMs()) + ",";
     json += "\"static\":" + String(staticIpEnabled ? 1 : 0) + ",";
     json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";

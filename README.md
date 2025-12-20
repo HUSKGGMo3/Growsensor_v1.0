@@ -42,6 +42,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
 - Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
 - Time-aware charts with SNTP-based epoch timestamps; timezone-aware axes (Europe/Berlin, UTC, America/New_York, Asia/Tokyo, more) and a header clock badge that indicates sync state.
+- Until the clock syncs, telemetry/cloud uploads keep monotonic timestamps and daily aggregation is labeled as `unsynced` to avoid fake day boundaries.
 - Authentication with forced password change on first login.
 - Partner / Supporter module stored locally and shown in the UI.
 
