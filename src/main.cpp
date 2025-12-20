@@ -1115,11 +1115,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       footer { text-align: center; padding: 12px; font-size: 0.85rem; color: #94a3b8; }
       .card-header { display:flex; align-items:center; justify-content: space-between; gap:8px; }
       .status-dot { width:12px; height:12px; border-radius:50%; background:#6b7280; box-shadow:0 0 0 3px rgba(107,114,128,0.25); }
-      .metric-tile { cursor: pointer; position:relative; transition: transform 120ms ease, border-color 120ms ease; }
+      .tile-title { display:flex; align-items:center; gap:8px; }
+      .tile-toggle-btn { pointer-events:auto; display:inline-flex; align-items:center; gap:6px; padding:6px 8px; border-radius:999px; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; width:auto; min-width:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease; }
+      .tile-toggle-btn .toggle-dot { width:10px; height:10px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(52,211,153,0.3); transition:background 120ms ease, box-shadow 180ms ease; }
+      .tile-toggle-btn .toggle-icon { font-size:0.9rem; opacity:0.85; }
+      .tile-toggle-btn.off { border-color:#b91c1c; }
+      .tile-toggle-btn.off .toggle-dot { background:#ef4444; box-shadow:0 0 0 4px rgba(248,113,113,0.32); }
+      .tile-toggle-btn:hover { border-color:#334155; background:#111827; transform:translateY(-1px); }
+      .metric-tile { cursor: pointer; position:relative; transition: transform 120ms ease, border-color 120ms ease; overflow:hidden; }
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
-      .metric-tile * { pointer-events: none; }
+      .tile-body { transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; }
+      .metric-tile.collapsed { padding-bottom:12px; }
+      .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); }
       .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; }
       .metric-tile:hover .hover-chart { display:flex; }
+      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; }
+      .metric-tile .tile-toggle-btn, .metric-tile .tile-toggle-btn * { pointer-events:auto; }
       .hover-chart canvas { width:100%; height:140px; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
@@ -1178,15 +1189,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .time-row { margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
       .tz-select { width:auto; min-width:160px; }
       .time-text { font-size:0.9rem; color:#cbd5e1; }
-      .tile-settings { display:flex; flex-direction:column; gap:8px; }
-      .tile-setting { display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid #1f2937; border-radius:10px; padding:10px; background:#0b1220; }
-      .tile-setting .info { display:flex; flex-direction:column; gap:4px; }
-      .tile-setting .info strong { font-size:1rem; }
-      .tile-setting .info small { color:#94a3b8; }
-      .tile-toggle { display:inline-flex; align-items:center; gap:8px; background:#111827; color:#e2e8f0; border:1px solid #1f2937; padding:8px 12px; border-radius:10px; width:auto; }
-      .tile-toggle .toggle-dot { width:12px; height:12px; border-radius:50%; box-shadow:0 0 0 3px rgba(52,211,153,0.25); }
-      .tile-toggle.off { border-color:#b91c1c; color:#fecdd3; background:#1f2937; }
-      .tile-toggle.off .toggle-dot { box-shadow:0 0 0 3px rgba(248,113,113,0.25); }
     </style>
   </head>
   <body>
@@ -1229,62 +1231,89 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     </div>
     <main>
       <div id="view-dashboard" class="view active">
-        <section class="card" id="tileSettingsCard">
-          <div class="card-header" style="margin-bottom:6px;"><h3 style="margin:0;">Dashboard anpassen</h3><span class="badge">Kacheln</span></div>
-          <p class="hover-hint">Anzeige einzelner Kacheln ein- oder ausschalten (nur Sichtbarkeit, Sensoren bleiben aktiv).</p>
-          <div id="tileSettingsList" class="tile-settings"></div>
-          <div class="row" style="margin-top:10px;">
-            <button id="resetTiles" class="ghost" style="width:auto;">Reset Dashboard Layout</button>
-          </div>
-        </section>
         <section class="grid metrics">
         <article class="card metric-tile" data-metric="lux">
-          <div class="card-header"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
-          <div class="value" id="lux">–</div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="lux" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="lux" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="lux">–</div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="lux" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="ppfd">
-          <div class="card-header"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
-          <div class="value" id="ppfd">–</div>
-          <div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="ppfd" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="ppfd" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="ppfd">–</div>
+            <div style="font-size:0.85rem;margin-top:6px;">Spektrum: <span id="ppfdSpectrum">–</span><br/>Faktor: <span id="ppfdFactor">–</span></div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="ppfd" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="co2">
-          <div class="card-header"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
-          <div class="value" id="co2">–</div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="co2" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
+            <button class="tile-toggle-btn" data-metric="co2" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="co2">–</div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="co2" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="temp">
-          <div class="card-header"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
-          <div class="value" id="temp">–</div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="temp" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="temp" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="temp">–</div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="temp" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="humidity">
-          <div class="card-header"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
-          <div class="value" id="humidity">–</div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="humidity" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="humidity" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="humidity">–</div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="humidity" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="leaf">
-          <div class="card-header"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
-          <div class="value" id="leaf">–</div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="leaf" width="320" height="140"></canvas></div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="leaf" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+          </div>
+          <div class="tile-body">
+            <div class="value" id="leaf">–</div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="leaf" width="320" height="140"></canvas></div>
+          </div>
         </article>
         <article class="card metric-tile" data-metric="vpd">
-          <div class="card-header"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
-          <div class="value" id="vpd">–</div>
-          <div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div>
-          <div class="vpd-chart" id="vpdTileChart">
-            <canvas id="vpdTileCanvas" class="vpd-canvas"></canvas>
-            <div class="vpd-overlay">
-              <div id="vpdTileLegend" class="vpd-legend"></div>
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div id="vpdTileTarget" class="vpd-legend"></div>
-                <div id="vpdTileStatus" style="font-weight:600;"></div>
-              </div>
-            </div>
-            <div id="vpdTileNoData" class="vpd-no-data" style="display:none;">keine Daten</div>
+          <div class="card-header tile-header">
+            <div class="tile-title"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
+            <button class="tile-toggle-btn" data-metric="vpd" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
           </div>
-          <div class="hover-chart"><canvas class="hover-canvas" data-metric="vpd" width="320" height="140"></canvas></div>
+          <div class="tile-body">
+            <div class="value" id="vpd">–</div>
+            <div id="vpdStatus" style="font-size:0.85rem;margin-top:6px;"></div>
+            <div class="vpd-chart" id="vpdTileChart">
+              <canvas id="vpdTileCanvas" class="vpd-canvas"></canvas>
+              <div class="vpd-overlay">
+                <div id="vpdTileLegend" class="vpd-legend"></div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                  <div id="vpdTileTarget" class="vpd-legend"></div>
+                  <div id="vpdTileStatus" style="font-weight:600;"></div>
+                </div>
+              </div>
+              <div id="vpdTileNoData" class="vpd-no-data" style="display:none;">keine Daten</div>
+            </div>
+            <div class="hover-chart"><canvas class="hover-canvas" data-metric="vpd" width="320" height="140"></canvas></div>
+          </div>
         </article>
       </section>
 
@@ -1568,7 +1597,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       ];
       const TILE_STATE_KEY = 'dashboardTilePrefs';
       const TILE_INSERT_EARLY_CAP = 6;
-      let tileVisibility = {};
+      let tileCollapsed = {};
       let tileOrder = TILE_DEFS.map(t => t.id);
 
       function tileMeta(id) {
@@ -1584,24 +1613,32 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           saved = {};
         }
         const savedVis = (saved && typeof saved.visibility === 'object') ? saved.visibility : {};
-        tileVisibility = {};
+        const savedCollapsed = (saved && typeof saved.collapsed === 'object') ? saved.collapsed : {};
+        tileCollapsed = {};
         const normalizeVisible = (val, fallback = true) => {
           if (val === undefined) return fallback;
           if (val === false || val === 0 || val === '0') return false;
           return true;
         };
-        const ensureVis = (id) => {
+        const ensureCollapsed = (id) => {
           const meta = tileMeta(id);
-          if (Object.prototype.hasOwnProperty.call(savedVis, id)) {
-            tileVisibility[id] = normalizeVisible(savedVis[id], meta.defaultVisible !== false);
+          if (Object.prototype.hasOwnProperty.call(savedCollapsed, id)) {
+            tileCollapsed[id] = savedCollapsed[id] === true;
+          } else if (Object.prototype.hasOwnProperty.call(savedVis, id)) {
+            tileCollapsed[id] = !normalizeVisible(savedVis[id], meta.defaultVisible !== false);
           } else {
-            tileVisibility[id] = meta.defaultVisible !== false;
+            tileCollapsed[id] = false;
           }
         };
-        TILE_DEFS.forEach(def => ensureVis(def.id));
+        TILE_DEFS.forEach(def => ensureCollapsed(def.id));
+        Object.keys(savedCollapsed).forEach(id => {
+          if (!Object.prototype.hasOwnProperty.call(tileCollapsed, id)) {
+            tileCollapsed[id] = savedCollapsed[id] === true;
+          }
+        });
         Object.keys(savedVis).forEach(id => {
-          if (!Object.prototype.hasOwnProperty.call(tileVisibility, id)) {
-            tileVisibility[id] = normalizeVisible(savedVis[id], true);
+          if (!Object.prototype.hasOwnProperty.call(tileCollapsed, id)) {
+            tileCollapsed[id] = !normalizeVisible(savedVis[id], true);
           }
         });
         const savedOrder = Array.isArray(saved.order) ? saved.order.filter(id => typeof id === 'string') : [];
@@ -1619,7 +1656,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           const meta = tileMeta(id);
           pushId(id, (meta.defaultOrder ?? idx) < TILE_INSERT_EARLY_CAP);
         });
-        Object.keys(tileVisibility).forEach(id => {
+        Object.keys(tileCollapsed).forEach(id => {
           if (!seen.has(id)) pushId(id, true);
         });
         tileOrder = nextOrder;
@@ -1627,7 +1664,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function persistTilePrefs() {
         try {
-          localStorage.setItem(TILE_STATE_KEY, JSON.stringify({ visibility: tileVisibility, order: tileOrder }));
+          localStorage.setItem(TILE_STATE_KEY, JSON.stringify({ collapsed: tileCollapsed, order: tileOrder }));
         } catch (err) {
           console.warn('Failed to store tile prefs', err);
         }
@@ -1637,7 +1674,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         document.querySelectorAll('.metric-tile').forEach(tile => {
           const id = tile.dataset.metric;
           if (!id) return;
-          if (tileVisibility[id] === undefined) tileVisibility[id] = true;
+          if (tileCollapsed[id] === undefined) tileCollapsed[id] = false;
           if (!tileOrder.includes(id)) {
             const insertAt = Math.min(tileOrder.length, TILE_INSERT_EARLY_CAP);
             tileOrder.splice(insertAt, 0, id);
@@ -1659,75 +1696,44 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         });
       }
 
-      function applyTileVisibility() {
-        document.querySelectorAll('.metric-tile').forEach(tile => {
-          const id = tile.dataset.metric;
-          const visible = tileVisibility[id] !== false;
-          tile.style.display = visible ? '' : 'none';
-        });
-      }
-
-      function setToggleVisual(toggleBtn, visible) {
+      function setToggleVisual(toggleBtn, collapsed) {
         if (!toggleBtn) return;
         const dot = toggleBtn.querySelector('.toggle-dot');
-        toggleBtn.classList.toggle('off', !visible);
+        toggleBtn.classList.toggle('off', collapsed);
+        toggleBtn.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
         if (dot) {
-          dot.style.background = visible ? '#22c55e' : '#ef4444';
-          dot.classList.toggle('pulse', visible);
-          dot.style.boxShadow = visible ? '0 0 0 3px rgba(52,211,153,0.35)' : '0 0 0 3px rgba(248,113,113,0.28)';
+          dot.style.background = collapsed ? '#ef4444' : '#22c55e';
+          dot.classList.toggle('pulse', !collapsed);
+          dot.style.boxShadow = collapsed ? '0 0 0 4px rgba(248,113,113,0.32)' : '0 0 0 4px rgba(52,211,153,0.3)';
         }
-        const text = toggleBtn.querySelector('.toggle-text');
-        if (text) text.textContent = visible ? 'Sichtbar' : 'Versteckt';
+        const icon = toggleBtn.querySelector('.toggle-icon');
+        if (icon) icon.textContent = collapsed ? '▸' : '▾';
       }
 
-      function renderTileSettings() {
-        const list = getEl('tileSettingsList');
-        if (!list) return;
-        list.innerHTML = '';
-        tileOrder.forEach(id => {
-          const meta = tileMeta(id);
-          const visible = tileVisibility[id] !== false;
-          const row = document.createElement('div');
-          row.className = 'tile-setting';
-          const info = document.createElement('div');
-          info.className = 'info';
-          const label = document.createElement('strong');
-          label.textContent = meta.label || id;
-          const desc = document.createElement('small');
-          desc.textContent = meta.unit ? `Einheit: ${meta.unit}` : 'Dashboard-Kachel';
-          info.appendChild(label);
-          info.appendChild(desc);
-          const toggle = document.createElement('button');
-          toggle.className = 'tile-toggle';
-          toggle.innerHTML = `<span class="toggle-dot"></span><span class="toggle-text"></span>`;
-          setToggleVisual(toggle, visible);
-          toggle.addEventListener('click', () => {
-            tileVisibility[id] = !(tileVisibility[id] !== false);
-            applyTileVisibility();
-            renderTileSettings();
-            persistTilePrefs();
-          });
-          row.appendChild(info);
-          row.appendChild(toggle);
-          list.appendChild(row);
+      function applyTileCollapseState() {
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const id = tile.dataset.metric;
+          if (!id) return;
+          const collapsed = tileCollapsed[id] === true;
+          tile.classList.toggle('collapsed', collapsed);
+          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed);
         });
       }
 
-      function resetTileLayout() {
-        tileVisibility = {};
-        tileOrder = TILE_DEFS.map(t => t.id);
-        TILE_DEFS.forEach(def => tileVisibility[def.id] = def.defaultVisible !== false);
-        syncTilesFromDom();
-        applyTileOrder();
-        applyTileVisibility();
-        renderTileSettings();
-        persistTilePrefs();
+      function updateTileCollapsed(metric, collapsed, persist = true) {
+        tileCollapsed[metric] = collapsed === true;
+        const tile = document.querySelector(`.metric-tile[data-metric="${metric}"]`);
+        if (tile) {
+          tile.classList.toggle('collapsed', collapsed);
+          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed);
+        }
+        if (persist) persistTilePrefs();
       }
 
       loadTilePrefs();
       syncTilesFromDom();
       applyTileOrder();
-      applyTileVisibility();
+      applyTileCollapseState();
 
       const chartCanvas = getEl('chart');
       const ctx = chartCanvas && chartCanvas.getContext ? chartCanvas.getContext('2d') : null;
@@ -2914,14 +2920,33 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       document.querySelectorAll('.metric-tile').forEach(card => {
         const metric = card.dataset.metric;
-        card.addEventListener('mouseenter', () => drawHover(metric));
+        card.addEventListener('mouseenter', () => {
+          if (tileCollapsed[metric] === true) return;
+          drawHover(metric);
+        });
+      });
+
+      document.querySelectorAll('.tile-toggle-btn').forEach(btn => {
+        const metric = btn.dataset.metric;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!metric) return;
+          const nextState = !(tileCollapsed[metric] === true);
+          updateTileCollapsed(metric, nextState);
+        });
       });
 
       document.addEventListener('click', (e) => {
         const tile = e.target.closest('.metric-tile');
         if (tile) {
           const metric = tile.dataset.metric;
-          if (metric) openDetailModal(metric);
+          if (!metric) return;
+          if (tileCollapsed[metric] === true) {
+            updateTileCollapsed(metric, false);
+            return;
+          }
+          if (e.target.closest('.tile-toggle-btn')) return;
+          openDetailModal(metric);
         }
       });
 
@@ -2973,10 +2998,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
       const navSensors = getEl('navSensors');
       if (navSensors) navSensors.addEventListener('click', () => switchView('view-sensors'));
-      const resetTilesBtn = getEl('resetTiles');
-      if (resetTilesBtn) resetTilesBtn.addEventListener('click', resetTileLayout);
-      renderTileSettings();
-      applyTileVisibility();
 
       function applyWifiState(data) {
         const connected = flag(data.wifi_connected);
