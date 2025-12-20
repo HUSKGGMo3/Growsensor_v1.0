@@ -1116,20 +1116,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .card-header { display:flex; align-items:center; justify-content: space-between; gap:8px; }
       .status-dot { width:12px; height:12px; border-radius:50%; background:#6b7280; box-shadow:0 0 0 3px rgba(107,114,128,0.25); }
       .tile-title { display:flex; align-items:center; gap:8px; }
-      .tile-toggle-btn { pointer-events:auto; display:inline-flex; align-items:center; gap:6px; padding:6px 8px; border-radius:999px; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; width:auto; min-width:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease; }
-      .tile-toggle-btn .toggle-dot { width:10px; height:10px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(52,211,153,0.3); transition:background 120ms ease, box-shadow 180ms ease; }
-      .tile-toggle-btn .toggle-icon { font-size:0.9rem; opacity:0.85; }
+      .tile-toggle-btn { pointer-events:auto; display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border-radius:999px; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; min-width:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; position:relative; }
+      .tile-toggle-btn .toggle-dot { position:absolute; width:9px; height:9px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 4px rgba(52,211,153,0.3); transition:background 120ms ease, box-shadow 180ms ease, transform 160ms ease, opacity 160ms ease; right:6px; top:6px; }
+      .tile-toggle-btn .toggle-icon { font-size:0.9rem; opacity:0.9; pointer-events:none; }
       .tile-toggle-btn.off { border-color:#b91c1c; }
-      .tile-toggle-btn.off .toggle-dot { background:#ef4444; box-shadow:0 0 0 4px rgba(248,113,113,0.32); }
-      .tile-toggle-btn:hover { border-color:#334155; background:#111827; transform:translateY(-1px); }
-      .metric-tile { cursor: pointer; position:relative; transition: transform 120ms ease, border-color 120ms ease; overflow:hidden; }
+      .tile-toggle-btn.off .toggle-dot { background:#ef4444; box-shadow:0 0 0 4px rgba(248,113,113,0.32); opacity:0.95; }
+      .tile-toggle-btn:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
+      .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; }
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
       .tile-body { transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; }
-      .metric-tile.collapsed { padding-bottom:12px; }
-      .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); }
+      .metric-tile.collapsed { max-height:64px; padding-bottom:10px; opacity:0.96; transform:translateY(0); }
+      .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); display:none; }
+      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
+      .metric-tile.collapsed:hover { transform:none; }
       .hover-chart { position:absolute; inset:8px; padding:8px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:center; justify-content:center; }
       .metric-tile:hover .hover-chart { display:flex; }
-      .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; }
       .metric-tile .tile-toggle-btn, .metric-tile .tile-toggle-btn * { pointer-events:auto; }
       .hover-chart canvas { width:100%; height:140px; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
@@ -1235,7 +1236,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="lux">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Licht (Lux)</div><span class="status-dot" id="luxDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="lux" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="lux" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="lux">–</div>
@@ -1245,7 +1246,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="ppfd">
           <div class="card-header tile-header">
             <div class="tile-title"><div>PPFD (µmol/m²/s)</div><span class="status-dot" id="ppfdDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="ppfd" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="ppfd" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="ppfd">–</div>
@@ -1256,7 +1257,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="co2">
           <div class="card-header tile-header">
             <div class="tile-title"><div>CO₂ (ppm)</div><span class="status-dot" id="co2Dot"></span></div>
-            <button class="tile-toggle-btn" data-metric="co2" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="co2" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="co2">–</div>
@@ -1266,7 +1267,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="temp">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Umgebungstemperatur (°C)</div><span class="status-dot" id="tempDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="temp" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="temp" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="temp">–</div>
@@ -1276,7 +1277,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="humidity">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Luftfeuchte (%)</div><span class="status-dot" id="humidityDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="humidity" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="humidity" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="humidity">–</div>
@@ -1286,7 +1287,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="leaf">
           <div class="card-header tile-header">
             <div class="tile-title"><div>Leaf-Temp (°C)</div><span class="status-dot" id="leafDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="leaf" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="leaf" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="leaf">–</div>
@@ -1296,7 +1297,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <article class="card metric-tile" data-metric="vpd">
           <div class="card-header tile-header">
             <div class="tile-title"><div>VPD (kPa)</div><span class="status-dot" id="vpdDot"></span></div>
-            <button class="tile-toggle-btn" data-metric="vpd" title="Kachel einklappen / anzeigen"><span class="toggle-dot pulse"></span><span class="toggle-icon">▾</span></button>
+            <button class="tile-toggle-btn" data-metric="vpd" title="Kachel einklappen / anzeigen"><span class="toggle-dot"></span><span class="toggle-icon">–</span></button>
           </div>
           <div class="tile-body">
             <div class="value" id="vpd">–</div>
@@ -1696,18 +1697,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         });
       }
 
-      function setToggleVisual(toggleBtn, collapsed) {
+      function setToggleVisual(toggleBtn, collapsed, healthy = false) {
         if (!toggleBtn) return;
         const dot = toggleBtn.querySelector('.toggle-dot');
-        toggleBtn.classList.toggle('off', collapsed);
-        toggleBtn.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+        const active = !collapsed && healthy;
+        toggleBtn.classList.toggle('off', !active);
+        toggleBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        toggleBtn.setAttribute('aria-label', collapsed ? 'Anzeigen' : 'Einklappen');
+        toggleBtn.setAttribute('title', collapsed ? 'Kachel anzeigen' : 'Kachel einklappen');
         if (dot) {
-          dot.style.background = collapsed ? '#ef4444' : '#22c55e';
-          dot.classList.toggle('pulse', !collapsed);
-          dot.style.boxShadow = collapsed ? '0 0 0 4px rgba(248,113,113,0.32)' : '0 0 0 4px rgba(52,211,153,0.3)';
+          dot.style.background = active ? '#22c55e' : '#ef4444';
+          dot.classList.toggle('pulse', active);
+          dot.style.boxShadow = active ? '0 0 0 4px rgba(52,211,153,0.3)' : '0 0 0 4px rgba(248,113,113,0.32)';
+          dot.style.opacity = active ? '1' : '0.95';
         }
         const icon = toggleBtn.querySelector('.toggle-icon');
-        if (icon) icon.textContent = collapsed ? '▸' : '▾';
+        if (icon) icon.textContent = collapsed ? '+' : '–';
       }
 
       function applyTileCollapseState() {
@@ -1716,7 +1721,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (!id) return;
           const collapsed = tileCollapsed[id] === true;
           tile.classList.toggle('collapsed', collapsed);
-          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed);
+          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, metricIsHealthy(id));
         });
       }
 
@@ -1725,7 +1730,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const tile = document.querySelector(`.metric-tile[data-metric="${metric}"]`);
         if (tile) {
           tile.classList.toggle('collapsed', collapsed);
-          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed);
+          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, metricIsHealthy(metric));
         }
         if (persist) persistTilePrefs();
       }
@@ -1931,6 +1936,49 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         else if (enabled && !present) color = '#9ca3af';
         el.style.background = color;
         el.style.boxShadow = `0 0 0 3px ${color}33`;
+      }
+
+      let lastTelemetryPayload = {};
+
+      function metricStatus(metric, telemetry = lastTelemetryPayload) {
+        const t = telemetry || {};
+        const num = (val) => (typeof val === 'number' && !Number.isNaN(val)) ? val : null;
+        const map = {
+          lux: { ok: flag(t.lux_ok), present: flag(t.lux_present), enabled: flag(t.lux_enabled, true), value: num(t.lux) },
+          ppfd: { ok: flag(t.lux_ok), present: flag(t.lux_present), enabled: flag(t.lux_enabled, true), value: num(t.ppfd) },
+          co2: { ok: flag(t.co2_ok), present: flag(t.co2_present), enabled: flag(t.co2_enabled, true), value: (typeof t.co2 === 'number' && t.co2 > 0 && !Number.isNaN(t.co2)) ? t.co2 : null },
+          temp: { ok: flag(t.climate_ok), present: flag(t.climate_present), enabled: flag(t.climate_enabled, true), value: num(t.temp) },
+          humidity: { ok: flag(t.climate_ok), present: flag(t.climate_present), enabled: flag(t.climate_enabled, true), value: num(t.humidity) },
+          leaf: { ok: flag(t.leaf_ok), present: flag(t.leaf_present), enabled: flag(t.leaf_enabled, true), value: num(t.leaf) },
+          vpd: {
+            ok: flag(t.vpd_ok) && num(t.vpd) !== null,
+            present: flag(t.climate_present) && flag(t.leaf_present),
+            enabled: flag(t.climate_enabled) || flag(t.leaf_enabled),
+            value: num(t.vpd)
+          },
+        };
+        const state = map[metric] || { ok:false, present:false, enabled:false, value:null };
+        const valid = state.value !== null;
+        return { ...state, valid, healthy: state.ok && state.present && state.enabled && valid };
+      }
+
+      function metricIsHealthy(metric, telemetry = lastTelemetryPayload) {
+        return metricStatus(metric, telemetry).healthy;
+      }
+
+      function updateTileHeaderStates(telemetry = {}) {
+        if (telemetry && typeof telemetry === 'object') {
+          lastTelemetryPayload = { ...lastTelemetryPayload, ...telemetry };
+        }
+        document.querySelectorAll('.metric-tile').forEach(tile => {
+          const metric = tile.dataset.metric;
+          if (!metric) return;
+          const state = metricStatus(metric, lastTelemetryPayload);
+          const collapsed = tileCollapsed[metric] === true;
+          const dotId = `${metric}Dot`;
+          setDot(dotId, state.ok, state.present, state.enabled);
+          setToggleVisual(tile.querySelector('.tile-toggle-btn'), collapsed, state.healthy);
+        });
       }
 
       function updateConnectionStatus(apMode = false, wifiConnected = false) {
@@ -2427,13 +2475,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
             else { statusEl.textContent = 'im Ziel'; statusEl.style.color = '#34d399'; }
           }
           lastVpdTargets = { low: data.vpd_low ?? null, high: data.vpd_high ?? null };
-          setDot('luxDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
-          setDot('ppfdDot', flag(data.lux_ok), flag(data.lux_present), flag(data.lux_enabled, true));
-          setDot('co2Dot', flag(data.co2_ok), flag(data.co2_present), flag(data.co2_enabled, true));
-          setDot('tempDot', flag(data.climate_ok), flag(data.climate_present), flag(data.climate_enabled, true));
-          setDot('humidityDot', flag(data.climate_ok), flag(data.climate_present), flag(data.climate_enabled, true));
-          setDot('leafDot', flag(data.leaf_ok), flag(data.leaf_present), flag(data.leaf_enabled, true));
-          setDot('vpdDot', flag(data.vpd_ok), flag(data.climate_present) && flag(data.leaf_present), flag(data.climate_enabled) || flag(data.leaf_enabled));
+          updateTileHeaderStates(data);
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
           drawChart();
           updateAverages();
