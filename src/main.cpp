@@ -1227,12 +1227,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GrowSensor v0.2.6</title>
+    <title>GrowSensor v0.3</title>
     <style>
       :root { color-scheme: light dark; }
       html, body { background: #0f172a; color: #e2e8f0; min-height: 100%; }
       body { font-family: system-ui, sans-serif; margin: 0; padding: 0; }
-      header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 10; }
+      header { padding: 16px; background: #111827; box-shadow: 0 2px 6px rgba(0,0,0,0.25); position: sticky; top: 0; z-index: 12; }
       h1 { margin: 0; font-size: 1.2rem; position:relative; }
       .header-row { display:flex; justify-content: space-between; align-items: center; gap:12px; flex-wrap: wrap; }
       .conn { display:flex; align-items:center; gap:8px; }
@@ -1261,6 +1261,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       footer { text-align: center; padding: 12px; font-size: 0.85rem; color: #94a3b8; }
       .card-header { display:flex; align-items:center; justify-content: space-between; gap:8px; }
       .status-dot { width:12px; height:12px; border-radius:50%; background:#6b7280; box-shadow:0 0 0 3px rgba(107,114,128,0.25); }
+      .status-dot.dot-pulse-fast { animation: dotPulse 2.4s ease-in-out infinite; }
+      .status-dot.dot-pulse-slow { animation: dotPulse 4.8s ease-in-out infinite; }
+      .status-dot.dot-pulse-idle { animation: dotPulse 7s ease-in-out infinite; }
+      @keyframes dotPulse { 0% { box-shadow:0 0 0 0 rgba(52,211,153,0.15); } 70% { box-shadow:0 0 0 12px rgba(52,211,153,0); } 100% { box-shadow:0 0 0 0 rgba(52,211,153,0); } }
+      .status-dot.dot-pulse-fast { animation: dotPulse 2.4s ease-in-out infinite; }
+      .status-dot.dot-pulse-slow { animation: dotPulse 4.8s ease-in-out infinite; }
+      .status-dot.dot-pulse-idle { animation: dotPulse 7s ease-in-out infinite; }
+      @keyframes dotPulse { 0% { box-shadow:0 0 0 0 rgba(52,211,153,0.15); } 70% { box-shadow:0 0 0 12px rgba(52,211,153,0); } 100% { box-shadow:0 0 0 0 rgba(52,211,153,0); } }
       .tile-title { display:flex; align-items:center; gap:8px; }
       .tile-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
       .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; padding-bottom:48px; }
@@ -1274,7 +1282,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .metric-tile.collapsed .hover-chart { opacity:0.22; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:0; padding:12px; background:radial-gradient(circle at 20% 20%, rgba(34,211,238,0.05), rgba(15,23,42,0.55)), rgba(15,23,42,0.72); border:1px solid #1f2937; border-radius:12px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:1; opacity:0.32; visibility:visible; transition:opacity 180ms ease; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:radial-gradient(circle at 20% 20%, rgba(34,211,238,0.05), rgba(15,23,42,0.55)), rgba(15,23,42,0.72); border:1px solid #1f2937; border-radius:12px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:auto; z-index:1; opacity:0.32; visibility:visible; transition:opacity 180ms ease; }
       .metric-tile:hover .hover-chart { opacity:0.6; }
       .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; z-index:3; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
@@ -1283,7 +1291,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tile-eye .eye-closed { display:none; }
       .metric-tile.collapsed .tile-eye .eye-open { display:none; }
       .metric-tile.collapsed .tile-eye .eye-closed { display:block; }
-      .hover-chart canvas { width:100%; height:100%; min-height:100%; display:block; flex:1 1 auto; }
+      .hover-chart canvas { width:100%; height:100%; min-height:100%; display:block; flex:1 1 auto; pointer-events:auto; }
       .dev-note { color:#f59e0b; font-size:0.9rem; margin-top:6px; }
       #devModal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); z-index:60; }
       .hover-hint { font-size:0.85rem; color:#94a3b8; margin-top:6px; }
@@ -1347,13 +1355,32 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .legend-item { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:#0b1220; border:1px solid #1f2937; }
       .color-select { width:auto; min-width:150px; }
       .legend-color-select { min-width:120px; padding:6px 8px; }
+      .kpi-bar { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:8px; margin-top:12px; align-items:stretch; position:sticky; top:0; z-index:11; background:#111827; padding:4px 0; }
+      .kpi-item { background:#0b1220; border:1px solid #1f2937; border-radius:10px; padding:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; box-shadow:0 6px 14px rgba(0,0,0,0.25); min-height:56px; }
+      .kpi-text { display:flex; flex-direction:column; gap:4px; }
+      .kpi-label { font-size:0.9rem; color:#cbd5e1; }
+      .kpi-value { font-size:1.1rem; font-variant-numeric:tabular-nums; color:#e2e8f0; }
+      .kpi-trend { font-size:1.1rem; font-weight:700; display:flex; align-items:center; gap:6px; }
+      .trend-up { color:#22c55e; }
+      .trend-down { color:#f87171; }
+      .trend-flat { color:#e5e7eb; }
+      .trend-warn { color:#f59e0b; }
+      .trend-good { color:#22c55e; }
+      .trend-bad { color:#ef4444; }
+      .chart-tooltip { position:fixed; pointer-events:none; background:rgba(15,23,42,0.92); border:1px solid rgba(148,163,184,0.25); color:#e2e8f0; padding:8px 10px; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,0.35); font-size:0.9rem; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index:120; max-width:240px; }
+      .chart-tooltip.hidden { display:none; }
+      .chart-tooltip .label { font-size:0.8rem; color:#cbd5e1; }
+      .chart-tooltip strong { color:inherit; font-weight:700; }
+      @media (prefers-reduced-motion: reduce) {
+        .status-dot.dot-pulse-fast, .status-dot.dot-pulse-slow, .status-dot.dot-pulse-idle { animation:none; }
+      }
     </style>
   </head>
   <body>
     <header>
       <div class="header-row">
         <div>
-          <h1>GrowSensor – v0.2.6</h1>
+          <h1>GrowSensor – v0.3</h1>
           <div class="hover-hint">Live Monitoring</div>
         </div>
         <div class="header-row" style="gap:10px;">
@@ -1378,6 +1405,36 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         </select>
         <span class="badge badge-warn" id="timeBadge">Zeit nicht synchron</span>
         <span class="time-text" id="localTimeText">–</span>
+      </div>
+      <div class="kpi-bar" id="kpiBar">
+        <div class="kpi-item" data-metric="temp">
+          <div class="kpi-text">
+            <div class="kpi-label">Temp (°C)</div>
+            <div class="kpi-value" id="kpiTemp">–</div>
+          </div>
+          <div class="kpi-trend" id="kpiTempTrend">→</div>
+        </div>
+        <div class="kpi-item" data-metric="humidity">
+          <div class="kpi-text">
+            <div class="kpi-label">Humidity (%)</div>
+            <div class="kpi-value" id="kpiHumidity">–</div>
+          </div>
+          <div class="kpi-trend" id="kpiHumidityTrend">→</div>
+        </div>
+        <div class="kpi-item" data-metric="co2">
+          <div class="kpi-text">
+            <div class="kpi-label">CO₂ (ppm)</div>
+            <div class="kpi-value" id="kpiCo2">–</div>
+          </div>
+          <div class="kpi-trend" id="kpiCo2Trend">→</div>
+        </div>
+        <div class="kpi-item" data-metric="vpd">
+          <div class="kpi-text">
+            <div class="kpi-label">VPD (kPa)</div>
+            <div class="kpi-value" id="kpiVpd">–</div>
+          </div>
+          <div class="kpi-trend" id="kpiVpdTrend">→</div>
+        </div>
       </div>
       <nav>
         <button id="navDashboard" class="menu-btn">Dashboard</button>
@@ -1646,7 +1703,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <button id="savePartner">Partner speichern</button>
       </section>
     </main>
-    <footer>Growcontroller v0.2.6 • Sensorgehäuse v0.3</footer>
+    <footer>Growcontroller v0.3 • Sensorgehäuse v0.3</footer>
 
     <div id="devModal">
       <div class="card" style="max-width:420px;width:90%;">
@@ -1696,6 +1753,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         </div>
       </div>
     </div>
+    <div id="chartTooltip" class="chart-tooltip hidden" role="tooltip"></div>
 
     <div id="sensorWizard">
       <div class="modal-card" style="position:relative;">
@@ -1974,12 +2032,40 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       };
       const metricDataState = {};
       metrics.forEach(m => metricDataState[m] = { ever:false, last:0 });
+      const TREND_CONFIG = {
+        temp: { window: 5, threshold: 0.1, decimals: 1 },
+        humidity: { window: 5, threshold: 0.5, decimals: 1 },
+        co2: { window: 5, threshold: 25, decimals: 0 },
+        vpd: { window: 5, threshold: 0.02, decimals: 3 }
+      };
+      const chartLayouts = {};
+      const hoverState = { main: null, detail: null, tiles: {} };
+      const tooltipEl = getEl('chartTooltip');
       function markMetricSample(metric, ts) {
         if (!metricDataState[metric]) metricDataState[metric] = { ever:false, last:0 };
         if (typeof ts === 'number' && !Number.isNaN(ts)) {
           metricDataState[metric].last = Math.max(metricDataState[metric].last, ts);
         }
         if (metricDataState[metric].last > 0) metricDataState[metric].ever = true;
+      }
+      const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+      function hideTooltip() {
+        if (tooltipEl) tooltipEl.classList.add('hidden');
+      }
+      function showTooltip({ label, valueText, timeText, color, containerRect, anchorX, anchorY }) {
+        if (!tooltipEl) return;
+        tooltipEl.innerHTML = `<div class="label">${label}</div><strong>${valueText}</strong><div class="label">${timeText}</div>`;
+        tooltipEl.style.borderColor = color || '#22d3ee';
+        tooltipEl.style.color = color || '#e2e8f0';
+        tooltipEl.classList.remove('hidden');
+        const rect = containerRect || document.body.getBoundingClientRect();
+        const pad = 8;
+        const offset = 16;
+        const { width: tipW, height: tipH } = tooltipEl.getBoundingClientRect();
+        const left = clamp(anchorX + offset, rect.left + pad, rect.right - tipW - pad);
+        const top = clamp(anchorY - tipH / 2, rect.top + pad, rect.bottom - tipH - pad);
+        tooltipEl.style.left = `${left}px`;
+        tooltipEl.style.top = `${top}px`;
       }
       function metricHasData(metric) {
         const state = metricDataState[metric];
@@ -2313,10 +2399,26 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const el = getEl(id);
         if (!el) return;
         let color = '#6b7280';
-        if (enabled && present) color = ok ? '#34d399' : '#fbbf24';
-        else if (enabled && !present) color = '#9ca3af';
+        let animClass = 'dot-pulse-idle';
+        if (enabled && present) {
+          if (ok) {
+            color = '#34d399';
+            animClass = 'dot-pulse-fast';
+          } else {
+            color = '#fbbf24';
+            animClass = 'dot-pulse-slow';
+          }
+        } else if (enabled && !present) {
+          color = '#ef4444';
+          animClass = '';
+        } else {
+          color = '#ef4444';
+          animClass = '';
+        }
         el.style.background = color;
         el.style.boxShadow = `0 0 0 3px ${color}33`;
+        el.classList.remove('dot-pulse-fast', 'dot-pulse-slow', 'dot-pulse-idle');
+        if (animClass) el.classList.add(animClass);
       }
 
       let lastTelemetryPayload = {};
@@ -2345,6 +2447,81 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function metricIsHealthy(metric, telemetry = lastTelemetryPayload) {
         return metricStatus(metric, telemetry).healthy;
+      }
+
+      function vpdDistance(val) {
+        if (val === null || Number.isNaN(val)) return null;
+        if (lastVpdTargets.low === null || lastVpdTargets.high === null) return null;
+        if (val < lastVpdTargets.low) return lastVpdTargets.low - val;
+        if (val > lastVpdTargets.high) return val - lastVpdTargets.high;
+        return 0;
+      }
+
+      function metricTrend(metric) {
+        const cfg = TREND_CONFIG[metric] || { window: 4, threshold: 0.1, decimals: 1 };
+        const data = getSeriesData(metric, 'live').filter(p => p && typeof p.t === 'number' && typeof p.v === 'number' && !Number.isNaN(p.v));
+        if (data.length < 2) return { dir:'flat', latest: null, delta: 0 };
+        const windowed = data.slice(-cfg.window);
+        if (windowed.length < 2) return { dir:'flat', latest: windowed[windowed.length - 1]?.v ?? null, delta: 0 };
+        const latest = windowed[windowed.length - 1].v;
+        const prevVals = windowed.slice(0, -1).map(p => p.v);
+        const baseline = prevVals.reduce((a,b)=>a+b,0) / prevVals.length;
+        const diff = latest - baseline;
+        const dir = Math.abs(diff) < cfg.threshold ? 'flat' : (diff > 0 ? 'up' : 'down');
+        let targetDir = null;
+        if (metric === 'vpd' && prevVals.length) {
+          const distPrev = vpdDistance(prevVals[prevVals.length - 1]);
+          const distNow = vpdDistance(latest);
+          if (distPrev !== null && distNow !== null) {
+            if (distNow < distPrev - cfg.threshold) targetDir = 'toward';
+            else if (distNow > distPrev + cfg.threshold) targetDir = 'away';
+            else targetDir = 'neutral';
+          }
+        }
+        return { dir, latest, delta: diff, baseline, targetDir };
+      }
+
+      function trendArrow(dir) {
+        if (dir === 'up') return '↑';
+        if (dir === 'down') return '↓';
+        return '→';
+      }
+
+      function renderKpi(metric, value, trend) {
+        const formatValue = (val, decimals = 1) => (typeof val === 'number' && !Number.isNaN(val)) ? val.toFixed(decimals) : '–';
+        const cfg = TREND_CONFIG[metric] || { decimals: 1 };
+        if (metric === 'temp') setText('kpiTemp', formatValue(value, cfg.decimals));
+        if (metric === 'humidity') setText('kpiHumidity', formatValue(value, cfg.decimals));
+        if (metric === 'co2') setText('kpiCo2', formatValue(value, cfg.decimals));
+        if (metric === 'vpd') setText('kpiVpd', formatValue(value, cfg.decimals));
+        const trendElMap = {
+          temp: getEl('kpiTempTrend'),
+          humidity: getEl('kpiHumidityTrend'),
+          co2: getEl('kpiCo2Trend'),
+          vpd: getEl('kpiVpdTrend')
+        };
+        const trendEl = trendElMap[metric];
+        if (!trendEl) return;
+        const dir = trend?.dir || 'flat';
+        let cls = 'kpi-trend trend-flat';
+        if (metric === 'vpd') {
+          if (trend?.targetDir === 'toward') cls = 'kpi-trend trend-good';
+          else if (trend?.targetDir === 'away') cls = 'kpi-trend trend-bad';
+          else cls = 'kpi-trend trend-warn';
+        } else {
+          if (dir === 'up') cls = 'kpi-trend trend-up';
+          else if (dir === 'down') cls = 'kpi-trend trend-down';
+        }
+        trendEl.className = cls;
+        trendEl.textContent = trendArrow(dir);
+      }
+
+      function updateKpiBar(telemetry = lastTelemetryPayload) {
+        const val = (v) => (typeof v === 'number' && !Number.isNaN(v)) ? v : null;
+        renderKpi('temp', val(telemetry.temp), metricTrend('temp'));
+        renderKpi('humidity', val(telemetry.humidity), metricTrend('humidity'));
+        renderKpi('co2', val(telemetry.co2), metricTrend('co2'));
+        renderKpi('vpd', val(telemetry.vpd), metricTrend('vpd'));
       }
 
       function updateTileHeaderStates(telemetry = {}) {
@@ -2690,6 +2867,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           ctxDraw.textBaseline = 'top';
           ctxDraw.fillText(opts.unitLabel, width - paddingRight, paddingTop + 2);
         }
+        const layout = {
+          domainStart,
+          domainEnd,
+          paddingLeft,
+          paddingRight,
+          paddingTop,
+          paddingBottom,
+          plotWidth,
+          plotHeight,
+          yRange: range,
+          series: prepared,
+          mode: normalized
+        };
+
+        const xForTs = (ts) => paddingLeft + ((ts - domainStart) / timeSpan) * plotWidth;
+        const yForVal = (val) => plotBottom - ((val - range.min) / range.span) * plotHeight;
+
         prepared.forEach((serie) => {
           const color = serie.color || opts.color || '#22d3ee';
           ctxDraw.strokeStyle = color;
@@ -2704,7 +2898,108 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           });
           ctxDraw.stroke();
         });
-        return true;
+        if (opts.hover && typeof opts.hover.ts === 'number') {
+          const hx = xForTs(opts.hover.ts);
+          ctxDraw.save();
+          ctxDraw.setLineDash([4,4]);
+          ctxDraw.strokeStyle = opts.hover.color || '#e5e7eb';
+          ctxDraw.beginPath();
+          ctxDraw.moveTo(hx, paddingTop);
+          ctxDraw.lineTo(hx, plotBottom);
+          ctxDraw.stroke();
+          ctxDraw.setLineDash([]);
+          if (opts.hover.point && typeof opts.hover.point.v === 'number') {
+            const hy = yForVal(opts.hover.point.v);
+            ctxDraw.fillStyle = opts.hover.color || '#22d3ee';
+            ctxDraw.beginPath();
+            ctxDraw.arc(hx, hy, 4, 0, Math.PI * 2);
+            ctxDraw.fill();
+            ctxDraw.strokeStyle = '#0f172a';
+            ctxDraw.lineWidth = 1.5;
+            ctxDraw.stroke();
+          }
+          ctxDraw.restore();
+        }
+        layout.xForTs = xForTs;
+        layout.yForVal = yForVal;
+        return { ok: true, layout };
+      }
+
+      function nearestPointForLayout(layout, ts) {
+        if (!layout || !Array.isArray(layout.series)) return null;
+        let best = null;
+        let bestDist = Infinity;
+        layout.series.forEach(series => {
+          (series.points || []).forEach(pt => {
+            if (!pt || pt.v === null || Number.isNaN(pt.v)) return;
+            const dist = Math.abs(pt.t - ts);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = { ...pt, seriesId: series.id, color: series.color || '#22d3ee' };
+            }
+          });
+        });
+        return best;
+      }
+
+      function handleHoverInteraction(ev, layoutKey, metricResolver, modeResolver, renderFn) {
+        const layout = chartLayouts[layoutKey];
+        if (!layout) return;
+        const metric = metricResolver();
+        if (!metric || layout.metric !== metric) return;
+        const canvas = ev.currentTarget;
+        const rect = canvas.getBoundingClientRect();
+        const clientX = ev.touches && ev.touches.length ? ev.touches[0].clientX : ev.clientX;
+        const clientY = ev.touches && ev.touches.length ? ev.touches[0].clientY : ev.clientY;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        if (x < layout.paddingLeft || x > layout.paddingLeft + layout.plotWidth || y < layout.paddingTop || y > layout.paddingTop + layout.plotHeight) {
+          if (layoutKey === 'main') hoverState.main = null;
+          else if (layoutKey === 'detail') hoverState.detail = null;
+          else hoverState.tiles[metric] = null;
+          hideTooltip();
+          renderFn();
+          return;
+        }
+        const span = layout.domainEnd - layout.domainStart;
+        const ts = layout.domainStart + clamp((x - layout.paddingLeft) / Math.max(1, layout.plotWidth), 0, 1) * span;
+        const nearest = nearestPointForLayout(layout, ts);
+        if (!nearest) {
+          if (layoutKey === 'main') hoverState.main = null;
+          else if (layoutKey === 'detail') hoverState.detail = null;
+          else hoverState.tiles[metric] = null;
+          hideTooltip();
+          renderFn();
+          return;
+        }
+        const meta = layout.meta || METRIC_META[metric] || { unit:'', decimals:1, label: metric.toUpperCase() };
+        const statePayload = { ts: nearest.t, point: nearest, color: nearest.color, metric, mode: modeResolver() };
+        if (layoutKey === 'main') hoverState.main = statePayload;
+        else if (layoutKey === 'detail') hoverState.detail = statePayload;
+        else hoverState.tiles[metric] = statePayload;
+        renderFn();
+        const label = meta.label || metric.toUpperCase();
+        const valueText = (typeof nearest.v === 'number' && !Number.isNaN(nearest.v)) ? `${nearest.v.toFixed(meta.decimals ?? 1)} ${meta.unit || ''}`.trim() : '–';
+        const timeText = formatTimeLabel(nearest.t, layout.mode, layout.domainStart, layout.domainEnd, historyStore[metric]?.synced ?? clockState.synced, clockState.timezone, layout.mode === '24h', dayStamp(layout.domainStart, clockState.timezone));
+        const containerRect = (canvas.parentElement || canvas).getBoundingClientRect();
+        showTooltip({ label, valueText, timeText, color: nearest.color, containerRect, anchorX: clientX, anchorY: clientY });
+      }
+
+      function attachTooltipHandlers(canvas, layoutKey, metricResolver, modeResolver, renderFn) {
+        if (!canvas) return;
+        const moveHandler = (ev) => handleHoverInteraction(ev, layoutKey, metricResolver, modeResolver, renderFn);
+        const leaveHandler = () => {
+          const metric = metricResolver();
+          if (layoutKey === 'main') hoverState.main = null;
+          else if (layoutKey === 'detail') hoverState.detail = null;
+          else if (metric) hoverState.tiles[metric] = null;
+          hideTooltip();
+          renderFn();
+        };
+        canvas.addEventListener('mousemove', moveHandler);
+        canvas.addEventListener('touchmove', moveHandler, { passive: true });
+        canvas.addEventListener('mouseleave', leaveHandler);
+        canvas.addEventListener('touchend', leaveHandler);
       }
 
       function drawChart() {
@@ -2722,10 +3017,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const deviceId = deviceIdForMetric(chartMetric);
         const color = colorForMetricDevice(chartMetric, deviceId);
         const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
-        ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const hover = (hoverState.main && hoverState.main.metric === chartMetric) ? hoverState.main : null;
+        const res = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone, hover });
+        ok = !!res;
+        if (ok && res.layout) {
+          chartLayouts.main = { ...res.layout, meta, metric: chartMetric, unit: meta.unit, label: meta.label || chartMetric.toUpperCase() };
+        } else {
+          delete chartLayouts.main;
+        }
         if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
         if (chartColorSelect) renderColorSelect(chartColorSelect, color);
         if (!ok) {
+          delete chartLayouts.main;
+          hoverState.main = null;
+          hideTooltip();
           const { width } = resizeCanvas(chartCanvas, ctx);
           ctx.clearRect(0,0,chartCanvas.width, chartCanvas.height);
           ctx.fillStyle = '#94a3b8';
@@ -2747,7 +3052,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
         const deviceId = deviceIdForMetric(metric);
         const color = colorForMetricDevice(metric, deviceId);
-        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, {
+        const hover = hoverState.tiles[metric] || null;
+        const res = drawLineChart(canvas, ctxHover, data, '6h', meta, {
           series:[{ id: deviceId, color, points: data }],
           minXTicks:6,
           maxXTicks:10,
@@ -2759,13 +3065,28 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           synced: historyStore[metric]?.synced ?? clockState.synced,
           timezone: clockState.timezone,
           windowMs: SIX_H_MS,
-          anchorEndTs: getApproxEpochMs() ?? null
+          anchorEndTs: getApproxEpochMs() ?? null,
+          hover
         });
+        const ok = !!res;
+        if (ok && res.layout) {
+          chartLayouts[`hover-${metric}`] = { ...res.layout, meta, metric, unit: meta.unit, label: meta.label || metric.toUpperCase() };
+        } else {
+          delete chartLayouts[`hover-${metric}`];
+          hoverState.tiles[metric] = null;
+          hideTooltip();
+        }
         if (!ok) {
           resizeCanvas(canvas, ctxHover);
           ctxHover.clearRect(0,0,canvas.width, canvas.height);
         }
       }
+
+      if (chartCanvas) attachTooltipHandlers(chartCanvas, 'main', () => chartMetric, () => '24h', drawChart);
+      Object.entries(hoverCanvases).forEach(([metric, ctxHover]) => {
+        if (ctxHover && ctxHover.canvas) attachTooltipHandlers(ctxHover.canvas, `hover-${metric}`, () => metric, () => '6h', () => drawHover(metric));
+      });
+      if (detailChartCanvas) attachTooltipHandlers(detailChartCanvas, 'detail', () => detailMetric, () => detailMode, renderDetail);
 
       let hoverResizeRaf = null;
       window.addEventListener('resize', () => {
@@ -2781,7 +3102,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const deviceId = deviceIdForMetric(metric);
         const color = colorForMetricDevice(metric, deviceId);
         const tickBounds = mode === 'live' ? { minXTicks:5, maxXTicks:8, windowMs: LIVE_WINDOW_MS } : (mode === '6h' ? { minXTicks:6, maxXTicks:10, windowMs: SIX_H_MS } : { minXTicks:6, maxXTicks:10, windowMs: DAY_MS });
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, {
+        const hover = (hoverState.detail && hoverState.detail.metric === metric && hoverState.detail.mode === mode) ? hoverState.detail : null;
+        const res = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, {
           series:[{ id: deviceId, label:`GeräteID: ${deviceId}`, color, points }],
           unitLabel: meta?.unit,
           decimals: meta?.decimals ?? 1,
@@ -2791,8 +3113,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           maxXTicks: tickBounds.maxXTicks,
           yTicks:5,
           windowMs: tickBounds.windowMs,
-          anchorEndTs: getApproxEpochMs() ?? null
+          anchorEndTs: getApproxEpochMs() ?? null,
+          hover
         });
+        const ok = !!res;
+        if (ok && res.layout) {
+          chartLayouts.detail = { ...res.layout, meta, metric, unit: meta.unit, label: meta.label || metric.toUpperCase(), mode };
+        } else {
+          delete chartLayouts.detail;
+          hoverState.detail = null;
+          hideTooltip();
+        }
         if (detailLegend) renderLegend(detailLegend, ok ? [{ id: deviceId, label:`GeräteID: ${deviceId}`, color }] : []);
         if (detailColorSelect) renderColorSelect(detailColorSelect, color);
         const debugBox = getEl('chartDebugText');
@@ -3004,6 +3335,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function closeDetailModal() {
         setModalVisible(getEl('chartModal'), false);
+        hoverState.detail = null;
+        hideTooltip();
       }
 
       async function fetchData() {
@@ -3057,6 +3390,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           applyDeviceIdsFromTelemetry(data);
           updateTileHeaderStates(data);
           metrics.forEach(m => recordMetric(m, data[m], tsForSample, synced));
+          updateKpiBar(data);
           drawChart();
           updateAverages();
           tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
@@ -3637,6 +3971,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const tabLiveBtn = getEl('tabLive');
       if (tabLiveBtn) tabLiveBtn.addEventListener('click', () => {
         detailMode = 'live';
+        hoverState.detail = null;
+        hideTooltip();
         if (tabLiveBtn) tabLiveBtn.classList.add('active');
         const tabLast6h = getEl('tabLast6h');
         const tabLast24h = getEl('tabLast24h');
@@ -3647,6 +3983,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const tabLast6hBtn = getEl('tabLast6h');
       if (tabLast6hBtn) tabLast6hBtn.addEventListener('click', () => {
         detailMode = '6h';
+        hoverState.detail = null;
+        hideTooltip();
         tabLast6hBtn.classList.add('active');
         const tabLiveEl = getEl('tabLive');
         const tabLast24h = getEl('tabLast24h');
@@ -3657,6 +3995,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       const tabLast24hBtn = getEl('tabLast24h');
       if (tabLast24hBtn) tabLast24hBtn.addEventListener('click', () => {
         detailMode = '24h';
+        hoverState.detail = null;
+        hideTooltip();
         tabLast24hBtn.classList.add('active');
         const tabLiveEl = getEl('tabLive');
         const tabLast6h = getEl('tabLast6h');
@@ -3685,6 +4025,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         const viewEl = getEl(target);
         if (viewEl) viewEl.classList.add('active');
+        hoverState.main = null;
+        Object.keys(hoverState.tiles).forEach(k => hoverState.tiles[k] = null);
+        hideTooltip();
       }
       const navDashboard = getEl('navDashboard');
       if (navDashboard) navDashboard.addEventListener('click', () => switchView('view-dashboard'));
@@ -3693,6 +4036,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       if (chartMetricSelect) {
         chartMetricSelect.addEventListener('change', () => {
           chartMetric = chartMetricSelect.value || 'temp';
+          hoverState.main = null;
+          hideTooltip();
           drawChart();
         });
       }
@@ -3831,9 +4176,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (!metricHasData(detailMetric) || !hasLiveData || !online) {
           if (detailLegend) renderLegend(detailLegend, []);
           if (chartEmpty) chartEmpty.style.display = 'flex';
+          delete chartLayouts.detail;
+          hoverState.detail = null;
+          hideTooltip();
           return;
         }
         if (showHeatmap) {
+          delete chartLayouts.detail;
+          hoverState.detail = null;
+          hideTooltip();
           if (detailLegend) renderLegend(detailLegend, []);
           if (detailColorSelect) renderColorSelect(detailColorSelect, colorForMetricDevice(detailMetric, deviceIdForMetric(detailMetric)));
           const points = collectPaired(detailMode);

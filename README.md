@@ -1,6 +1,12 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.2.6 (untested / community preview)**
+**Current release: v0.3 (untested / community preview)**
+
+### Patch v0.3 (untested)
+- Chart hover now snaps to the nearest timestamp with a series-colored tooltip, vertical cursor line, and marker dot on all charts (detail modal, 24h main chart, and mini hover charts). Tooltips stay next to the cursor and use client-side data only.
+- Sticky header KPI bar shows Temp / Humidity / CO₂ / VPD with trend arrows (debounced thresholds) and VPD target proximity coloring (toward target = green, away = red).
+- Tile status indicators now pulse based on state (fast for healthy green, slower for yellow/stale, idle for offline); respects `prefers-reduced-motion`.
+- Version banner bumped to v0.3 (untested).
 
 ### Hotfix v0.2.6
 - Adds NTP-backed real-time clocks with timezone selection in the header and a visible “Zeit nicht synchron” badge until sync succeeds.

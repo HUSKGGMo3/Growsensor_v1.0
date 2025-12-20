@@ -1,6 +1,12 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.2.6 (ungetestet / Community-Preview)**
+**Aktuelle Version: v0.3 (ungetestet / Community-Preview)**
+
+### Patch v0.3 (ungetestet)
+- Chart-Hover snappt jetzt auf den nächsten Zeitstempel, zeigt einen vertikalen Cursor und farbige Tooltipps direkt am Mauszeiger in allen Charts (Detail, 24h-Chart, Mini-Hover).
+- Sticky KPI-Leiste im Header für Temperatur / Feuchte / CO₂ / VPD mit Trendpfeilen; VPD-Farbe zeigt Annäherung an den Zielbereich (grün hin, rot weg, gelb neutral).
+- Statuspunkte in den Kacheln pulsieren je nach Zustand (schnell grün, langsam gelb, ruhig rot) und respektieren `prefers-reduced-motion`.
+- Versionsanzeige auf v0.3 aktualisiert.
 
 ### Hotfix v0.2.6
 - NTP-Sync (pool.ntp.org, time.nist.gov, time.google.com) mit Zeitzonen-Auswahl im Header; Badge „Zeit nicht synchron“ bis zur erfolgreichen Synchronisation.
