@@ -4899,7 +4899,7 @@ static constexpr size_t INDEX_HTML_GZ_LEN = sizeof(INDEX_HTML_GZ);
 void handleRoot() {
   server.sendHeader("Cache-Control", "no-store");
   server.sendHeader("Content-Encoding", "gzip");
-  server.send_P(200, "text/html", INDEX_HTML_GZ, INDEX_HTML_GZ_LEN);
+  server.send_P(200, "text/html", reinterpret_cast<PGM_P>(INDEX_HTML_GZ), INDEX_HTML_GZ_LEN);
 }
 
 void handleNotFound() {
@@ -5851,6 +5851,10 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println("\nGrowSensor booting...");
+#if defined(LED_BUILTIN)
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+#endif
 
   loadCloudConfig();
   loadDailyHistory();
