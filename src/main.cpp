@@ -75,7 +75,7 @@ static constexpr unsigned long CLOUD_RECORDING_INTERVAL_MS = 60000;
 static constexpr unsigned long CLOUD_BACKOFF_SHORT_MS = 5000;
 static constexpr unsigned long CLOUD_BACKOFF_MED_MS = 15000;
 static constexpr unsigned long CLOUD_BACKOFF_LONG_MS = 60000;
-static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 8000;
+static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 5000;
 static constexpr unsigned long CLOUD_HEALTH_WINDOW_MS = 60000;
 static constexpr unsigned long CLOUD_PING_INTERVAL_MS = 30000;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
@@ -496,6 +496,12 @@ struct CloudRequestClients {
   WiFiClient http;
   WiFiClientSecure https;
 };
+
+void closeCloudClients(HTTPClient &http, CloudRequestClients &clients) {
+  http.end();
+  clients.http.stop();
+  clients.https.stop();
+}
 
 CloudProtocol cloudProtocol() {
   return cloudConfig.protocol == 1 ? CloudProtocol::HTTPS : CloudProtocol::HTTP;
@@ -1512,10 +1518,7 @@ void setCloudError(const char *op, const String &label, const String &path, int 
   cloudStatus.lastHttpCode = code;
   cloudStatus.lastUrl = cloudShortPath(path);
   String msg = String(op) + " " + label + " -> " + String(code);
-  if (detail.length() > 0 && code <= 0) msg += String(" ") + detail;
-#if CLOUD_DIAG
-  if (detail.length() > 0 && code > 0) msg += String(" ") + detail;
-#endif
+  if (detail.length() > 0) msg += String(" ") + detail;
   msg += String(" (") + cloudProtocolLabel() + ")";
   markCloudFailure(msg);
   cloudStatus.lastErrorSuffix = suffix;
@@ -1528,6 +1531,7 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
   if (!beginCloudRequest(http, url, clients)) {
     code = -1;
     if (resp) *resp = cloudProtocol() == CloudProtocol::HTTPS ? "HTTPS connect failed" : "HTTP connect failed";
+    closeCloudClients(http, clients);
     return false;
   }
   if (location) {
@@ -1552,7 +1556,7 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
     if (resp) {
       *resp = cloudProtocol() == CloudProtocol::HTTPS ? "TLS handshake failed" : "HTTP request failed";
     }
-    http.end();
+    closeCloudClients(http, clients);
     return false;
   }
   if (resp) {
@@ -1565,7 +1569,7 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
     if (loc.length() > 120) loc = loc.substring(0, 120);
     *location = loc;
   }
-  http.end();
+  closeCloudClients(http, clients);
   return code > 0;
 }
 
@@ -1806,7 +1810,7 @@ void processCloudQueue() {
   if (lastCloudWorkerTickMs != 0 && now - lastCloudWorkerTickMs < CLOUD_WORKER_INTERVAL_MS) return;
   lastCloudWorkerTickMs = now;
   cloudStatus.queueSize = cloudQueue.size();
-  if (!cloudStatus.runtimeEnabled || cloudQueue.empty()) {
+  if (!cloudStatus.runtimeEnabled || !cloudConfig.enabled || !cloudStatus.connected || cloudQueue.empty()) {
     refreshStorageMode();
     return;
   }
