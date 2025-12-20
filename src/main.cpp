@@ -1147,14 +1147,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .tile-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
       .metric-tile { cursor: pointer; position:relative; transition: max-height 220ms ease, transform 180ms ease, opacity 180ms ease, border-color 120ms ease; overflow:hidden; max-height:720px; padding-bottom:48px; }
       .metric-tile:hover { transform: translateY(-2px); border-color: #334155; }
-      .tile-body { transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; }
+      .tile-body { position:relative; transition:max-height 240ms ease, opacity 200ms ease, transform 200ms ease; max-height:720px; opacity:1; transform:translateY(0); overflow:hidden; min-height:156px; display:flex; flex-direction:column; gap:6px; }
       .metric-tile.collapsed { max-height:96px; min-height:64px; padding-bottom:16px; opacity:0.98; transform:translateY(0); }
       .metric-tile.collapsed .tile-body { max-height:0; opacity:0; transform:translateY(-6px); display:none; }
       .metric-tile.collapsed .hover-chart, .metric-tile.collapsed:hover .hover-chart { display:none !important; pointer-events:none; }
       .metric-tile.collapsed .tile-header { margin-bottom:0; }
       .metric-tile.collapsed:hover { transform:none; }
-      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:none; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:4; }
-      .metric-tile:hover .hover-chart { display:flex; }
+      .hover-chart { position:absolute; inset:0; padding:12px; background:rgba(15,23,42,0.96); border:1px solid #1f2937; border-radius:10px; display:flex; align-items:stretch; justify-content:stretch; pointer-events:none; z-index:4; opacity:0; visibility:hidden; transition:opacity 140ms ease; }
+      .metric-tile:hover .hover-chart { opacity:1; visibility:visible; }
       .tile-eye { position:absolute; left:12px; bottom:12px; width:26px; height:26px; border-radius:50%; border:1px solid #1f2937; background:#0b1220; color:#e2e8f0; display:inline-flex; align-items:center; justify-content:center; gap:2px; padding:0; box-shadow:0 4px 8px rgba(0,0,0,0.18); transition:border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 160ms ease; }
       .tile-eye:hover { border-color:#334155; background:#111827; transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,0.3); }
       .tile-eye:active { transform:translateY(0); }
@@ -1225,6 +1225,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .chart-legend { display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:0.9rem; color:#cbd5e1; }
       .legend-item { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:#0b1220; border:1px solid #1f2937; }
       .color-select { width:auto; min-width:150px; }
+      .legend-color-select { min-width:120px; padding:6px 8px; }
     </style>
   </head>
   <body>
@@ -1370,6 +1371,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
               <option value="vpd">VPD</option>
               <option value="co2">CO₂</option>
               <option value="lux">Lux</option>
+              <option value="all">Alle Metriken</option>
             </select>
           </label>
         </div>
@@ -1839,6 +1841,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         colorPrefs[id] = color;
         persistColorPrefs();
       }
+      function colorKey(metric, deviceId) {
+        if (!metric && !deviceId) return '';
+        return metric ? `${metric}:${deviceId || metric}` : `${deviceId}`;
+      }
+      function colorForMetricDevice(metric, deviceId) {
+        const key = colorKey(metric, deviceId);
+        if (key && colorPrefs[key]) return colorPrefs[key];
+        if (deviceId && colorPrefs[deviceId]) return colorPrefs[deviceId];
+        return colorForDevice(deviceId || key || metric);
+      }
+      function setColorForMetricDevice(metric, deviceId, color) {
+        const key = colorKey(metric, deviceId);
+        if (!key || !color) return;
+        colorPrefs[key] = color;
+        persistColorPrefs();
+      }
       loadColorPrefs();
       const metricDeviceIds = {
         lux: 'BH1750',
@@ -1884,13 +1902,37 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           setDeviceId('vpd', `${metricDeviceIds.temp || 'climate'}+${metricDeviceIds.leaf || 'leaf'}`);
         }
       }
-      function renderLegend(el, entries = []) {
+      function renderLegend(el, entries = [], opts = {}) {
         if (!el) return;
         el.innerHTML = '';
+        const allowColorPickers = opts.allowColorPickers === true;
         entries.forEach(item => {
           const div = document.createElement('div');
           div.className = 'legend-item';
-          div.innerHTML = `<span class="legend-swatch" style="background:${item.color};"></span><span>${item.label || item.id}</span>`;
+          if (item.title) div.title = item.title;
+          const swatch = document.createElement('span');
+          swatch.className = 'legend-swatch';
+          swatch.style.background = item.color;
+          const label = document.createElement('span');
+          label.textContent = item.label || item.id;
+          div.appendChild(swatch);
+          div.appendChild(label);
+          if (allowColorPickers) {
+            const select = document.createElement('select');
+            select.className = 'color-select legend-color-select';
+            COLOR_PALETTE.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.value;
+              opt.textContent = `● ${c.name}`;
+              opt.style.color = c.value;
+              if (c.value === item.color) opt.selected = true;
+              select.appendChild(opt);
+            });
+            select.addEventListener('change', () => {
+              if (typeof opts.onColorChange === 'function') opts.onColorChange(item, select.value);
+            });
+            div.appendChild(select);
+          }
           el.appendChild(div);
         });
       }
@@ -2293,23 +2335,25 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         return { min: paddedMin, max: paddedMax, span: Math.max(paddedMax - paddedMin, 0.0001) };
       }
 
-      function planTimeTicks(ctxDraw, { mode, firstTs, lastTs, plotWidth, synced, tz, minTicks = 5, maxTicks = 10, targetTicks = null, labelPadding = 14 }) {
+      function planTimeTicks(ctxDraw, { mode, startTs, endTs, plotWidth, synced, tz, minTicks = 5, maxTicks = 10, targetTicks = null, labelPadding = 14 }) {
         const normalized = normalizeMode(mode);
-        const span = Math.max(1, lastTs - firstTs);
-        const includeDate = normalized === '24h' && dayStamp(firstTs, tz) !== dayStamp(lastTs, tz);
-        const anchorDate = includeDate ? dayStamp(firstTs, tz) : '';
-        const desiredBase = targetTicks ? Math.max(2, targetTicks) : Math.max(minTicks, Math.round(plotWidth / 80));
+        const span = Math.max(1, endTs - startTs);
+        const includeDate = normalized === '24h' && dayStamp(startTs, tz) !== dayStamp(endTs, tz);
+        const anchorDate = includeDate ? dayStamp(startTs, tz) : '';
+        const desiredBase = targetTicks ? Math.max(2, targetTicks) : Math.max(minTicks, Math.round(plotWidth / 90));
         const desired = Math.min(maxTicks, Math.max(2, desiredBase));
+        const minSpacing = 48;
         const segments = Math.max(1, desired - 1);
         const rawTicks = [];
         for (let i = 0; i <= segments; i++) {
-          rawTicks.push(Math.round(firstTs + (span / segments) * i));
+          rawTicks.push(Math.round(startTs + (span / segments) * i));
         }
-        const labelFor = (ts) => formatTimeLabel(ts, normalized, firstTs, lastTs, synced, tz, includeDate, anchorDate);
+        const labelFor = (ts) => formatTimeLabel(ts, normalized, startTs, endTs, synced, tz, includeDate, anchorDate);
         const sampleLabels = rawTicks.map(labelFor);
         const maxLabelWidth = sampleLabels.reduce((m, l) => Math.max(m, ctxDraw.measureText(l).width), 0);
-        const widthLimit = Math.max(2, Math.floor(plotWidth / Math.max(60, maxLabelWidth + labelPadding)));
-        const allowed = Math.max(2, Math.min(maxTicks, Math.min(desired, widthLimit)));
+        const spacingNeeded = Math.max(maxLabelWidth + labelPadding, minSpacing);
+        const maxCountBySpace = Math.max(2, Math.floor(plotWidth / Math.max(1, spacingNeeded)) + 1);
+        const allowed = Math.max(2, Math.min(maxTicks, Math.min(desired, maxCountBySpace)));
         const step = Math.max(1, Math.ceil(rawTicks.length / allowed));
         const ticks = [];
         for (let i = 0; i < rawTicks.length; i += step) ticks.push(rawTicks[i]);
@@ -2317,6 +2361,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const labels = ticks.map(labelFor);
         const finalMaxWidth = labels.reduce((m,l)=>Math.max(m, ctxDraw.measureText(l).width), 0);
         return { ticks, labels, maxLabelWidth: finalMaxWidth };
+      }
+
+      function normalizeSeries(points, decimals = 1) {
+        const values = (points || []).map(p => p?.v).filter(v => v !== null && typeof v === 'number' && !Number.isNaN(v));
+        if (!values.length) return { points: [], min: NaN, max: NaN, last: null, span: 0 };
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const spanRaw = max - min;
+        const span = spanRaw === 0 ? 1 : spanRaw;
+        const normalized = (points || []).map(p => {
+          if (!p || p.v === null || Number.isNaN(p.v)) return { t: p?.t ?? 0, v: null };
+          const norm = spanRaw === 0 ? 0.5 : (p.v - min) / span;
+          return { t: p.t, v: norm };
+        });
+        const last = values[values.length - 1];
+        return { points: normalized, min, max, last: last ?? null, span };
       }
 
       function drawLineChart(canvas, ctxDraw, points, mode, meta, opts = {}) {
@@ -2341,7 +2401,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const range = computeYRange(values, decimals);
         const firstTs = sorted[0]?.t ?? 0;
         const lastTs = sorted[sorted.length - 1]?.t ?? (firstTs + 1);
-        const timeSpan = Math.max(1, lastTs - firstTs);
+        const targetSpan = opts.windowMs ?? (normalized === '24h' ? DAY_MS : (normalized === '6h' ? SIX_H_MS : LIVE_WINDOW_MS));
+        const approxNow = getApproxEpochMs();
+        const anchorEndTs = opts.anchorEndTs ?? ((synced && approxNow !== null) ? approxNow : null);
+        const domainEnd = Math.max(lastTs, anchorEndTs ?? lastTs);
+        const domainStart = Math.max(0, domainEnd - targetSpan);
+        const timeSpan = Math.max(1, domainEnd - domainStart);
         ctxDraw.strokeStyle = '#1f2937';
         ctxDraw.fillStyle = '#94a3b8';
         ctxDraw.font = `${fontSize}px system-ui`;
@@ -2359,7 +2424,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const labelPadding = opts.labelPadding ?? 14;
         let plotWidth = Math.max(1, width - paddingLeft - paddingRight);
         let plotHeight = Math.max(1, height - paddingTop - paddingBottom);
-        const tickPlan = planTimeTicks(ctxDraw, { mode: normalized, firstTs, lastTs, plotWidth, synced, tz, minTicks: opts.minXTicks ?? 5, maxTicks: opts.maxXTicks ?? 10, targetTicks: opts.xTicks ? Math.max(2, opts.xTicks + 1) : null, labelPadding });
+        const tickPlan = planTimeTicks(ctxDraw, { mode: normalized, startTs: domainStart, endTs: domainEnd, plotWidth, synced, tz, minTicks: opts.minXTicks ?? 5, maxTicks: opts.maxXTicks ?? 10, targetTicks: opts.xTicks ? Math.max(2, opts.xTicks + 1) : null, labelPadding });
         const plotBottom = paddingTop + plotHeight;
 
         for (let i=0;i<=yTicks;i++){
@@ -2372,12 +2437,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         }
 
         tickPlan.ticks.forEach(ts => {
-          const x = paddingLeft + ((ts - firstTs) / timeSpan) * plotWidth;
+          const x = paddingLeft + ((ts - domainStart) / timeSpan) * plotWidth;
           ctxDraw.beginPath(); ctxDraw.moveTo(x, paddingTop); ctxDraw.lineTo(x, plotBottom); ctxDraw.stroke();
         });
 
         tickPlan.ticks.forEach((ts, idx) => {
-          const x = paddingLeft + ((ts - firstTs) / timeSpan) * plotWidth;
+          const x = paddingLeft + ((ts - domainStart) / timeSpan) * plotWidth;
           const label = tickPlan.labels[idx];
           ctxDraw.textAlign = 'center';
           ctxDraw.textBaseline = 'top';
@@ -2398,7 +2463,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           let started=false;
           serie.points.forEach((pt)=>{
             if (!pt || pt.v === null || Number.isNaN(pt.v) || typeof pt.t !== 'number') { started=false; return; }
-            const x = paddingLeft + ((pt.t - firstTs)/timeSpan)*plotWidth;
+            const x = paddingLeft + ((pt.t - domainStart)/timeSpan)*plotWidth;
             const y = plotBottom - ((pt.v-range.min)/range.span)*plotHeight;
             if(!started){ctxDraw.moveTo(x,y); started=true;} else {ctxDraw.lineTo(x,y);}
           });
@@ -2409,14 +2474,62 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
       function drawChart() {
         if (!chartCanvas || !ctx) { pushError('Missing DOM element: chart'); return; }
-        const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
-        const data = getSeriesData(chartMetric, '24h');
-        const deviceId = deviceIdForMetric(chartMetric);
-        const color = colorForDevice(deviceId);
-        const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
-        const ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
-        if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
-        if (chartColorSelect) renderColorSelect(chartColorSelect, color);
+        const isAllMetrics = chartMetric === 'all';
+        const colorSelectWrapper = chartColorSelect ? chartColorSelect.closest('label') : null;
+        if (colorSelectWrapper) colorSelectWrapper.style.display = isAllMetrics ? 'none' : 'flex';
+        let ok = false;
+        if (isAllMetrics) {
+          const series = metrics.map(m => {
+            const meta = METRIC_META[m] || { label: m.toUpperCase(), unit:'', decimals:1 };
+            const data = getSeriesData(m, '24h');
+            const deviceId = deviceIdForMetric(m);
+            const color = colorForMetricDevice(m, deviceId);
+            const normalized = normalizeSeries(data, 2);
+            if (!normalized.points.length) return null;
+            const rangeText = Number.isFinite(normalized.min) && Number.isFinite(normalized.max) ? `Range: ${normalized.min.toFixed(meta.decimals ?? 1)}–${normalized.max.toFixed(meta.decimals ?? 1)} ${meta.unit}` : '';
+            const lastText = normalized.last !== null ? `Letzter Wert: ${normalized.last.toFixed(meta.decimals ?? 1)} ${meta.unit}` : 'Keine gültigen Werte';
+            return {
+              id: `${m}-${deviceId}`,
+              metric: m,
+              deviceId,
+              label: `${meta.label || m.toUpperCase()} (${meta.unit || ''}) – GeräteID: ${deviceId}`,
+              title: `${lastText}${rangeText ? ` • ${rangeText}` : ''}`,
+              color,
+              points: normalized.points,
+            };
+          }).filter(Boolean);
+          ok = drawLineChart(chartCanvas, ctx, [], '24h', { unit:'normiert', decimals:2 }, {
+            series,
+            unitLabel: 'normiert (0..1)',
+            decimals: 2,
+            minXTicks: 6,
+            maxXTicks: 10,
+            yTicks: 5,
+            windowMs: DAY_MS,
+            anchorEndTs: getApproxEpochMs() ?? null,
+            synced: clockState.synced,
+            timezone: clockState.timezone
+          });
+          if (mainChartLegend) {
+            renderLegend(mainChartLegend, ok ? series : [], {
+              allowColorPickers: true,
+              onColorChange: (item, color) => {
+                setColorForMetricDevice(item.metric, item.deviceId, color);
+                drawChart();
+                tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
+              }
+            });
+          }
+        } else {
+          const meta = METRIC_META[chartMetric] || { unit:'', decimals:1 };
+          const data = getSeriesData(chartMetric, '24h');
+          const deviceId = deviceIdForMetric(chartMetric);
+          const color = colorForMetricDevice(chartMetric, deviceId);
+          const series = [{ id: deviceId, label: `GeräteID: ${deviceId}`, color, points: data }];
+          ok = drawLineChart(chartCanvas, ctx, data, '24h', meta, { series, unitLabel: meta.unit, decimals: meta.decimals ?? 1, minXTicks:6, maxXTicks:10, yTicks:5, synced: historyStore[chartMetric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+          if (mainChartLegend) renderLegend(mainChartLegend, ok ? series : []);
+          if (chartColorSelect) renderColorSelect(chartColorSelect, color);
+        }
         if (!ok) {
           const { width } = resizeCanvas(chartCanvas, ctx);
           ctx.clearRect(0,0,chartCanvas.width, chartCanvas.height);
@@ -2433,8 +2546,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         const data = getSeriesData(metric, '6h');
         const meta = METRIC_META[metric] || { unit:'', decimals:1 };
         const deviceId = deviceIdForMetric(metric);
-        const color = colorForDevice(deviceId);
-        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, { series:[{ id: deviceId, color, points: data }], minXTicks:4, maxXTicks:8, yTicks:3, fontSize:10, lineWidth:1, decimals: meta.decimals, unitLabel: meta.unit, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone });
+        const color = colorForMetricDevice(metric, deviceId);
+        const ok = drawLineChart(canvas, ctxHover, data, '6h', meta, {
+          series:[{ id: deviceId, color, points: data }],
+          minXTicks:6,
+          maxXTicks:10,
+          yTicks:3,
+          fontSize:10,
+          lineWidth:1,
+          decimals: meta.decimals,
+          unitLabel: meta.unit,
+          synced: historyStore[metric]?.synced ?? clockState.synced,
+          timezone: clockState.timezone,
+          windowMs: SIX_H_MS,
+          anchorEndTs: getApproxEpochMs() ?? null
+        });
         if (!ok) {
           resizeCanvas(canvas, ctxHover);
           ctxHover.clearRect(0,0,canvas.width, canvas.height);
@@ -2444,8 +2570,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       function drawDetailChart(metric, mode, points, meta) {
         if (!detailCtx || !metric || !detailChartCanvas) return false;
         const deviceId = deviceIdForMetric(metric);
-        const color = colorForDevice(deviceId);
-        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, { series:[{ id: deviceId, label:`GeräteID: ${deviceId}`, color, points }], unitLabel: meta?.unit, decimals: meta?.decimals ?? 1, synced: historyStore[metric]?.synced ?? clockState.synced, timezone: clockState.timezone, minXTicks:6, maxXTicks:10, yTicks:5 });
+        const color = colorForMetricDevice(metric, deviceId);
+        const tickBounds = mode === 'live' ? { minXTicks:5, maxXTicks:8, windowMs: LIVE_WINDOW_MS } : (mode === '6h' ? { minXTicks:6, maxXTicks:10, windowMs: SIX_H_MS } : { minXTicks:6, maxXTicks:10, windowMs: DAY_MS });
+        const ok = drawLineChart(detailChartCanvas, detailCtx, points, mode, meta, {
+          series:[{ id: deviceId, label:`GeräteID: ${deviceId}`, color, points }],
+          unitLabel: meta?.unit,
+          decimals: meta?.decimals ?? 1,
+          synced: historyStore[metric]?.synced ?? clockState.synced,
+          timezone: clockState.timezone,
+          minXTicks: tickBounds.minXTicks,
+          maxXTicks: tickBounds.maxXTicks,
+          yTicks:5,
+          windowMs: tickBounds.windowMs,
+          anchorEndTs: getApproxEpochMs() ?? null
+        });
         if (detailLegend) renderLegend(detailLegend, ok ? [{ id: deviceId, label:`GeräteID: ${deviceId}`, color }] : []);
         if (detailColorSelect) renderColorSelect(detailColorSelect, color);
         const debugBox = getEl('chartDebugText');
@@ -3277,9 +3415,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       }
       if (chartColorSelect) {
         chartColorSelect.addEventListener('change', () => {
+          if (!chartMetric || chartMetric === 'all') return;
           const deviceId = deviceIdForMetric(chartMetric);
           const color = chartColorSelect.value || COLOR_PALETTE[0].value;
-          setColorForDevice(deviceId, color);
+          setColorForMetricDevice(chartMetric, deviceId, color);
           drawChart();
           tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
           renderDetail();
@@ -3290,7 +3429,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
           if (!detailMetric) return;
           const deviceId = deviceIdForMetric(detailMetric);
           const color = detailColorSelect.value || COLOR_PALETTE[0].value;
-          setColorForDevice(deviceId, color);
+          setColorForMetricDevice(detailMetric, deviceId, color);
           drawChart();
           tileOrder.forEach(m => { if (tileIsExpanded(m)) drawHover(m); });
           renderDetail();
@@ -3396,7 +3535,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         if (chartEmpty) chartEmpty.style.display = 'none';
         if (showHeatmap) {
           if (detailLegend) renderLegend(detailLegend, []);
-          if (detailColorSelect) renderColorSelect(detailColorSelect, colorForDevice(deviceIdForMetric(detailMetric)));
+          if (detailColorSelect) renderColorSelect(detailColorSelect, colorForMetricDevice(detailMetric, deviceIdForMetric(detailMetric)));
           const points = collectPaired(detailMode);
           drawVpdHeatmap(vpdHeatmapCtx, vpdHeatmapCanvas, detailMode, lastVpdTargets, getEl('chartModalCard'), points);
         } else {
