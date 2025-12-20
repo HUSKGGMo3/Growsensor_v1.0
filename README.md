@@ -1,6 +1,11 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.3 (Stability Restoration)**
+**Current release: v0.3.4 (Stability + UX Reborn)**
+
+### Patch v0.3.4 (Stability + UX Reborn)
+- Cloud logging + daily summaries restored with lightweight buffering and WebDAV daily summaries (`/GrowSensor/<deviceId>/daily/YYYY-MM-DD_summary.txt`).
+- Cloud status LED added next to Wi‑Fi with live OK/warn/error states; long‑range (1/3/6M) charts load directly from cloud data when connected.
+- UI polish + performance: preloaded KPIs/tiles/status, trend arrows stable, VPD detail popup resilient, CO₂ hidden when no sensor, sensor list deduped with delete support.
 
 ### Patch v0.3.3 (Stability Restoration)
 - Sensor system restored: BH1750, climate (SHT), CO₂ (MH-Z19/MH-Z14), VPD calculation, and telemetry status fields behave like pre-refactor.
