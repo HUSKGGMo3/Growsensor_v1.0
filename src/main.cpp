@@ -83,6 +83,13 @@ static constexpr uint8_t CLOUD_RECONNECT_MAX_ATTEMPTS = 3;
 static constexpr unsigned long CLOUD_RED_RETRY_INTERVAL_MS = 30000;
 static constexpr unsigned long CLOUD_DAILY_CACHE_TTL_MS = 10UL * 60UL * 1000UL;
 static constexpr size_t CLOUD_DAILY_CACHE_SIZE = 3;
+static constexpr unsigned long TELEMETRY_CACHE_TTL_MS = 15000;
+static constexpr unsigned long STATUS_CACHE_TTL_MS = 5000;
+static constexpr unsigned long HISTORY_CACHE_TTL_MS = 15000;
+static constexpr unsigned long DAILY_HISTORY_CACHE_TTL_MS = 60000;
+static constexpr unsigned long WIFI_SCAN_CACHE_TTL_MS = 45000;
+static constexpr size_t HISTORY_CACHE_SIZE = 6;
+static constexpr size_t DAILY_HISTORY_CACHE_SIZE = 4;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
 static constexpr unsigned long CLOUD_LOG_FLUSH_INTERVAL_MS = 30000;
 static constexpr size_t CLOUD_LOG_CAPACITY = 120;
@@ -458,6 +465,7 @@ bool startWifiScan();
 void wifiScanTick();
 void handleNetworkScanStart();
 void processCloudDailyFetch();
+void processDailyHistoryFetch();
 
 // Sensor toggles (persisted)
 bool enableLight = true;
@@ -568,6 +576,32 @@ struct CloudDailyFetchJob {
 };
 CloudDailyFetchJob cloudDailyFetch;
 
+struct ApiCacheEntry {
+  String key;
+  String payload;
+  unsigned long cachedAtMs = 0;
+};
+
+struct DailyHistoryFetchJob {
+  bool active = false;
+  String metric;
+  int days = 0;
+  std::vector<String> keys;
+  std::vector<DailyPoint> points;
+  size_t index = 0;
+  unsigned long startedAtMs = 0;
+};
+
+String telemetryCachePayload;
+unsigned long telemetryCacheAtMs = 0;
+String statusCachePayload;
+unsigned long statusCacheAtMs = 0;
+ApiCacheEntry historyCache[HISTORY_CACHE_SIZE];
+size_t historyCacheCursor = 0;
+ApiCacheEntry dailyHistoryCache[DAILY_HISTORY_CACHE_SIZE];
+size_t dailyHistoryCacheCursor = 0;
+DailyHistoryFetchJob dailyHistoryFetch;
+
 // ----------------------------
 // Helpers
 // ----------------------------
@@ -588,6 +622,27 @@ CloudProtocol cloudProtocol() {
 
 const char *cloudProtocolLabel() {
   return cloudProtocol() == CloudProtocol::HTTPS ? "https" : "http";
+}
+
+bool apiCacheHit(ApiCacheEntry *cache, size_t size, const String &key, unsigned long ttlMs, bool allowStale, String &payloadOut) {
+  unsigned long now = millis();
+  for (size_t i = 0; i < size; ++i) {
+    const ApiCacheEntry &entry = cache[i];
+    if (entry.key != key) continue;
+    if (!allowStale && entry.cachedAtMs != 0 && now - entry.cachedAtMs > ttlMs) continue;
+    if (entry.payload.length() == 0) continue;
+    payloadOut = entry.payload;
+    return true;
+  }
+  return false;
+}
+
+void storeApiCache(ApiCacheEntry *cache, size_t size, size_t &cursor, const String &key, const String &payload) {
+  ApiCacheEntry &slot = cache[cursor % size];
+  slot.key = key;
+  slot.payload = payload;
+  slot.cachedAtMs = millis();
+  cursor = (cursor + 1) % size;
 }
 
 bool beginCloudRequest(HTTPClient &http, const String &fullUrl, CloudRequestClients &clients) {
@@ -2499,6 +2554,7 @@ void cloudTick() {
   flushCloudLogs();
   processCloudQueue();
   processCloudDailyFetch();
+  processDailyHistoryFetch();
 }
 
 bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String &errorOut) {
@@ -6254,6 +6310,11 @@ void handlePartners() {
 
 void handleTelemetry() {
   pruneLogsIfLowMemory(false);
+  unsigned long now = millis();
+  if (telemetryCachePayload.length() > 0 && now - telemetryCacheAtMs < TELEMETRY_CACHE_TTL_MS) {
+    server.send(200, "application/json", telemetryCachePayload);
+    return;
+  }
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
   IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
   String ipStr = activeIp.toString();
@@ -6267,7 +6328,6 @@ void handleTelemetry() {
   bool co2Ok = enableCo2 && co2Health.present && co2Health.healthy && latest.co2ppm > 0 && latest.co2ppm < 5000;
   bool co2Present = enableCo2 && co2Health.present && co2Health.lastUpdate > 0;
   bool vpdOk = !isnan(latest.vpd);
-  unsigned long now = millis();
   uint64_t epochMs = currentEpochMs();
   bool syncedFlag = isTimeSynced();
   auto ageMs = [&](unsigned long t) -> unsigned long { return t == 0 ? 0UL : (now - t); };
@@ -6310,7 +6370,9 @@ void handleTelemetry() {
            luxDev.c_str(), climateDev.c_str(), leafDev.c_str(), co2Dev.c_str(),
            sampleTsFor("lux"), sampleTsFor("co2"), sampleTsFor("temp"), sampleTsFor("humidity"), sampleTsFor("leaf"), sampleTsFor("vpd"),
            everFor("lux"), everFor("co2"), everFor("temp"), everFor("humidity"), everFor("leaf"), everFor("vpd"));
-  server.send(200, "application/json", json);
+  telemetryCachePayload = String(json);
+  telemetryCacheAtMs = now;
+  server.send(200, "application/json", telemetryCachePayload);
 }
 
 void handlePing() {
@@ -6319,6 +6381,12 @@ void handlePing() {
 }
 
 void handleStatus() {
+  unsigned long now = millis();
+  if (statusCachePayload.length() > 0 && now - statusCacheAtMs < STATUS_CACHE_TTL_MS) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", statusCachePayload);
+    return;
+  }
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
   IPAddress activeIp = apMode ? WiFi.softAPIP() : WiFi.localIP();
   String ipStr = activeIp.toString();
@@ -6334,6 +6402,8 @@ void handleStatus() {
   json += "\"ip\":\"" + ipStr + "\",";
   json += "\"hostname\":\"" + deviceHostname + "\"";
   json += "}";
+  statusCachePayload = json;
+  statusCacheAtMs = now;
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", json);
 }
@@ -6354,6 +6424,12 @@ void handleHistory() {
   bool range24h = range == "24h" || range == "24hr" || range == "24hrs" || range == "day";
   bool range6h = range == "6h" || range == "6hr" || range == "6hrs";
   String normalized = range24h ? "24h" : (range6h ? "6h" : "live");
+  String cacheKey = metric + "|" + normalized;
+  String cachedPayload;
+  if (apiCacheHit(historyCache, HISTORY_CACHE_SIZE, cacheKey, HISTORY_CACHE_TTL_MS, false, cachedPayload)) {
+    server.send(200, "application/json", cachedPayload);
+    return;
+  }
   uint64_t now = currentEpochMs();
   flushBucket(def->series, true, now);
   flushBucket(def->series, false, now);
@@ -6403,6 +6479,7 @@ void handleHistory() {
 
   bool syncedFlag = isTimeSynced();
   json += "],\"time_synced\":" + String(syncedFlag ? 1 : 0) + ",\"timezone\":\"" + timezoneName + "\",\"epoch_base_ms\":" + String((unsigned long long)(syncedFlag ? currentEpochMs() : 0)) + "}";
+  storeApiCache(historyCache, HISTORY_CACHE_SIZE, historyCacheCursor, cacheKey, json);
   server.send(200, "application/json", json);
 }
 
@@ -6453,33 +6530,9 @@ std::vector<String> dayKeysBetween(const String &from, const String &to) {
   return keys;
 }
 
-void handleDailyHistory() {
-  if (!enforceAuth()) return;
-  if (!cloudConnected()) {
-    server.send(403, "text/plain", "cloud inactive");
-    return;
-  }
-  String metric = server.hasArg("metric") ? server.arg("metric") : "";
-  int days = server.hasArg("days") ? server.arg("days").toInt() : 30;
-  if (days < 1) days = 1;
-  if (days > 120) days = 120;
-  days = std::min(days, (int)retentionDays());
-  int idx = metricIndex(metric);
-  if (idx < 0) { server.send(400, "text/plain", "invalid metric"); return; }
-  pruneLogsIfLowMemory(false);
-  bool cloudOk = cloudConnected();
-  std::vector<DailyPoint> points;
-  DAILY_HISTORY[idx].clear();
-  if (cloudOk) {
-    auto keys = recentDayKeys(days);
-    for (const auto &k : keys) {
-      DailyPoint p;
-      if (fetchCloudDailyPoint(k, metric, p)) {
-        DAILY_HISTORY[idx].push_back(p);
-      }
-    }
-    points = DAILY_HISTORY[idx];
-  }
+String buildDailyHistoryPayload(const String &metric, const std::vector<DailyPoint> &points, bool cloudOk, bool pending) {
+  int metricIdx = metricIndex(metric);
+  uint8_t decimals = metricIdx >= 0 ? HISTORY_METRICS[metricIdx].decimals : 2;
   String json;
   json.reserve(256);
   json = "{\"metric\":\"" + metric + "\",\"points\":[";
@@ -6490,17 +6543,89 @@ void handleDailyHistory() {
     if (!first) json += ",";
     first = false;
     json += "[" + String((unsigned long long)ts * 1000ULL) + ",";
-    json += "{\"avg\":" + String((double)p.avg, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
-    json += "\"min\":" + String((double)p.min, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
-    json += "\"max\":" + String((double)p.max, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
-    json += "\"last\":" + String((double)p.last, (unsigned int)HISTORY_METRICS[idx].decimals) + ",";
+    json += "{\"avg\":" + String((double)p.avg, (unsigned int)decimals) + ",";
+    json += "\"min\":" + String((double)p.min, (unsigned int)decimals) + ",";
+    json += "\"max\":" + String((double)p.max, (unsigned int)decimals) + ",";
+    json += "\"last\":" + String((double)p.last, (unsigned int)decimals) + ",";
     json += "\"count\":" + String(p.count) + "}";
     json += "]";
   };
   for (const auto &p : points) appendPoint(p);
-  json += "],\"time_synced\":" + String((isTimeSynced() && cloudOk) ? 1 : 0) + ",\"cloud\":"
-      + String(cloudOk ? 1 : 0) + "}";
-  server.send(200, "application/json", json);
+  json += "],\"time_synced\":" + String((isTimeSynced() && cloudOk) ? 1 : 0);
+  json += ",\"cloud\":" + String(cloudOk ? 1 : 0);
+  if (pending) json += ",\"pending\":true";
+  json += "}";
+  return json;
+}
+
+void queueDailyHistoryFetch(const String &metric, int days) {
+  if (dailyHistoryFetch.active && dailyHistoryFetch.metric == metric && dailyHistoryFetch.days == days) {
+    return;
+  }
+  dailyHistoryFetch.active = true;
+  dailyHistoryFetch.metric = metric;
+  dailyHistoryFetch.days = days;
+  dailyHistoryFetch.index = 0;
+  dailyHistoryFetch.keys.clear();
+  dailyHistoryFetch.points.clear();
+  dailyHistoryFetch.startedAtMs = millis();
+  dailyHistoryFetch.keys = recentDayKeys(days);
+}
+
+void processDailyHistoryFetch() {
+  if (!dailyHistoryFetch.active) return;
+  if (!cloudConnected()) return;
+  if (dailyHistoryFetch.keys.empty()) {
+    dailyHistoryFetch.active = false;
+    return;
+  }
+  if (millis() - dailyHistoryFetch.startedAtMs > 20000UL) {
+    dailyHistoryFetch.active = false;
+    return;
+  }
+  if (dailyHistoryFetch.index < dailyHistoryFetch.keys.size()) {
+    DailyPoint p;
+    if (fetchCloudDailyPoint(dailyHistoryFetch.keys[dailyHistoryFetch.index], dailyHistoryFetch.metric, p)) {
+      dailyHistoryFetch.points.push_back(p);
+    }
+    dailyHistoryFetch.index++;
+  }
+  if (dailyHistoryFetch.index >= dailyHistoryFetch.keys.size()) {
+    String payload = buildDailyHistoryPayload(dailyHistoryFetch.metric, dailyHistoryFetch.points, true, false);
+    storeApiCache(dailyHistoryCache, DAILY_HISTORY_CACHE_SIZE, dailyHistoryCacheCursor,
+                  dailyHistoryFetch.metric + "|" + String(dailyHistoryFetch.days), payload);
+    dailyHistoryFetch.active = false;
+  }
+}
+
+void handleDailyHistory() {
+  if (!enforceAuth()) return;
+  String metric = server.hasArg("metric") ? server.arg("metric") : "";
+  int days = server.hasArg("days") ? server.arg("days").toInt() : 30;
+  if (days < 1) days = 1;
+  if (days > 120) days = 120;
+  days = std::min(days, (int)retentionDays());
+  int idx = metricIndex(metric);
+  if (idx < 0) { server.send(400, "text/plain", "invalid metric"); return; }
+  pruneLogsIfLowMemory(false);
+  bool cloudOk = cloudConnected();
+  String cacheKey = metric + "|" + String(days);
+  String cachedPayload;
+  bool allowStale = !cloudOk;
+  if (apiCacheHit(dailyHistoryCache, DAILY_HISTORY_CACHE_SIZE, cacheKey, DAILY_HISTORY_CACHE_TTL_MS, allowStale, cachedPayload)) {
+    server.send(200, "application/json", cachedPayload);
+    return;
+  }
+
+  if (!cloudOk) {
+    String payload = buildDailyHistoryPayload(metric, {}, false, false);
+    server.send(200, "application/json", payload);
+    return;
+  }
+
+  queueDailyHistoryFetch(metric, days);
+  String payload = buildDailyHistoryPayload(metric, {}, true, true);
+  server.send(200, "application/json", payload);
 }
 
 bool cloudDailyCacheHit(const String &sensor, const String &from, const String &to, bool allowStale, String &payloadOut) {
@@ -7142,6 +7267,18 @@ void handleNetworks() {
 void handleNetworkScanStart() {
   if (!enforceAuth())
     return;
+  unsigned long now = millis();
+  bool recent = wifiScan.lastCompletedAtMs != 0 && now - wifiScan.lastCompletedAtMs < WIFI_SCAN_CACHE_TTL_MS;
+  if (wifiScan.scanning) {
+    String json = "{\"started\":0,\"scanning\":1,\"cached\":" + String(recent ? 1 : 0) + "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+  if (recent) {
+    String json = "{\"started\":0,\"scanning\":0,\"cached\":1}";
+    server.send(200, "application/json", json);
+    return;
+  }
   bool started = startWifiScan();
   String json = "{\"started\":" + String(started ? 1 : 0);
   json += ",\"scanning\":" + String(wifiScan.scanning ? 1 : 0) + "}";
