@@ -100,7 +100,7 @@ static constexpr size_t CLOUD_LOG_FLUSH_LINES = 24;
 static constexpr unsigned long DEBUG_LOG_INTERVAL_MS = 5UL * 60UL * 1000UL;
 static constexpr unsigned long DEBUG_LOG_MAX_CACHE_MS = 5UL * 60UL * 1000UL;
 static constexpr size_t DEBUG_LOG_MAX_FILE_BYTES = 64000;
-static const char *FIRMWARE_VERSION = "v0.3.5";
+static const char *FIRMWARE_VERSION = "v0.4.0";
 static const char *CLOUD_ROOT_FOLDER = "GrowSensor";
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";

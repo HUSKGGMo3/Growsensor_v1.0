@@ -1,6 +1,10 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.3.5 (Stability + Insight Update)**
+**Aktuelle Version: v0.4.0 (Doku- & Installations-Refresh)**
+
+### Release v0.4.0 (Doku- & Installations-Refresh)
+- Firmware-Version auf v0.4.0 angehoben.
+- Einfache Installationsanleitung ergänzt (Deutsch & Englisch).
 
 ### Patch v0.3.5 (Stability + Insight Update)
 - Periodische Cloud-Debug-Snapshots alle 5 Minuten (`/GrowSensor/<deviceId>/logs/debug_YYYY-MM-DD.txt`) mit WLAN/Cloud-Queue/Backoff/Sensorzuständen sowie Loop-Health; kein dauerhafter ESP-Speicher.
@@ -65,7 +69,7 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Nur Monitoring: liest Sensoren aus, berechnet PPFD/VPD, zeigt Dashboards und Logs.
 - Keine Aktorsteuerung: Relais/Automatisierung sind nicht implementiert.
 
-## Features (Stand v0.2.x)
+## Features (Stand v0.4.x)
 - Sensor-Monitoring: Temperatur, Luftfeuchte, CO₂, Lux → PPFD, Blatt-Temperatur.
 - VPD-Berechnung mit Wachstumsphasen (Steckling/Veg/Blüte/Späte Blüte) und Status (unter / im / über Ziel).
 - Webbasierte UI mit Captive Portal, Live-Dashboard, 24h-Chart, Mittelwerten und Logs.
@@ -73,7 +77,7 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Authentifizierung mit Pflicht-Passwortwechsel beim ersten Login.
 - Partner-/Supporter-Modul (lokal gespeichert, in der UI sichtbar).
 
-## UI/UX-Update (v0.2.x Dashboard)
+## UI/UX-Update (v0.4.x Dashboard)
 - Zwei In-App-Ansichten: **Dashboard** (Standard) und **Sensoren** (Sensorverwaltung) mit clientseitigem Umschalten.
 - Metrik-Kacheln sind voll klickbar; ein Detail-Modal öffnet Live- und 6h-Charts für Lux, PPFD, CO₂, Temp, Luftfeuchte, Leaf und VPD, inkl. Klick-Logging zum Debuggen von Overlays.
 - Sensorkacheln zeigen statusabhängige LEDs je Metrik (grün = gültige Daten, gelb = alt/ungültig, grau = deaktiviert/nicht vorhanden) basierend auf Telemetrie-Flags.
@@ -91,6 +95,21 @@ Leichtgewichtige, reine Monitoring-Firmware für einen ESP32 mit WebUI. Bietet S
 - Standard-Login: `Admin` / `admin`
 - Passwortwechsel ist beim ersten Login erforderlich, bevor Wi-Fi geändert werden darf.
 - Es existiert ein Master-Passwort für Recovery; Wert wird hier nicht veröffentlicht – bei Bedarf beim Build setzen.
+
+## Installationsanleitung für Dummies
+Du brauchst nur ein ESP32, ein USB-Kabel (mit Daten!) und einen PC/Laptop.
+
+1. **VS Code** installieren und die Erweiterung **PlatformIO IDE** hinzufügen.
+2. Dieses Repository in VS Code öffnen.
+3. ESP32 per USB anschließen (kein reines Ladekabel).
+4. In PlatformIO den richtigen **Seriellen Port** auswählen.
+5. Einmal **Build** klicken, um zu prüfen, dass alles kompiliert.
+6. **Upload** klicken, um die Firmware zu flashen.
+7. **Seriellen Monitor** mit **115200 Baud** öffnen (Logs ansehen).
+8. Nach dem Neustart mit dem angezeigten Setup‑WLAN verbinden (steht im Serial‑Log) und die Setup‑Seite im Browser öffnen.
+9. Einloggen mit `Admin` / `admin`, Passwort ändern und Wi‑Fi/Sensoren konfigurieren.
+
+Wenn etwas nicht klappt: USB abziehen/anstecken, anderes Kabel/Port probieren, erneut Build/Upload.
 
 ## Build & Flash (PlatformIO)
 1. PlatformIO CLI oder VS Code + PlatformIO-Extension installieren.

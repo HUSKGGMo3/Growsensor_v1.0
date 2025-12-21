@@ -1,6 +1,10 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.5 (Stability + Insight Update)**
+**Current release: v0.4.0 (Documentation + Install Guide Refresh)**
+
+### Release v0.4.0 (Documentation + Install Guide Refresh)
+- Firmware version bumped to v0.4.0.
+- Beginner-friendly installation guide added (English + German docs).
 
 ### Patch v0.3.5 (Stability + Insight Update)
 - Adds periodic cloud debug snapshots every 5 minutes (`/GrowSensor/<deviceId>/logs/debug_YYYY-MM-DD.txt`) with Wi‑Fi, cloud queue/backoff, sensor health, and loop diagnostics; no local persistence beyond the short upload cache.
@@ -65,7 +69,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
 - No actuator control yet: no relays or automation are driven by this firmware.
 
-## Features (as of v0.2.x)
+## Features (as of v0.4.x)
 - Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
 - VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
 - Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
@@ -74,7 +78,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Authentication with forced password change on first login.
 - Partner / Supporter module stored locally and shown in the UI.
 
-## UI/UX refresh (v0.2.x dashboard update)
+## UI/UX refresh (v0.4.x dashboard update)
 - Two in-app views: **Dashboard** (default) and **Sensoren** (sensor management) with client-side switching.
 - Metric tiles are fully clickable; a detail modal opens with live and 6h charts for Lux, PPFD, CO₂, Temp, Humidity, Leaf, and VPD, with click-logging to debug overlay blockers.
 - Sensor tiles show per-metric status LEDs (green = valid data, yellow = stale/invalid, gray = disabled/not present) driven by telemetry flags.
@@ -92,6 +96,21 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 - Default login: `Admin` / `admin`
 - Password change is required on first login before Wi-Fi changes are allowed.
 - A master password exists for recovery; set your own at build time if needed.
+
+## Beginner-Friendly Install (for Dummies)
+You only need a USB cable, an ESP32, and a laptop/PC.
+
+1. Install **VS Code** and the **PlatformIO** extension (search “PlatformIO IDE” in VS Code extensions).
+2. Open this repository folder in VS Code.
+3. Connect the ESP32 via USB (use a data cable, not charge-only).
+4. In PlatformIO, select the correct **Serial Port** for your ESP32.
+5. Click **Build** (checkmark) once to make sure it compiles.
+6. Click **Upload** (right arrow) to flash the firmware.
+7. Open the **Serial Monitor** at **115200 baud** to see logs.
+8. After reboot, connect your phone/PC to the device’s setup Wi‑Fi (shown in the serial log), then open the setup page in your browser.
+9. Log in with `Admin` / `admin`, change the password, and configure Wi‑Fi/sensors.
+
+If anything fails: unplug/replug, try another USB cable/port, and rebuild/upload again.
 
 ## Build & Flash (PlatformIO)
 1. Install PlatformIO CLI or VS Code + PlatformIO extension.
