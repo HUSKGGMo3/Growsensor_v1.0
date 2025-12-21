@@ -568,7 +568,7 @@ LightChannel lightChannelFromString(const String &value) {
 
 const PhasePreset *phasePresetById(const String &id) {
   for (size_t i = 0; i < PHASE_PRESET_COUNT; i++) {
-    if (id == PHASE_PRESETS[i].id) return &PHASE_PRESETS[i];
+    if (id.equals(PHASE_PRESETS[i].id)) return &PHASE_PRESETS[i];
   }
   return nullptr;
 }
@@ -576,7 +576,7 @@ const PhasePreset *phasePresetById(const String &id) {
 String phaseFromState() {
   for (size_t i = 0; i < PHASE_PRESET_COUNT; i++) {
     const PhasePreset &preset = PHASE_PRESETS[i];
-    if (preset.channel == channel && preset.vpdStage == vpdStageId &&
+    if (preset.channel == channel && vpdStageId.equals(preset.vpdStage) &&
         fabs(preset.ppfdScale - ppfdScale) < 0.0001f) {
       return preset.id;
     }
@@ -660,7 +660,7 @@ Co2SensorType co2FromString(const String &v) {
 
 const VpdProfile &vpdProfileById(const String &id) {
   for (const auto &p : VPD_PROFILES) {
-    if (id == p.id)
+    if (id.equals(p.id))
       return p;
   }
   return VPD_PROFILES[0];
@@ -668,7 +668,7 @@ const VpdProfile &vpdProfileById(const String &id) {
 
 MetricDef *historyById(const String &id) {
   for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
-    if (id == HISTORY_METRICS[i].id)
+    if (id.equals(HISTORY_METRICS[i].id))
       return &HISTORY_METRICS[i];
   }
   return nullptr;
@@ -676,14 +676,14 @@ MetricDef *historyById(const String &id) {
 
 MetricSampleInfo *sampleInfoById(const String &id) {
   for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
-    if (id == HISTORY_METRICS[i].id) return &SAMPLE_INFO[i];
+    if (id.equals(HISTORY_METRICS[i].id)) return &SAMPLE_INFO[i];
   }
   return nullptr;
 }
 
 int metricIndex(const String &id) {
   for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
-    if (id == HISTORY_METRICS[i].id) return (int)i;
+    if (id.equals(HISTORY_METRICS[i].id)) return (int)i;
   }
   return -1;
 }
@@ -1504,7 +1504,7 @@ bool isValidLightChannelName(const String &value) {
 
 bool isValidVpdStageId(const String &id) {
   for (const auto &p : VPD_PROFILES) {
-    if (id == p.id) return true;
+    if (id.equals(p.id)) return true;
   }
   return false;
 }
