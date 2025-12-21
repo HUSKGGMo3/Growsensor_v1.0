@@ -377,6 +377,9 @@ struct CloudStatus {
   int lastUploadErrorCode = 0;
   String lastError;
   String lastErrorSuffix;
+  String lastPath;
+  String lastNote;
+  String lastErrorReason;
   String lastUrl;
   String lastUploadedPath;
   String lastStateReason;
@@ -879,7 +882,9 @@ void startCloudReconnect(const String &reason, bool immediate = true) {
 }
 
 void logCloudRedFailure(const String &cause, const String &lastState) {
-  String target = cloudStatus.lastUrl.length() > 0 ? cloudStatus.lastUrl : (cloudStatus.lastUploadedPath.length() > 0 ? cloudStatus.lastUploadedPath : "n/a");
+  String target = cloudStatus.lastPath.length() > 0 ? cloudStatus.lastPath
+                  : (cloudStatus.lastUrl.length() > 0 ? cloudStatus.lastUrl
+                     : (cloudStatus.lastUploadedPath.length() > 0 ? cloudStatus.lastUploadedPath : "n/a"));
   String status = String("connected=") + String(cloudStatus.connected ? 1 : 0) + " enabled=" + String(cloudStatus.enabled ? 1 : 0)
                   + " recording=" + String(cloudStatus.recording ? 1 : 0);
   String msg = "Cloud RED: cause=" + cause + " http=" + String(cloudStatus.lastHttpCode) + " error=\"" + cloudStatus.lastError
@@ -2017,7 +2022,16 @@ bool uploadCloudPutPayload(const String &fullPath, const String &payload, const 
   String chain;
   bool httpsRedirected = false;
   bool ok = webdavRequestFollowRedirects("PUT", url, payload, ctype, code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("PUT", "upload", fullPath, code, chain, httpsRedirected);
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastPath = cloudShortPath(fullPath);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "PUT upload";
+  cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+  if (chain.length() > 0) {
+    cloudStatus.lastError = String("PUT upload -> ") + chain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = chain;
+  }
   cloudStatus.lastUploadErrorCode = code;
   cloudStatus.lastUploadSuccess = ok;
   cloudStatus.activeChunkUpload = false;
@@ -2026,7 +2040,17 @@ bool uploadCloudPutPayload(const String &fullPath, const String &payload, const 
       markCloudFailure(cloudStatus.lastError);
       cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
     } else {
-      setCloudError("PUT", "upload", fullPath, code, resp, httpsRedirected ? "redirected-to-https" : "");
+      cloudStatus.lastHttpCode = code;
+      cloudStatus.lastPath = cloudShortPath(fullPath);
+      cloudStatus.lastUrl = cloudStatus.lastPath;
+      cloudStatus.lastNote = "PUT upload";
+      cloudStatus.lastErrorReason = resp;
+      String msg = String("PUT upload -> ") + String(code);
+      if (resp.length() > 0) msg += String(" ") + resp;
+      msg += String(" (") + cloudProtocolLabel() + ")";
+      markCloudFailure(msg);
+      cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+      logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     }
     logEvent(String("Cloud upload failed: ") + fullPath + " code=" + String(code), "warn", "cloud");
     return false;
@@ -2063,7 +2087,12 @@ bool attemptChunkCleanup() {
   int code = 0;
   String resp;
   bool ok = webdavDelete(sessionUrl, code, &resp, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("DELETE", "chunk", sessionPath, code, "", false);
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastPath = cloudShortPath(sessionPath);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "DELETE chunk";
+  cloudStatus.lastErrorReason = "";
+  cloudStatus.lastErrorSuffix = "";
   if (ok && code >= 200 && code < 300) {
     logEvent(String("Cloud chunk cleanup ok: ") + pendingChunkCleanupId);
     pendingChunkCleanupId = "";
@@ -2077,25 +2106,6 @@ bool attemptChunkCleanup() {
     pendingChunkCleanupAttempts = 0;
   }
   return false;
-}
-
-void setCloudRequestNote(const char *op, const String &label, const String &path, int code, const String &chain, bool httpsRedirected) {
-  cloudStatus.lastHttpCode = code;
-  cloudStatus.lastUrl = cloudShortPath(path);
-  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
-  if (chain.length() > 0) {
-    cloudStatus.lastError = String(op) + " " + label + " -> " + chain + " (" + cloudProtocolLabel() + ")";
-  }
-}
-
-void setCloudError(const char *op, const String &label, const String &path, int code, const String &detail = "", const String &suffix = "") {
-  cloudStatus.lastHttpCode = code;
-  cloudStatus.lastUrl = cloudShortPath(path);
-  String msg = String(op) + " " + label + " -> " + String(code);
-  if (detail.length() > 0) msg += String(" ") + detail;
-  msg += String(" (") + cloudProtocolLabel() + ")";
-  markCloudFailure(msg);
-  cloudStatus.lastErrorSuffix = suffix;
 }
 
 bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS, String *location = nullptr) {
@@ -2300,13 +2310,32 @@ bool ensureCollection(const String &path, const char *label) {
   String chain;
   bool httpsRedirected = false;
   bool ok = webdavRequestFollowRedirects("MKCOL", url, "", "text/plain", code, location, resp, &chain, &httpsRedirected);
-  setCloudRequestNote("MKCOL", label, path, code, chain, httpsRedirected);
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastPath = cloudShortPath(path);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = String("MKCOL ") + label;
+  cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+  if (chain.length() > 0) {
+    cloudStatus.lastError = String("MKCOL ") + label + " -> " + chain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = chain;
+  }
   if (!ok) {
     if (chain.length() > 0) {
       markCloudFailure(cloudStatus.lastError);
       cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
     } else {
-      setCloudError("MKCOL", label, path, code, resp, httpsRedirected ? "redirected-to-https" : "");
+      cloudStatus.lastHttpCode = code;
+      cloudStatus.lastPath = cloudShortPath(path);
+      cloudStatus.lastUrl = cloudStatus.lastPath;
+      cloudStatus.lastNote = String("MKCOL ") + label;
+      cloudStatus.lastErrorReason = resp;
+      String msg = String("MKCOL ") + label + " -> " + String(code);
+      if (resp.length() > 0) msg += String(" ") + resp;
+      msg += String(" (") + cloudProtocolLabel() + ")";
+      markCloudFailure(msg);
+      cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+      logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     }
     return false;
   }
@@ -2330,7 +2359,16 @@ bool pingCloud(bool force) {
   String chain;
   bool httpsRedirected = false;
   bool ok = webdavRequestFollowRedirects("PROPFIND", url, "", "text/plain", code, location, resp, &chain, &httpsRedirected);
-  setCloudRequestNote("PROPFIND", "base", "/", code, chain, httpsRedirected);
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastPath = "/";
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "PROPFIND base";
+  cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+  if (chain.length() > 0) {
+    cloudStatus.lastError = String("PROPFIND base -> ") + chain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = chain;
+  }
   if (!ok) {
     if (chain.length() > 0) {
       markCloudFailure(cloudStatus.lastError);
@@ -2338,14 +2376,44 @@ bool pingCloud(bool force) {
       return false;
     }
     if (code == 401 || code == 403) {
-      setCloudError("PROPFIND", "auth", "/", code, resp, httpsRedirected ? "redirected-to-https" : "");
+      cloudStatus.lastHttpCode = code;
+      cloudStatus.lastPath = "/";
+      cloudStatus.lastUrl = cloudStatus.lastPath;
+      cloudStatus.lastNote = "PROPFIND auth";
+      cloudStatus.lastErrorReason = resp;
+      String msg = String("PROPFIND auth -> ") + String(code);
+      if (resp.length() > 0) msg += String(" ") + resp;
+      msg += String(" (") + cloudProtocolLabel() + ")";
+      markCloudFailure(msg);
+      cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+      logEvent(String("Cloud error: ") + msg, "warn", "cloud");
       return false;
     }
     if (code == 404) {
-      setCloudError("PROPFIND", "base", "/", code, resp, httpsRedirected ? "redirected-to-https" : "");
+      cloudStatus.lastHttpCode = code;
+      cloudStatus.lastPath = "/";
+      cloudStatus.lastUrl = cloudStatus.lastPath;
+      cloudStatus.lastNote = "PROPFIND base";
+      cloudStatus.lastErrorReason = resp;
+      String msg = String("PROPFIND base -> ") + String(code);
+      if (resp.length() > 0) msg += String(" ") + resp;
+      msg += String(" (") + cloudProtocolLabel() + ")";
+      markCloudFailure(msg);
+      cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+      logEvent(String("Cloud error: ") + msg, "warn", "cloud");
       return false;
     }
-    setCloudError("PROPFIND", "base", "/", code, resp, httpsRedirected ? "redirected-to-https" : "");
+    cloudStatus.lastHttpCode = code;
+    cloudStatus.lastPath = "/";
+    cloudStatus.lastUrl = cloudStatus.lastPath;
+    cloudStatus.lastNote = "PROPFIND base";
+    cloudStatus.lastErrorReason = resp;
+    String msg = String("PROPFIND base -> ") + String(code);
+    if (resp.length() > 0) msg += String(" ") + resp;
+    msg += String(" (") + cloudProtocolLabel() + ")";
+    markCloudFailure(msg);
+    cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     return false;
   }
   if (!cloudEnsureFolders("")) {
@@ -2404,7 +2472,16 @@ bool uploadDebugLogJob(const CloudJob &job) {
   bool httpsRedirected = false;
   int putCode = 0;
   bool ok = webdavRequestFollowRedirects("PUT", url, payload, "text/plain", putCode, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("PUT", "debug", fullPath, putCode, chain, httpsRedirected);
+  cloudStatus.lastHttpCode = putCode;
+  cloudStatus.lastPath = cloudShortPath(fullPath);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "PUT debug";
+  cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+  if (chain.length() > 0) {
+    cloudStatus.lastError = String("PUT debug -> ") + chain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = chain;
+  }
   cloudStatus.lastUploadErrorCode = putCode;
   cloudStatus.lastUploadSuccess = ok;
   cloudStatus.activeChunkUpload = false;
@@ -2413,7 +2490,17 @@ bool uploadDebugLogJob(const CloudJob &job) {
       markCloudFailure(cloudStatus.lastError);
       cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
     } else {
-      setCloudError("PUT", "debug", fullPath, putCode, resp, httpsRedirected ? "redirected-to-https" : "");
+      cloudStatus.lastHttpCode = putCode;
+      cloudStatus.lastPath = cloudShortPath(fullPath);
+      cloudStatus.lastUrl = cloudStatus.lastPath;
+      cloudStatus.lastNote = "PUT debug";
+      cloudStatus.lastErrorReason = resp;
+      String msg = String("PUT debug -> ") + String(putCode);
+      if (resp.length() > 0) msg += String(" ") + resp;
+      msg += String(" (") + cloudProtocolLabel() + ")";
+      markCloudFailure(msg);
+      cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+      logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     }
     return false;
   }
@@ -2649,12 +2736,31 @@ bool uploadCloudJob(const CloudJob &job) {
   String mkChain;
   bool mkRedirected = false;
   bool mkOk = webdavRequestFollowRedirects("MKCOL", sessionUrl, "", "text/plain", mkCode, mkLocation, mkResp, &mkChain, &mkRedirected, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("MKCOL", "chunk", sessionPath, mkCode, mkChain, mkRedirected);
+  cloudStatus.lastHttpCode = mkCode;
+  cloudStatus.lastPath = cloudShortPath(sessionPath);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "MKCOL chunk";
+  cloudStatus.lastErrorReason = mkRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = mkRedirected ? "redirected-to-https" : "";
+  if (mkChain.length() > 0) {
+    cloudStatus.lastError = String("MKCOL chunk -> ") + mkChain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = mkChain;
+  }
   if (!mkOk) {
     cloudStatus.activeChunkUpload = false;
     cloudStatus.lastUploadErrorCode = mkCode;
     cloudStatus.lastUploadSuccess = false;
-    setCloudError("MKCOL", "chunk", sessionPath, mkCode, mkResp, mkRedirected ? "redirected-to-https" : "");
+    cloudStatus.lastHttpCode = mkCode;
+    cloudStatus.lastPath = cloudShortPath(sessionPath);
+    cloudStatus.lastUrl = cloudStatus.lastPath;
+    cloudStatus.lastNote = "MKCOL chunk";
+    cloudStatus.lastErrorReason = mkResp;
+    String msg = String("MKCOL chunk -> ") + String(mkCode);
+    if (mkResp.length() > 0) msg += String(" ") + mkResp;
+    msg += String(" (") + cloudProtocolLabel() + ")";
+    markCloudFailure(msg);
+    cloudStatus.lastErrorSuffix = mkRedirected ? "redirected-to-https" : "";
+    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     logEvent(String("Cloud chunk session failed: ") + sessionUrl + " code=" + String(mkCode), "warn", "cloud");
     return false;
   }
@@ -2674,7 +2780,16 @@ bool uploadCloudJob(const CloudJob &job) {
     String chain;
     bool httpsRedirected = false;
     bool ok = webdavRequestFollowRedirects("PUT", chunkUrl, chunkPayload, ctype, code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
-    setCloudRequestNote("PUT", "chunk", chunkPath, code, chain, httpsRedirected);
+    cloudStatus.lastHttpCode = code;
+    cloudStatus.lastPath = cloudShortPath(chunkPath);
+    cloudStatus.lastUrl = cloudStatus.lastPath;
+    cloudStatus.lastNote = "PUT chunk";
+    cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+    cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+    if (chain.length() > 0) {
+      cloudStatus.lastError = String("PUT chunk -> ") + chain + " (" + cloudProtocolLabel() + ")";
+      cloudStatus.lastErrorReason = chain;
+    }
     if (!ok) {
       cloudStatus.activeChunkUpload = false;
       cloudStatus.lastUploadErrorCode = code;
@@ -2683,7 +2798,17 @@ bool uploadCloudJob(const CloudJob &job) {
         markCloudFailure(cloudStatus.lastError);
         cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
       } else {
-        setCloudError("PUT", "chunk", chunkPath, code, resp, httpsRedirected ? "redirected-to-https" : "");
+        cloudStatus.lastHttpCode = code;
+        cloudStatus.lastPath = cloudShortPath(chunkPath);
+        cloudStatus.lastUrl = cloudStatus.lastPath;
+        cloudStatus.lastNote = "PUT chunk";
+        cloudStatus.lastErrorReason = resp;
+        String msg = String("PUT chunk -> ") + String(code);
+        if (resp.length() > 0) msg += String(" ") + resp;
+        msg += String(" (") + cloudProtocolLabel() + ")";
+        markCloudFailure(msg);
+        cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+        logEvent(String("Cloud error: ") + msg, "warn", "cloud");
       }
       logEvent(String("Cloud chunk upload failed: ") + chunkUrl + " code=" + String(code), "warn", "cloud");
       int delCode = 0;
@@ -2701,12 +2826,27 @@ bool uploadCloudJob(const CloudJob &job) {
   int mvCode = 0;
   String mvResp;
   bool moveOk = webdavMove(sourceUrl, finalUrl, mvCode, &mvResp, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("MOVE", "chunk", fullPath, mvCode, "", false);
+  cloudStatus.lastHttpCode = mvCode;
+  cloudStatus.lastPath = cloudShortPath(fullPath);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "MOVE chunk";
+  cloudStatus.lastErrorReason = "";
+  cloudStatus.lastErrorSuffix = "";
   cloudStatus.lastUploadErrorCode = mvCode;
   cloudStatus.lastUploadSuccess = moveOk;
   cloudStatus.activeChunkUpload = false;
   if (!moveOk || mvCode < 200 || mvCode >= 300) {
-    setCloudError("MOVE", "chunk", fullPath, mvCode, mvResp);
+    cloudStatus.lastHttpCode = mvCode;
+    cloudStatus.lastPath = cloudShortPath(fullPath);
+    cloudStatus.lastUrl = cloudStatus.lastPath;
+    cloudStatus.lastNote = "MOVE chunk";
+    cloudStatus.lastErrorReason = mvResp;
+    String msg = String("MOVE chunk -> ") + String(mvCode);
+    if (mvResp.length() > 0) msg += String(" ") + mvResp;
+    msg += String(" (") + cloudProtocolLabel() + ")";
+    markCloudFailure(msg);
+    cloudStatus.lastErrorSuffix = "";
+    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
     logEvent(String("Cloud chunk finalize failed: ") + fullPath + " code=" + String(mvCode), "warn", "cloud");
     int delCode = 0;
     String delResp;
@@ -2830,7 +2970,16 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
   String chain;
   bool httpsRedirected = false;
   bool ok = webdavRequestFollowRedirects("PUT", buildWebDavUrl(pathOut), body, "text/plain", code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
-  setCloudRequestNote("PUT", "test", pathOut, code, chain, httpsRedirected);
+  cloudStatus.lastHttpCode = code;
+  cloudStatus.lastPath = cloudShortPath(pathOut);
+  cloudStatus.lastUrl = cloudStatus.lastPath;
+  cloudStatus.lastNote = "PUT test";
+  cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
+  cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+  if (chain.length() > 0) {
+    cloudStatus.lastError = String("PUT test -> ") + chain + " (" + cloudProtocolLabel() + ")";
+    cloudStatus.lastErrorReason = chain;
+  }
   httpCode = code;
   cloudStatus.lastUploadErrorCode = code;
   cloudStatus.lastUploadSuccess = ok;
@@ -2850,7 +2999,17 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
     markCloudFailure(cloudStatus.lastError);
     cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
   } else {
-    setCloudError("PUT", "test", pathOut, code, resp, httpsRedirected ? "redirected-to-https" : "");
+    cloudStatus.lastHttpCode = code;
+    cloudStatus.lastPath = cloudShortPath(pathOut);
+    cloudStatus.lastUrl = cloudStatus.lastPath;
+    cloudStatus.lastNote = "PUT test";
+    cloudStatus.lastErrorReason = resp;
+    String msg = String("PUT test -> ") + String(code);
+    if (resp.length() > 0) msg += String(" ") + resp;
+    msg += String(" (") + cloudProtocolLabel() + ")";
+    markCloudFailure(msg);
+    cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
+    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
   }
   errorOut = cloudStatus.lastError;
   return false;
@@ -7060,6 +7219,9 @@ void handleCloud() {
     doc["last_error"] = cloudStatus.lastError;
     doc["last_error_suffix"] = cloudStatus.lastErrorSuffix;
     doc["last_http_code"] = cloudStatus.lastHttpCode;
+    doc["last_path"] = cloudStatus.lastPath;
+    doc["last_note"] = cloudStatus.lastNote;
+    doc["last_error_reason"] = cloudStatus.lastErrorReason;
     doc["last_url"] = cloudStatus.lastUrl;
     doc["last_state_reason"] = cloudStatus.lastStateReason;
     doc["device_folder"] = cloudStatus.deviceFolder;
