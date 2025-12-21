@@ -439,6 +439,8 @@ bool enableCo2 = true;
 
 // VPD stage
 String vpdStageId = "seedling";
+String phaseId = "seedling";
+float ppfdScale = 1.0f;
 
 // Stall tracking
 SensorStall stallLight;
@@ -459,6 +461,22 @@ const VpdProfile VPD_PROFILES[] = {
     {"bloom", "Blütephase", 1.0f, 1.4f},       // early flower
     {"late_bloom", "Späteblüte", 1.2f, 1.6f},  // late flower
 };
+
+struct PhasePreset {
+  const char *id;
+  const char *label;
+  LightChannel channel;
+  const char *vpdStage;
+  float ppfdScale;
+};
+
+const PhasePreset PHASE_PRESETS[] = {
+    {"seedling", "Steckling/Sämling", LightChannel::FullSpectrum, "seedling", 1.0f},
+    {"veg", "Vegitativ", LightChannel::FullSpectrum, "veg", 1.0f},
+    {"bloom", "Blütephase", LightChannel::Bloom, "bloom", 1.0f},
+    {"late_bloom", "Späteblüte", LightChannel::Bloom, "late_bloom", 1.0f},
+};
+const size_t PHASE_PRESET_COUNT = sizeof(PHASE_PRESETS) / sizeof(PHASE_PRESETS[0]);
 
 struct MetricDef {
   const char *id;
@@ -546,6 +564,38 @@ LightChannel lightChannelFromString(const String &value) {
   if (value == "bloom")
     return LightChannel::Bloom;
   return LightChannel::FullSpectrum;
+}
+
+const PhasePreset *phasePresetById(const String &id) {
+  for (size_t i = 0; i < PHASE_PRESET_COUNT; i++) {
+    if (id == PHASE_PRESETS[i].id) return &PHASE_PRESETS[i];
+  }
+  return nullptr;
+}
+
+String phaseFromState() {
+  for (size_t i = 0; i < PHASE_PRESET_COUNT; i++) {
+    const PhasePreset &preset = PHASE_PRESETS[i];
+    if (preset.channel == channel && preset.vpdStage == vpdStageId &&
+        fabs(preset.ppfdScale - ppfdScale) < 0.0001f) {
+      return preset.id;
+    }
+  }
+  return "custom";
+}
+
+void applyPhasePreset(const PhasePreset &preset, bool persist) {
+  phaseId = preset.id;
+  channel = preset.channel;
+  vpdStageId = preset.vpdStage;
+  ppfdScale = preset.ppfdScale;
+  if (!persist) return;
+  prefsSystem.begin("system", false);
+  prefsSystem.putString("phase", phaseId);
+  prefsSystem.putString("channel", lightChannelName());
+  prefsSystem.putString("vpd_stage", vpdStageId);
+  prefsSystem.putFloat("ppfd_scale", ppfdScale);
+  prefsSystem.end();
 }
 
 String climateSensorName(ClimateSensorType t) {
@@ -1433,7 +1483,7 @@ float safeFloat(float v, float fallback) { return isfinite(v) ? v : fallback; }
 int safeInt(int v, int fallback) { return v < 0 ? fallback : v; }
 
 float currentPpfdFactor() {
-  return luxToPPFD(1.0f, channel);
+  return luxToPPFD(1.0f, channel) * ppfdScale;
 }
 
 String deviceId() {
@@ -1446,6 +1496,45 @@ String deviceId() {
 
 bool enforceAuth() {
   return true;
+}
+
+bool isValidLightChannelName(const String &value) {
+  return value == "full_spectrum" || value == "white" || value == "bloom";
+}
+
+bool isValidVpdStageId(const String &id) {
+  for (const auto &p : VPD_PROFILES) {
+    if (id == p.id) return true;
+  }
+  return false;
+}
+
+bool parseJsonBody(JsonDocument &doc, String &errorOut) {
+  if (!server.hasArg("plain")) {
+    errorOut = "missing_body";
+    return false;
+  }
+  String body = server.arg("plain");
+  if (body.length() == 0) {
+    errorOut = "empty_body";
+    return false;
+  }
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    errorOut = "invalid_json";
+    return false;
+  }
+  return true;
+}
+
+void sendJsonAck(bool applied) {
+  String payload = String("{\"ok\":true,\"applied\":") + (applied ? "true" : "false") + "}";
+  server.send(200, "application/json", payload);
+}
+
+void sendJsonError(int code, const String &message) {
+  String payload = String("{\"ok\":false,\"error\":\"") + message + "\"}";
+  server.send(code, "application/json", payload);
 }
 
 void persistSensorFlags() {
@@ -2608,7 +2697,19 @@ bool connectToWiFi() {
   co2Type = co2FromString(prefsSystem.getString("co2_type", "mhz19"));
   timezoneName = prefsSystem.getString("timezone", timezoneName);
   vpdStageId = prefsSystem.getString("vpd_stage", "seedling");
+  ppfdScale = prefsSystem.getFloat("ppfd_scale", 1.0f);
+  phaseId = prefsSystem.getString("phase", "");
   prefsSystem.end();
+  if (phaseId.length() > 0 && phaseId != "custom") {
+    const PhasePreset *preset = phasePresetById(phaseId);
+    if (preset) {
+      applyPhasePreset(*preset, false);
+    } else {
+      phaseId = phaseFromState();
+    }
+  } else {
+    phaseId = phaseFromState();
+  }
   prefsWifi.begin("wifi", false);
   staticIpEnabled = prefsWifi.getBool("static", false);
   staticIp.fromString(prefsWifi.getString("ip", ""));
@@ -2805,7 +2906,7 @@ void readSensors() {
     lightSampled = true;
     latest.lux = lightMeter.readLightLevel();
     latest.ppfdFactor = currentPpfdFactor();
-    latest.ppfd = luxToPPFD(latest.lux, channel);
+    latest.ppfd = luxToPPFD(latest.lux, channel) * ppfdScale;
     lightHealth.healthy = !isnan(latest.lux);
     lightHealth.lastUpdate = millis();
     if (!isnan(latest.lux)) {
@@ -6001,6 +6102,126 @@ void handlePins() {
   ESP.restart();
 }
 
+void handleFactors() {
+  if (!enforceAuth())
+    return;
+  if (server.method() == HTTP_GET) {
+    const VpdProfile &profile = vpdProfileById(vpdStageId);
+    String json = "{";
+    json += "\"channel\":\"" + lightChannelName() + "\",";
+    json += "\"ppfd_scale\":" + String(ppfdScale, 4) + ",";
+    json += "\"ppfd_factor\":" + String(currentPpfdFactor(), 6) + ",";
+    json += "\"vpd_stage\":\"" + vpdStageId + "\",";
+    json += "\"vpd_target_low\":" + String(profile.targetLow, 2) + ",";
+    json += "\"vpd_target_high\":" + String(profile.targetHigh, 2) + ",";
+    json += "\"phase\":\"" + phaseId + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  StaticJsonDocument<384> doc;
+  String error;
+  if (!parseJsonBody(doc, error)) {
+    sendJsonError(400, error);
+    return;
+  }
+
+  bool hasChannel = doc.containsKey("channel");
+  bool hasVpdStage = doc.containsKey("vpd_stage");
+  bool hasScale = doc.containsKey("ppfd_scale");
+  if (!hasChannel && !hasVpdStage && !hasScale) {
+    sendJsonError(400, "missing_fields");
+    return;
+  }
+
+  if (hasChannel) {
+    String nextChannel = doc["channel"].as<String>();
+    if (!isValidLightChannelName(nextChannel)) {
+      sendJsonError(400, "invalid_channel");
+      return;
+    }
+    channel = lightChannelFromString(nextChannel);
+  }
+  if (hasVpdStage) {
+    String nextStage = doc["vpd_stage"].as<String>();
+    if (!isValidVpdStageId(nextStage)) {
+      sendJsonError(400, "invalid_vpd_stage");
+      return;
+    }
+    vpdStageId = nextStage;
+  }
+  if (hasScale) {
+    float nextScale = doc["ppfd_scale"].as<float>();
+    if (!isfinite(nextScale) || nextScale <= 0.1f || nextScale > 5.0f) {
+      sendJsonError(400, "invalid_ppfd_scale");
+      return;
+    }
+    ppfdScale = nextScale;
+  }
+
+  phaseId = phaseFromState();
+  prefsSystem.begin("system", false);
+  prefsSystem.putString("channel", lightChannelName());
+  prefsSystem.putString("vpd_stage", vpdStageId);
+  prefsSystem.putFloat("ppfd_scale", ppfdScale);
+  prefsSystem.putString("phase", phaseId);
+  prefsSystem.end();
+  sendJsonAck(true);
+}
+
+void handlePhase() {
+  if (!enforceAuth())
+    return;
+  if (server.method() == HTTP_GET) {
+    const VpdProfile &profile = vpdProfileById(vpdStageId);
+    String json = "{";
+    json += "\"phase\":\"" + phaseId + "\",";
+    json += "\"channel\":\"" + lightChannelName() + "\",";
+    json += "\"ppfd_scale\":" + String(ppfdScale, 4) + ",";
+    json += "\"ppfd_factor\":" + String(currentPpfdFactor(), 6) + ",";
+    json += "\"vpd_stage\":\"" + vpdStageId + "\",";
+    json += "\"vpd_target_low\":" + String(profile.targetLow, 2) + ",";
+    json += "\"vpd_target_high\":" + String(profile.targetHigh, 2) + ",";
+    json += "\"available\":[";
+    for (size_t i = 0; i < PHASE_PRESET_COUNT; i++) {
+      if (i > 0) json += ",";
+      json += "{\"id\":\"" + String(PHASE_PRESETS[i].id) + "\",\"label\":\"" + String(PHASE_PRESETS[i].label) + "\"}";
+    }
+    json += "]}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  String error;
+  if (!parseJsonBody(doc, error)) {
+    sendJsonError(400, error);
+    return;
+  }
+
+  String nextPhase;
+  if (doc.containsKey("phase")) {
+    nextPhase = doc["phase"].as<String>();
+  } else if (doc.containsKey("id")) {
+    nextPhase = doc["id"].as<String>();
+  }
+
+  if (nextPhase.length() == 0) {
+    sendJsonError(400, "missing_phase");
+    return;
+  }
+
+  const PhasePreset *preset = phasePresetById(nextPhase);
+  if (!preset) {
+    sendJsonError(400, "invalid_phase");
+    return;
+  }
+
+  applyPhasePreset(*preset, true);
+  sendJsonAck(true);
+}
+
 void handleSettings() {
   if (!enforceAuth())
     return;
@@ -6033,33 +6254,74 @@ void handleSettings() {
     return;
   }
 
-  bool hasChannel = server.hasArg("channel");
-  bool hasVpdStage = server.hasArg("vpd_stage");
-  bool hasTimezone = server.hasArg("timezone");
+  bool hasChannel = false;
+  bool hasVpdStage = false;
+  bool hasTimezone = false;
+  String channelValue;
+  String vpdStageValue;
+  String timezoneValue;
+  bool parsedJson = server.hasArg("plain") && server.arg("plain").length() > 0;
+  if (parsedJson) {
+    StaticJsonDocument<384> doc;
+    String error;
+    if (!parseJsonBody(doc, error)) {
+      sendJsonError(400, error);
+      return;
+    }
+    if (doc.containsKey("channel")) {
+      hasChannel = true;
+      channelValue = doc["channel"].as<String>();
+    }
+    if (doc.containsKey("vpd_stage")) {
+      hasVpdStage = true;
+      vpdStageValue = doc["vpd_stage"].as<String>();
+    }
+    if (doc.containsKey("timezone")) {
+      hasTimezone = true;
+      timezoneValue = doc["timezone"].as<String>();
+    }
+  } else {
+    hasChannel = server.hasArg("channel");
+    hasVpdStage = server.hasArg("vpd_stage");
+    hasTimezone = server.hasArg("timezone");
+    if (hasChannel) channelValue = server.arg("channel");
+    if (hasVpdStage) vpdStageValue = server.arg("vpd_stage");
+    if (hasTimezone) timezoneValue = server.arg("timezone");
+  }
+
   if (!hasChannel && !hasVpdStage && !hasTimezone) {
-    server.send(400, "text/plain", "channel, timezone or vpd_stage missing");
+    sendJsonError(400, "missing_fields");
     return;
   }
   if (hasChannel) {
-    LightChannel next = lightChannelFromString(server.arg("channel"));
-    channel = next;
+    if (!isValidLightChannelName(channelValue)) {
+      sendJsonError(400, "invalid_channel");
+      return;
+    }
+    channel = lightChannelFromString(channelValue);
   }
   if (hasVpdStage) {
-    vpdStageId = server.arg("vpd_stage");
+    if (!isValidVpdStageId(vpdStageValue)) {
+      sendJsonError(400, "invalid_vpd_stage");
+      return;
+    }
+    vpdStageId = vpdStageValue;
   }
   if (hasTimezone) {
-    timezoneName = server.arg("timezone");
+    timezoneName = timezoneValue;
     applyTimezoneEnv();
     timeSynced = false; // force refresh
     lastTimeSyncAttempt = 0;
     startNtpSync();
   }
+  phaseId = phaseFromState();
   prefsSystem.begin("system", false);
   if (hasChannel) prefsSystem.putString("channel", lightChannelName());
   if (hasVpdStage) prefsSystem.putString("vpd_stage", vpdStageId);
   if (hasTimezone) prefsSystem.putString("timezone", timezoneName);
+  if (hasChannel || hasVpdStage) prefsSystem.putString("phase", phaseId);
   prefsSystem.end();
-  server.send(200, "text/plain", "saved");
+  sendJsonAck(true);
 }
 
 void handleWifiSave() {
@@ -6422,6 +6684,10 @@ void setupServer() {
   server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/api/settings", HTTP_GET, handleSettings);
   server.on("/api/settings", HTTP_POST, handleSettings);
+  server.on("/api/factors", HTTP_GET, handleFactors);
+  server.on("/api/factors", HTTP_POST, handleFactors);
+  server.on("/api/phase", HTTP_GET, handlePhase);
+  server.on("/api/phase", HTTP_POST, handlePhase);
   server.on("/api/wifi", HTTP_POST, handleWifiSave);
   server.on("/api/restart", HTTP_POST, handleRestart);
   server.on("/api/factory-reset", HTTP_POST, handleFactoryReset);
