@@ -2946,11 +2946,21 @@ const char *wifiAuthLabel(wifi_auth_mode_t auth) {
   case WIFI_AUTH_WPA_PSK: return "WPA";
   case WIFI_AUTH_WPA2_PSK: return "WPA2";
   case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/WPA2";
+#ifdef WIFI_AUTH_WPA2_ENTERPRISE
   case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-ENT";
+#endif
+#ifdef WIFI_AUTH_WPA3_PSK
   case WIFI_AUTH_WPA3_PSK: return "WPA3";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
   case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+#endif
+#ifdef WIFI_AUTH_WAPI_PSK
   case WIFI_AUTH_WAPI_PSK: return "WAPI";
+#endif
+#ifdef WIFI_AUTH_WAPI_CERT
   case WIFI_AUTH_WAPI_CERT: return "WAPI-CERT";
+#endif
   default: return "UNKNOWN";
   }
 }
