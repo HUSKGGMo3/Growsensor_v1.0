@@ -1,6 +1,6 @@
 # Disclaimer
 
-This project is experimental and provided as-is. It is **monitoring-only** and not certified for production, safety-critical, or commercial use. Use at your own risk.
+This project is experimental and provided as‑is. It is **monitoring‑only** and not certified for production, safety‑critical, or commercial use. Use at your own risk.
 
 - No warranties or guarantees are provided.
 - Verify all measurements independently before acting on them.
