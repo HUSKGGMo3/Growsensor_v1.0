@@ -1,6 +1,12 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)**
+**Current release: v0.3.5 (Zoom Stabil + WLAN Fix + Pi-Bridge Boost)**
+
+### Patch v0.3.5 (Zoom Stabil + WLAN Fix + Pi-Bridge Boost)
+
+- Chart-Zoom in der Detailansicht hält das Datenfenster im sichtbaren Bereich (inkl. Touch-Pinch).
+- WLAN-Scan liefert stabile Antworten, inkl. leerer Ergebnisse ohne Fehler-Popup + Throttle.
+- Pi-Bridge sendet WLAN-Credentials nach Handshake, Log-API + GUI-Log + Failover-Safe-Mode.
 
 ### Patch v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)
 - LED/VPD phase logic consolidated: VPD target + PPFD scale now update consistently across tiles, header, and heatmaps.
