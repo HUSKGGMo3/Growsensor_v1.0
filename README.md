@@ -1,12 +1,12 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.3.6 (NextCloud Stable + Graph Upgrade)**
+**Current release: v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)**
 
-### Patch v0.3.6 (NextCloud Stable + Graph Upgrade)
-- Leaf detail charts now mirror the live tile data source, preventing empty popup graphs.
-- Detail modal supports smooth zoom + pan with auto-scaling axes (popup-only, no dashboard impact).
-- CO₂ KPI card follows the same sensor-present logic as the dashboard tiles.
-- Long-range charts keep a clear offline notice while falling back to local 24h buffers when cloud data is unavailable.
+### Patch v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)
+- LED/VPD phase logic consolidated: VPD target + PPFD scale now update consistently across tiles, header, and heatmaps.
+- Wi‑Fi scan dropdown fixed with throttled async scans and stable JSON responses.
+- Chart color preview label now mirrors the selected line color.
+- New **Addons** tab with a Raspberry Pi Growcontroller (Serial Bridge) preview toggle and status.
 
 ### Release v0.4.0 (Documentation + Install Guide Refresh)
 - Firmware version bumped to v0.4.0.
@@ -17,11 +17,6 @@
 - VPD header KPI now color-codes against the stage target (green within ±10%, yellow outside, red critical) with a subtle pulse that matches existing UI styling.
 - Hover charts are preloaded (throttled) so mini graphs render immediately without hover delays, while keeping 6h/24h/long-range logic intact.
 - Factor changes (PPFD channel + VPD stage) now trigger safe recomputation and redraws without UI crashes, guarding against NaNs in VPD heatmaps and charts.
-
-### Patch v0.3.4 (Stability + UX Reborn)
-- Cloud logging + daily summaries restored with lightweight buffering and WebDAV daily summaries (`/GrowSensor/<deviceId>/daily/YYYY-MM-DD_summary.txt`).
-- Cloud status LED added next to Wi‑Fi with live OK/warn/error states; long‑range (1/3/6M) charts load directly from cloud data when connected.
-- UI polish + performance: preloaded KPIs/tiles/status, trend arrows stable, VPD detail popup resilient, CO₂ hidden when no sensor, sensor list deduped with delete support.
 
 ### Patch v0.3.3 (Stability Restoration)
 - Sensor system restored: BH1750, climate (SHT), CO₂ (MH-Z19/MH-Z14), VPD calculation, and telemetry status fields behave like pre-refactor.
