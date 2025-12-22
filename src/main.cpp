@@ -72,13 +72,17 @@ static constexpr unsigned long TIME_SYNC_REFRESH_MS = 300000;   // refresh offse
 static constexpr time_t TIME_VALID_AFTER = 1700000000;          // ~2023-11-14 UTC safeguard
 static constexpr unsigned long CLOUD_WORKER_INTERVAL_MS = 1500;
 static constexpr unsigned long CLOUD_UI_PRIORITY_GRACE_MS = 1200;
+static constexpr unsigned long CLOUD_TASK_INTERVAL_MS = 250;
 static constexpr unsigned long CLOUD_RECORDING_INTERVAL_MS = 60000;
-static constexpr unsigned long CLOUD_BACKOFF_SHORT_MS = 5000;
-static constexpr unsigned long CLOUD_BACKOFF_MED_MS = 15000;
-static constexpr unsigned long CLOUD_BACKOFF_LONG_MS = 60000;
+static constexpr unsigned long CLOUD_BACKOFF_SHORT_MS = 3000;
+static constexpr unsigned long CLOUD_BACKOFF_MED_MS = 10000;
+static constexpr unsigned long CLOUD_BACKOFF_LONG_MS = 30000;
+static constexpr unsigned long CLOUD_BACKOFF_MAX_MS = 120000;
+static constexpr uint8_t CLOUD_MAX_RETRIES = 5;
+static constexpr unsigned long CLOUD_CONNECT_TIMEOUT_MS = 3000;
+static constexpr unsigned long CLOUD_READ_TIMEOUT_MS = 2000;
 static constexpr unsigned long CLOUD_TEST_TIMEOUT_MS = 5000;
-static constexpr size_t CLOUD_CHUNK_THRESHOLD_BYTES = 200 * 1024;
-static constexpr size_t CLOUD_CHUNK_SIZE_BYTES = 64 * 1024;
+static constexpr unsigned long CLOUD_UPLOAD_MIN_INTERVAL_MS = 30000;
 static constexpr unsigned long CLOUD_HEALTH_WINDOW_MS = 60000;
 static constexpr unsigned long CLOUD_PING_INTERVAL_MS = 30000;
 static constexpr unsigned long CLOUD_RECONNECT_INTERVAL_MS = 10000;
@@ -94,7 +98,7 @@ static constexpr unsigned long WIFI_SCAN_CACHE_TTL_MS = 45000;
 static constexpr size_t HISTORY_CACHE_SIZE = 6;
 static constexpr size_t DAILY_HISTORY_CACHE_SIZE = 4;
 static constexpr unsigned long DAILY_CHECKPOINT_MS = 15UL * 60UL * 1000UL;
-static constexpr unsigned long CLOUD_LOG_FLUSH_INTERVAL_MS = 30000;
+static constexpr unsigned long CLOUD_LOG_FLUSH_INTERVAL_MS = 5UL * 60UL * 1000UL;
 static constexpr size_t CLOUD_LOG_CAPACITY = 120;
 static constexpr size_t CLOUD_LOG_FLUSH_LINES = 24;
 static constexpr unsigned long DEBUG_LOG_INTERVAL_MS = 5UL * 60UL * 1000UL;
@@ -366,7 +370,6 @@ struct CloudStatus {
   bool redState = false;
   bool foldersReady = true;
   bool lastUploadSuccess = false;
-  bool activeChunkUpload = false;
   uint64_t lastUploadMs = 0;
   uint64_t lastFailureMs = 0;
   uint64_t lastPingMs = 0;
@@ -427,8 +430,6 @@ std::vector<WifiScanNetwork> wifiScanResults;
 
 unsigned long lastDebugLogMs = 0;
 unsigned long lastLoopDurationMs = 0;
-String pendingChunkCleanupId;
-uint8_t pendingChunkCleanupAttempts = 0;
 String deviceHostname = "growsensor";
 LightChannel channel = LightChannel::FullSpectrum;
 ClimateSensorType climateType = ClimateSensorType::SHT31;
@@ -460,7 +461,8 @@ String cloudLogBuffer[CLOUD_LOG_CAPACITY];
 size_t cloudLogStart = 0;
 size_t cloudLogCount = 0;
 unsigned long lastCloudLogFlushMs = 0;
-uint32_t cloudLogSeq = 0;
+unsigned long lastCloudUploadAttemptMs = 0;
+TaskHandle_t cloudTaskHandle = nullptr;
 
 // Forward declarations
 void pruneLogsIfLowMemory(bool allowNotice = true);
@@ -665,6 +667,12 @@ bool beginCloudRequest(HTTPClient &http, const String &fullUrl, CloudRequestClie
     return http.begin(clients.https, fullUrl);
   }
   return http.begin(clients.http, fullUrl);
+}
+
+void configureCloudTimeouts(HTTPClient &http) {
+  // Keep cloud calls short to avoid blocking the main loop/UI.
+  http.setConnectTimeout(CLOUD_CONNECT_TIMEOUT_MS);
+  http.setTimeout(CLOUD_READ_TIMEOUT_MS);
 }
 String lightChannelName() {
   switch (channel) {
@@ -900,7 +908,13 @@ void refreshStorageMode(const String &reason = "") {
     cloudStatus.lastStateReason = reason;
     cloudStatus.lastStateChangeMs = currentEpochMs();
   }
-  storageMode = StorageMode::LOCAL_ONLY;
+  if (!runtimeActive) {
+    storageMode = StorageMode::LOCAL_ONLY;
+  } else if (cloudHealthOk()) {
+    storageMode = StorageMode::CLOUD_PRIMARY;
+  } else {
+    storageMode = StorageMode::LOCAL_FALLBACK;
+  }
   cloudStatus.enabled = cloudConfig.enabled;
   cloudStatus.runtimeEnabled = runtimeActive;
   cloudStatus.connected = runtimeActive && cloudHealthOk();
@@ -1282,26 +1296,6 @@ String cloudRootPath() {
   return cloudDeviceRoot();
 }
 
-String cloudUploadsBaseUrl() {
-  String base = buildWebDavBaseUrl();
-  if (base.length() == 0) return "";
-  String marker = "/dav/files/";
-  int idx = base.indexOf(marker);
-  String user;
-  if (idx >= 0) {
-    String tail = base.substring(idx + marker.length());
-    int slash = tail.indexOf('/');
-    if (slash >= 0) user = tail.substring(0, slash);
-  } else {
-    marker = "/webdav/";
-    idx = base.indexOf(marker);
-  }
-  if (user.length() == 0 && cloudConfig.username.length() > 0) user = cloudConfig.username;
-  if (user.length() == 0 || idx < 0) return "";
-  String root = base.substring(0, idx);
-  return ensureTrailingSlash(root + "/dav/uploads/" + user);
-}
-
 String cloudDailyMonthPath(const String &dayKey) {
   if (dayKey.length() < 7) return "";
   return cloudRootPath() + "/daily/" + dayKey.substring(0, 7);
@@ -1361,7 +1355,6 @@ bool cloudEnsureFolders(const String &dayKey) {
   String dailyPath = deviceRoot + "/daily";
   String reportsPath = cloudReportsFolder();
   String logsPath = deviceRoot + "/logs";
-  String logChunksPath = logsPath + "/chunks";
   bool ok = true;
   if (!ensureCollection(baseRoot, "root")) ok = false;
   if (!ensureCollection(deviceRoot, "device")) ok = false;
@@ -1369,7 +1362,6 @@ bool cloudEnsureFolders(const String &dayKey) {
   if (!ensureCollection(metaPath, "meta")) ok = false;
   if (!ensureCollection(reportsPath, "reports")) ok = false;
   if (!ensureCollection(logsPath, "logs")) ok = false;
-  if (!ensureCollection(logChunksPath, "logs/chunks")) ok = false;
   if (monthPath.length() > 0 && !ensureCollection(monthPath, "month")) ok = false;
   cloudStatus.foldersReady = ok;
   return ok;
@@ -1625,7 +1617,10 @@ void enqueueDailySummary(const String &dayKey) {
 void finalizeDayAndQueue(const String &dayKey) {
   if (dayKey.length() == 0) return;
   finalizeDaily(dayKey);
-  persistDailyHistory();
+  if (!cloudStatus.runtimeEnabled) {
+    // When cloud is active, avoid flash writes and keep only the RAM cache.
+    persistDailyHistory();
+  }
   if (cloudArchiveActive()) {
     String payload = serializeDailyPayload(dayKey);
     enqueueDailyJob(dayKey, payload);
@@ -1902,10 +1897,9 @@ void flushCloudLogs(bool force = false) {
   cloudLogStart = 0;
   cloudLogCount = 0;
   lastCloudLogFlushMs = now;
-  cloudLogSeq++;
-  String stamp = fileSafeTimestamp(nowEpoch);
-  String path = cloudDeviceRoot() + "/logs/chunks/log_" + stamp + "_" + String(cloudLogSeq) + ".log";
-  enqueueCloudJob(path, payload, dayKey, "logs", "text/plain", false);
+  // Append to the daily debug log to keep a single file per day.
+  String path = cloudRootPath() + "/logs/debug_" + dayKey + ".txt";
+  enqueueCloudJob(path, payload, dayKey, "debug", "text/plain", false);
 }
 
 String debugIsoOrPlaceholder(uint64_t epochMs) {
@@ -1959,7 +1953,6 @@ String buildDebugLogBlock() {
   block += " last_upload=" + lastUploadIso + " (" + String((unsigned long long)cloudStatus.lastUploadMs) + ")";
   block += " last_upload_ok=" + String(cloudStatus.lastUploadSuccess ? 1 : 0);
   block += " last_upload_code=" + String(cloudStatus.lastUploadErrorCode);
-  block += " chunk_active=" + String(cloudStatus.activeChunkUpload ? 1 : 0);
   if (cloudStatus.lastUploadedPath.length() > 0) block += " path=" + cloudStatus.lastUploadedPath;
   if (cloudStatus.lastError.length() > 0) {
     block += " error=\"" + cloudStatus.lastError + "\"";
@@ -2010,12 +2003,6 @@ String cloudRequestStateText(const char *op, const String &label, int code) {
   return String(op) + " " + label + " -> " + String(code) + " (" + cloudProtocolLabel() + ")";
 }
 
-String cloudChunkName(uint32_t index) {
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%08lu", (unsigned long)index);
-  return String(buf);
-}
-
 bool uploadCloudPutPayload(const String &fullPath, const String &payload, const String &contentType) {
   String url = buildWebDavUrl(fullPath);
   int code = 0;
@@ -2037,7 +2024,6 @@ bool uploadCloudPutPayload(const String &fullPath, const String &payload, const 
   }
   cloudStatus.lastUploadErrorCode = code;
   cloudStatus.lastUploadSuccess = ok;
-  cloudStatus.activeChunkUpload = false;
   if (!ok) {
     if (chain.length() > 0) {
       markCloudFailure(cloudStatus.lastError);
@@ -2070,50 +2056,10 @@ bool uploadCloudPutPayload(const String &fullPath, const String &payload, const 
   return true;
 }
 
-void scheduleChunkCleanup(const String &uploadId, const String &reason) {
-  if (uploadId.length() == 0) return;
-  pendingChunkCleanupId = uploadId;
-  pendingChunkCleanupAttempts = 0;
-  logEvent(String("Cloud chunk cleanup scheduled: ") + uploadId + " (" + reason + ")");
-}
-
-bool attemptChunkCleanup() {
-  if (pendingChunkCleanupId.length() == 0) return true;
-  if (!cloudConnected()) return false;
-  String uploadsBase = cloudUploadsBaseUrl();
-  if (uploadsBase.length() == 0) {
-    pendingChunkCleanupId = "";
-    return true;
-  }
-  String sessionUrl = uploadsBase + pendingChunkCleanupId;
-  String sessionPath = String("/uploads/") + pendingChunkCleanupId;
-  int code = 0;
-  String resp;
-  bool ok = webdavDelete(sessionUrl, code, &resp, CLOUD_TEST_TIMEOUT_MS);
-  cloudStatus.lastHttpCode = code;
-  cloudStatus.lastPath = cloudShortPath(sessionPath);
-  cloudStatus.lastUrl = cloudStatus.lastPath;
-  cloudStatus.lastNote = "DELETE chunk";
-  cloudStatus.lastErrorReason = "";
-  cloudStatus.lastErrorSuffix = "";
-  if (ok && code >= 200 && code < 300) {
-    logEvent(String("Cloud chunk cleanup ok: ") + pendingChunkCleanupId);
-    pendingChunkCleanupId = "";
-    pendingChunkCleanupAttempts = 0;
-    return true;
-  }
-  pendingChunkCleanupAttempts++;
-  logEvent(String("Cloud chunk cleanup failed: ") + pendingChunkCleanupId + " code=" + String(code));
-  if (pendingChunkCleanupAttempts >= 3) {
-    pendingChunkCleanupId = "";
-    pendingChunkCleanupAttempts = 0;
-  }
-  return false;
-}
-
 bool webdavRequest(const String &method, const String &url, const String &body, const char *contentType, int &code, String *resp = nullptr, unsigned long timeoutMs = CLOUD_TEST_TIMEOUT_MS, String *location = nullptr) {
   HTTPClient http;
-  http.setTimeout(timeoutMs);
+  (void)timeoutMs;
+  configureCloudTimeouts(http);
   CloudRequestClients clients;
   if (!beginCloudRequest(http, url, clients)) {
     code = -1;
@@ -2162,7 +2108,8 @@ bool webdavRequest(const String &method, const String &url, const String &body, 
 
 bool webdavMove(const String &sourceUrl, const String &destUrl, int &code, String *resp, unsigned long timeoutMs) {
   HTTPClient http;
-  http.setTimeout(timeoutMs);
+  (void)timeoutMs;
+  configureCloudTimeouts(http);
   CloudRequestClients clients;
   if (!beginCloudRequest(http, sourceUrl, clients)) {
     code = -1;
@@ -2192,7 +2139,8 @@ bool webdavMove(const String &sourceUrl, const String &destUrl, int &code, Strin
 
 bool webdavDelete(const String &url, int &code, String *resp, unsigned long timeoutMs) {
   HTTPClient http;
-  http.setTimeout(timeoutMs);
+  (void)timeoutMs;
+  configureCloudTimeouts(http);
   CloudRequestClients clients;
   if (!beginCloudRequest(http, url, clients)) {
     code = -1;
@@ -2487,7 +2435,6 @@ bool uploadDebugLogJob(const CloudJob &job) {
   }
   cloudStatus.lastUploadErrorCode = putCode;
   cloudStatus.lastUploadSuccess = ok;
-  cloudStatus.activeChunkUpload = false;
   if (!ok) {
     if (chain.length() > 0) {
       markCloudFailure(cloudStatus.lastError);
@@ -2719,154 +2666,8 @@ bool uploadCloudJob(const CloudJob &job) {
     cloudStatus.lastUploadErrorCode = 0;
     return false;
   }
-  if (job.payload.length() <= CLOUD_CHUNK_THRESHOLD_BYTES) {
-    return uploadCloudPutPayload(fullPath, job.payload, job.contentType);
-  }
-
-  String uploadsBase = cloudUploadsBaseUrl();
-  if (uploadsBase.length() == 0) {
-    logEvent("Cloud chunk upload unavailable, falling back to PUT", "warn", "cloud");
-    return uploadCloudPutPayload(fullPath, job.payload, job.contentType);
-  }
-
-  cloudStatus.activeChunkUpload = true;
-  String uploadId = "gs_" + deviceId() + "_" + String((unsigned long)millis());
-  String sessionUrl = uploadsBase + uploadId;
-  String sessionPath = String("/uploads/") + uploadId;
-  int mkCode = 0;
-  String mkResp;
-  String mkLocation;
-  String mkChain;
-  bool mkRedirected = false;
-  bool mkOk = webdavRequestFollowRedirects("MKCOL", sessionUrl, "", "text/plain", mkCode, mkLocation, mkResp, &mkChain, &mkRedirected, CLOUD_TEST_TIMEOUT_MS);
-  cloudStatus.lastHttpCode = mkCode;
-  cloudStatus.lastPath = cloudShortPath(sessionPath);
-  cloudStatus.lastUrl = cloudStatus.lastPath;
-  cloudStatus.lastNote = "MKCOL chunk";
-  cloudStatus.lastErrorReason = mkRedirected ? "redirected-to-https" : "";
-  cloudStatus.lastErrorSuffix = mkRedirected ? "redirected-to-https" : "";
-  if (mkChain.length() > 0) {
-    cloudStatus.lastError = String("MKCOL chunk -> ") + mkChain + " (" + cloudProtocolLabel() + ")";
-    cloudStatus.lastErrorReason = mkChain;
-  }
-  if (!mkOk) {
-    cloudStatus.activeChunkUpload = false;
-    cloudStatus.lastUploadErrorCode = mkCode;
-    cloudStatus.lastUploadSuccess = false;
-    cloudStatus.lastHttpCode = mkCode;
-    cloudStatus.lastPath = cloudShortPath(sessionPath);
-    cloudStatus.lastUrl = cloudStatus.lastPath;
-    cloudStatus.lastNote = "MKCOL chunk";
-    cloudStatus.lastErrorReason = mkResp;
-    String msg = String("MKCOL chunk -> ") + String(mkCode);
-    if (mkResp.length() > 0) msg += String(" ") + mkResp;
-    msg += String(" (") + cloudProtocolLabel() + ")";
-    markCloudFailure(msg);
-    cloudStatus.lastErrorSuffix = mkRedirected ? "redirected-to-https" : "";
-    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
-    logEvent(String("Cloud chunk session failed: ") + sessionUrl + " code=" + String(mkCode), "warn", "cloud");
-    return false;
-  }
-
-  size_t payloadSize = job.payload.length();
-  uint32_t chunkIndex = 0;
-  for (size_t offset = 0; offset < payloadSize; offset += CLOUD_CHUNK_SIZE_BYTES) {
-    size_t len = std::min(CLOUD_CHUNK_SIZE_BYTES, payloadSize - offset);
-    String chunkPayload = job.payload.substring(offset, offset + len);
-    String chunkName = cloudChunkName(chunkIndex++);
-    String chunkUrl = sessionUrl + "/" + chunkName;
-    String chunkPath = sessionPath + "/" + chunkName;
-    int code = 0;
-    String resp;
-    const char *ctype = job.contentType.length() > 0 ? job.contentType.c_str() : "application/json";
-    String location;
-    String chain;
-    bool httpsRedirected = false;
-    bool ok = webdavRequestFollowRedirects("PUT", chunkUrl, chunkPayload, ctype, code, location, resp, &chain, &httpsRedirected, CLOUD_TEST_TIMEOUT_MS);
-    cloudStatus.lastHttpCode = code;
-    cloudStatus.lastPath = cloudShortPath(chunkPath);
-    cloudStatus.lastUrl = cloudStatus.lastPath;
-    cloudStatus.lastNote = "PUT chunk";
-    cloudStatus.lastErrorReason = httpsRedirected ? "redirected-to-https" : "";
-    cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
-    if (chain.length() > 0) {
-      cloudStatus.lastError = String("PUT chunk -> ") + chain + " (" + cloudProtocolLabel() + ")";
-      cloudStatus.lastErrorReason = chain;
-    }
-    if (!ok) {
-      cloudStatus.activeChunkUpload = false;
-      cloudStatus.lastUploadErrorCode = code;
-      cloudStatus.lastUploadSuccess = false;
-      if (chain.length() > 0) {
-        markCloudFailure(cloudStatus.lastError);
-        cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
-      } else {
-        cloudStatus.lastHttpCode = code;
-        cloudStatus.lastPath = cloudShortPath(chunkPath);
-        cloudStatus.lastUrl = cloudStatus.lastPath;
-        cloudStatus.lastNote = "PUT chunk";
-        cloudStatus.lastErrorReason = resp;
-        String msg = String("PUT chunk -> ") + String(code);
-        if (resp.length() > 0) msg += String(" ") + resp;
-        msg += String(" (") + cloudProtocolLabel() + ")";
-        markCloudFailure(msg);
-        cloudStatus.lastErrorSuffix = httpsRedirected ? "redirected-to-https" : "";
-        logEvent(String("Cloud error: ") + msg, "warn", "cloud");
-      }
-      logEvent(String("Cloud chunk upload failed: ") + chunkUrl + " code=" + String(code), "warn", "cloud");
-      int delCode = 0;
-      String delResp;
-      bool delOk = webdavDelete(sessionUrl, delCode, &delResp, CLOUD_TEST_TIMEOUT_MS);
-      if (!delOk || delCode < 200 || delCode >= 300) {
-        scheduleChunkCleanup(uploadId, "chunk_put_failed");
-      }
-      return false;
-    }
-  }
-
-  String finalUrl = buildWebDavUrl(fullPath);
-  String sourceUrl = sessionUrl + "/.file";
-  int mvCode = 0;
-  String mvResp;
-  bool moveOk = webdavMove(sourceUrl, finalUrl, mvCode, &mvResp, CLOUD_TEST_TIMEOUT_MS);
-  cloudStatus.lastHttpCode = mvCode;
-  cloudStatus.lastPath = cloudShortPath(fullPath);
-  cloudStatus.lastUrl = cloudStatus.lastPath;
-  cloudStatus.lastNote = "MOVE chunk";
-  cloudStatus.lastErrorReason = "";
-  cloudStatus.lastErrorSuffix = "";
-  cloudStatus.lastUploadErrorCode = mvCode;
-  cloudStatus.lastUploadSuccess = moveOk;
-  cloudStatus.activeChunkUpload = false;
-  if (!moveOk || mvCode < 200 || mvCode >= 300) {
-    cloudStatus.lastHttpCode = mvCode;
-    cloudStatus.lastPath = cloudShortPath(fullPath);
-    cloudStatus.lastUrl = cloudStatus.lastPath;
-    cloudStatus.lastNote = "MOVE chunk";
-    cloudStatus.lastErrorReason = mvResp;
-    String msg = String("MOVE chunk -> ") + String(mvCode);
-    if (mvResp.length() > 0) msg += String(" ") + mvResp;
-    msg += String(" (") + cloudProtocolLabel() + ")";
-    markCloudFailure(msg);
-    cloudStatus.lastErrorSuffix = "";
-    logEvent(String("Cloud error: ") + msg, "warn", "cloud");
-    logEvent(String("Cloud chunk finalize failed: ") + fullPath + " code=" + String(mvCode), "warn", "cloud");
-    int delCode = 0;
-    String delResp;
-    bool delOk = webdavDelete(sessionUrl, delCode, &delResp, CLOUD_TEST_TIMEOUT_MS);
-    if (!delOk || delCode < 200 || delCode >= 300) {
-      scheduleChunkCleanup(uploadId, "chunk_finalize_failed");
-    }
-    return false;
-  }
-
-  cloudStatus.lastUploadMs = currentEpochMs();
-  cloudStatus.lastUploadedPath = fullPath;
-  cloudStatus.lastError = "";
-  markCloudSuccess(cloudRequestStateText("MOVE", "chunk", mvCode));
-  cloudStatus.queueSize = cloudQueue.size();
-  logEvent(String("Cloud chunk upload ok: ") + fullPath, "info", "cloud");
-  return true;
+  // WebDAV uploads are normal PUT requests only (no chunks).
+  return uploadCloudPutPayload(fullPath, job.payload, job.contentType);
 }
 
 void processCloudQueue() {
@@ -2883,7 +2684,9 @@ void processCloudQueue() {
     refreshStorageMode();
     return;
   }
-  attemptChunkCleanup();
+  if (lastCloudUploadAttemptMs != 0 && now - lastCloudUploadAttemptMs < CLOUD_UPLOAD_MIN_INTERVAL_MS) {
+    return;
+  }
   if (nextCloudAttemptAfterMs != 0 && now < nextCloudAttemptAfterMs) return;
   CloudJob &job = cloudQueue.front();
   if (job.kind == "debug" && job.createdAtMs != 0 && now - job.createdAtMs > DEBUG_LOG_MAX_CACHE_MS) {
@@ -2892,20 +2695,30 @@ void processCloudQueue() {
     return;
   }
   if (job.nextAttemptAt != 0 && now < job.nextAttemptAt) return;
+  lastCloudUploadAttemptMs = now;
   bool ok = uploadCloudJob(job);
   if (ok) {
     cloudQueue.erase(cloudQueue.begin());
     cloudStatus.queueSize = cloudQueue.size();
-    nextCloudAttemptAfterMs = now + CLOUD_WORKER_INTERVAL_MS;
+    nextCloudAttemptAfterMs = now + CLOUD_UPLOAD_MIN_INTERVAL_MS;
   } else {
     job.attempts++;
-    unsigned long backoff = job.kind == "daily" ? (24UL * 60UL * 60UL * 1000UL)
-        : (job.attempts <= 1 ? CLOUD_BACKOFF_SHORT_MS : (job.attempts <= 3 ? CLOUD_BACKOFF_MED_MS : CLOUD_BACKOFF_LONG_MS));
-    job.nextAttemptAt = now + backoff;
-    nextCloudAttemptAfterMs = job.nextAttemptAt;
-    if (job.kind != "daily" && job.attempts > 5) {
+    if (job.attempts >= CLOUD_MAX_RETRIES) {
+      String prevReason = cloudStatus.lastStateReason;
+      cloudStatus.redState = true;
+      cloudStatus.reconnectActive = false;
+      cloudStatus.lastStateReason = "upload retries exceeded";
+      cloudStatus.lastStateChangeMs = currentEpochMs();
+      nextCloudRedRetryMs = now + CLOUD_RED_RETRY_INTERVAL_MS;
+      logCloudRedFailure("upload retries exceeded", prevReason);
       cloudQueue.erase(cloudQueue.begin());
       cloudStatus.queueSize = cloudQueue.size();
+    } else {
+      unsigned long backoff = job.attempts == 1 ? CLOUD_BACKOFF_SHORT_MS
+          : (job.attempts == 2 ? CLOUD_BACKOFF_MED_MS
+              : (job.attempts == 3 ? CLOUD_BACKOFF_LONG_MS : CLOUD_BACKOFF_MAX_MS));
+      job.nextAttemptAt = now + backoff;
+      nextCloudAttemptAfterMs = job.nextAttemptAt;
     }
   }
   refreshStorageMode();
@@ -2921,10 +2734,7 @@ void maintainCloudHealth() {
     return;
   }
   if (cloudStatus.redState && !cloudStatus.reconnectActive) {
-    unsigned long now = millis();
-    if (nextCloudRedRetryMs == 0) nextCloudRedRetryMs = now + CLOUD_RED_RETRY_INTERVAL_MS;
-    if (now < nextCloudRedRetryMs) return;
-    startCloudReconnect("red retry", true);
+    return;
   }
   if (cloudStatus.reconnectActive) {
     attemptCloudReconnect();
@@ -2941,9 +2751,24 @@ void cloudTick() {
   maintainCloudHealth();
   tickCloudRecording();
   flushCloudLogs();
+  enqueueDebugLogBlock();
   processCloudQueue();
   processCloudDailyFetch();
   processDailyHistoryFetch();
+}
+
+void cloudWorkerTask(void *param) {
+  (void)param;
+  for (;;) {
+    cloudTick();
+    vTaskDelay(pdMS_TO_TICKS(CLOUD_TASK_INTERVAL_MS));
+  }
+}
+
+void startCloudWorkerTask() {
+  if (cloudTaskHandle != nullptr) return;
+  // Run cloud operations in a dedicated task to keep loop() responsive.
+  xTaskCreatePinnedToCore(cloudWorkerTask, "cloud_worker", 6144, nullptr, 1, &cloudTaskHandle, 1);
 }
 
 bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String &errorOut) {
@@ -2987,7 +2812,6 @@ bool sendCloudTestFile(int &httpCode, size_t &bytesOut, String &pathOut, String 
   httpCode = code;
   cloudStatus.lastUploadErrorCode = code;
   cloudStatus.lastUploadSuccess = ok;
-  cloudStatus.activeChunkUpload = false;
   if (ok) {
     cloudStatus.lastTestMs = currentEpochMs();
     cloudStatus.lastUploadMs = cloudStatus.lastTestMs;
@@ -3547,13 +3371,11 @@ void reinitLeafSensor() {
 void reinitCo2Sensor() {
   co2Health.healthy = false;
   co2Health.enabled = true;
+  co2Health.present = false;
   if (co2Type == Co2SensorType::MHZ19 || co2Type == Co2SensorType::MHZ14) {
     co2Serial.begin(9600, SERIAL_8N1, pinCO2_RX, pinCO2_TX);
     co2Sensor.begin(co2Serial);
     co2Sensor.autoCalibration(false);
-    co2Health.present = true;
-  } else {
-    co2Health.present = true;
   }
 }
 
@@ -3593,6 +3415,7 @@ void readSensors() {
   if (!enableCo2) {
     co2Health.healthy = false;
     co2Health.enabled = false;
+    co2Health.present = false;
     latest.co2ppm = -1;
   }
 
@@ -3653,13 +3476,14 @@ void readSensors() {
   }
 
   bool co2Sampled = false;
-  if (enableCo2 && co2Health.present && allowSensorSample(nowMs, lastCo2SampleMs)) {
+  if (enableCo2 && allowSensorSample(nowMs, lastCo2SampleMs)) {
     if (co2Type == Co2SensorType::MHZ19 || co2Type == Co2SensorType::MHZ14) {
       co2Sampled = true;
       int ppm = co2Sensor.getCO2();
       if (ppm > 0 && ppm < 5000) {
         latest.co2ppm = ppm;
         co2Health.healthy = true;
+        co2Health.present = true;
         co2Health.lastUpdate = millis();
         stallCo2.lastValue = ppm;
         stallCo2.lastChange = millis();
@@ -3667,6 +3491,7 @@ void readSensors() {
         co2Health.healthy = false;
       }
     } else {
+      co2Health.present = false;
       co2Health.healthy = false; // unsupported sensor type
     }
   }
@@ -4145,7 +3970,9 @@ void handleDailyHistory() {
   }
 
   if (!cloudOk) {
-    String payload = buildDailyHistoryPayload(metric, {}, false, false);
+    String payload;
+    payload.reserve(160);
+    payload = "{\"metric\":\"" + metric + "\",\"points\":[],\"time_synced\":0,\"cloud\":false,\"cloud_required\":true,\"message\":\"Cloud required\"}";
     server.send(200, "application/json", payload);
     return;
   }
@@ -4269,7 +4096,7 @@ void handleCloudDaily() {
   if (!cloudOk) {
     String json;
     json.reserve(128);
-    json = "{\"cloud\":false,\"hasData\":false,\"message\":\"Cloud not connected\",\"days\":[]}";
+    json = "{\"cloud\":false,\"hasData\":false,\"cloud_required\":true,\"message\":\"Cloud required\",\"days\":[]}";
     server.send(200, "application/json", json);
 #if CLOUD_DIAG
     Serial.println("/api/cloud/daily served");
@@ -4328,7 +4155,6 @@ void handleCloud() {
     doc["last_uploaded_path"] = cloudStatus.lastUploadedPath;
     doc["last_upload_success"] = cloudStatus.lastUploadSuccess;
     doc["last_upload_error"] = cloudStatus.lastUploadErrorCode;
-    doc["active_chunk_upload"] = cloudStatus.activeChunkUpload;
     doc["last_ping_ms"] = (uint64_t)cloudStatus.lastPingMs;
     doc["last_failure_ms"] = (uint64_t)cloudStatus.lastFailureMs;
     doc["last_test_ms"] = (uint64_t)cloudStatus.lastTestMs;
@@ -4350,6 +4176,7 @@ void handleCloud() {
     doc["state"] = cloudUiState();
     doc["reconnect_active"] = cloudStatus.reconnectActive;
     doc["reconnect_attempts"] = cloudStatus.reconnectAttempts;
+    doc["long_range_ready"] = cloudConnected();
     String payload;
     serializeJson(doc, payload);
     server.send(200, "application/json", payload);
@@ -4964,9 +4791,19 @@ void handleSensorsConfig() {
       json += "\"sda\":" + String(cfg.sda) + ",\"scl\":" + String(cfg.scl) + ",\"rx\":" + String(cfg.rx) + ",\"tx\":" + String(cfg.tx) + "}";
     }
     json += "],\"templates\":[";
+    bool firstTpl = true;
     for (size_t i = 0; i < SENSOR_TEMPLATE_COUNT; i++) {
       const auto &t = SENSOR_TEMPLATES[i];
-      if (i) json += ",";
+      bool exists = false;
+      for (const auto &cfg : sensorConfigs) {
+        if (cfg.type.equalsIgnoreCase(t.type) && cfg.category == t.category) {
+          exists = true;
+          break;
+        }
+      }
+      if (exists) continue;
+      if (!firstTpl) json += ",";
+      firstTpl = false;
       json += "{\"type\":\"" + String(t.type) + "\",\"name\":\"" + String(t.name) + "\",\"category\":\"" + String(t.category) + "\",\"iface\":\"" + String(t.interfaceType) + "\",\"sda\":" + String(t.sda) + ",\"scl\":" + String(t.scl) + ",\"rx\":" + String(t.rx) + ",\"tx\":" + String(t.tx) + "}";
     }
     json += "]}";
@@ -5032,6 +4869,8 @@ void handleSensorsConfig() {
     cfg.enabled = true;
     sensorConfigs.push_back(cfg);
     saveSensorConfigs();
+    applyPinsFromConfig();
+    rebuildSensorList();
     server.send(200, "text/plain", "added");
     return;
   }
@@ -5172,6 +5011,7 @@ void setup() {
   initSensors();
   connectToWiFi();
   setupServer();
+  startCloudWorkerTask();
 }
 
 // TEST: WiFi-Scan starten -> UI bleibt responsive, ESP friert nicht ein.
@@ -5193,8 +5033,6 @@ void loop() {
   maintainWifiConnection();
   wifiScanTick();
   maintainTimeSync();
-  cloudTick();
-  enqueueDebugLogBlock();
 
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
     lastSensorMillis = millis();
