@@ -1,6 +1,12 @@
 # Growsensor – ESP32 Monitoring Node
 
-**Current release: v0.4.0 (Documentation + Install Guide Refresh)**
+**Current release: v0.3.6 (NextCloud Stable + Graph Upgrade)**
+
+### Patch v0.3.6 (NextCloud Stable + Graph Upgrade)
+- Leaf detail charts now mirror the live tile data source, preventing empty popup graphs.
+- Detail modal supports smooth zoom + pan with auto-scaling axes (popup-only, no dashboard impact).
+- CO₂ KPI card follows the same sensor-present logic as the dashboard tiles.
+- Long-range charts keep a clear offline notice while falling back to local 24h buffers when cloud data is unavailable.
 
 ### Release v0.4.0 (Documentation + Install Guide Refresh)
 - Firmware version bumped to v0.4.0.

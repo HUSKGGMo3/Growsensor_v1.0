@@ -1,6 +1,12 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.4.0 (Doku- & Installations-Refresh)**
+**Aktuelle Version: v0.3.6 (NextCloud Stable + Graph Upgrade)**
+
+### Patch v0.3.6 (NextCloud Stable + Graph Upgrade)
+- Leaf-Detailcharts nutzen wieder dieselbe Datenquelle wie die Dashboard-Kachel (kein leeres Popup).
+- Detail-Modal unterstützt flüssiges Zoom + Pan mit automatischer Achsenskalierung (nur im Popup).
+- CO₂-KPI-Kachel folgt der gleichen Sensor-Present-Logik wie die Dashboard-Kachel.
+- Langzeit-Charts zeigen einen klaren Offline-Hinweis und fallen auf den lokalen 24h-Puffer zurück, wenn die Cloud fehlt.
 
 ### Release v0.4.0 (Doku- & Installations-Refresh)
 - Firmware-Version auf v0.4.0 angehoben.
