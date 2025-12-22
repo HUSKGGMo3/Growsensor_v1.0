@@ -1,12 +1,12 @@
 # ESP32 Grow Sensor / Monitoring Node (Deutsch)
 
-**Aktuelle Version: v0.3.6 (NextCloud Stable + Graph Upgrade)**
+**Aktuelle Version: v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)**
 
-### Patch v0.3.6 (NextCloud Stable + Graph Upgrade)
-- Leaf-Detailcharts nutzen wieder dieselbe Datenquelle wie die Dashboard-Kachel (kein leeres Popup).
-- Detail-Modal unterstützt flüssiges Zoom + Pan mit automatischer Achsenskalierung (nur im Popup).
-- CO₂-KPI-Kachel folgt der gleichen Sensor-Present-Logik wie die Dashboard-Kachel.
-- Langzeit-Charts zeigen einen klaren Offline-Hinweis und fallen auf den lokalen 24h-Puffer zurück, wenn die Cloud fehlt.
+### Patch v0.3.4 (Factor Fix + WiFi Scan + Pi-Bridge Preview)
+- LED/VPD-Phasenlogik konsolidiert: VPD-Ziel + PPFD-Skalierung bleiben in Header, Kacheln und Heatmap konsistent.
+- WLAN-Scan-Dropdown stabilisiert (gedrosselte Async-Scans + saubere JSON-Responses).
+- Chart-Farbvorschau-Label übernimmt jetzt die Linienfarbe.
+- Neuer **Addons**-Tab mit Raspberry-Pi-Growcontroller (Serial-Bridge) Preview-Schalter + Status.
 
 ### Release v0.4.0 (Doku- & Installations-Refresh)
 - Firmware-Version auf v0.4.0 angehoben.
@@ -17,11 +17,6 @@
 - VPD-KPI im Header erhält eine klare Farblogik (grün ±10% Ziel, gelb außerhalb, rot kritisch) inkl. sanfter Pulse-Animation im bestehenden Stil.
 - Mini-Graphs werden vorab geladen (gedrosselt) und sind sofort sichtbar, ohne Hover-Wartezeit, bei gleicher Live/24h/Cloud-Logik.
 - Faktor-Änderungen (PPFD-Kanal + VPD-Stage) triggern stabile Neuberechnung/Redraws ohne UI-Absturz; VPD-Heatmap/Charts sind gegen NaN geschützt.
-
-### Patch v0.3.4 (Stabilität + UX Reborn)
-- Cloud-Logging + Daily Summary stabilisiert (leichtgewichtige Pufferung) inkl. täglicher Summary-Datei unter `/GrowSensor/<deviceId>/daily/YYYY-MM-DD_summary.txt`.
-- Live-Cloud-Status-LED im Header neben WLAN (grün/gelb/rot), Langzeit-Charts (1/3/6M) laden direkt aus Cloud-Daten.
-- UI/UX-Polish + Performance: KPIs/Tiles/Status vorladen, Trendpfeile stabil, VPD-Detail zuverlässig, CO₂ verborgen ohne Sensor, Sensorliste dedupliziert + Löschfunktion für hinzugefügte Sensoren.
 
 ### Patch v0.3.3 (Stability Restoration)
 - Sensor-System wiederhergestellt: BH1750, Klima (SHT), CO₂ (MH-Z19/MH-Z14), VPD-Berechnung und Telemetrie-Status wie vor dem Refactor.
