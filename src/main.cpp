@@ -39,6 +39,13 @@ static constexpr int DEFAULT_CO2_RX_PIN = 16; // ESP32 RX <- sensor TX
 static constexpr int DEFAULT_CO2_TX_PIN = 17; // ESP32 TX -> sensor RX
 static constexpr int PIN_MIN = 0;
 static constexpr int PIN_MAX = 39;
+static constexpr int DEFAULT_RELAY_1_PIN = 32;
+static constexpr int DEFAULT_RELAY_2_PIN = 33;
+static constexpr int DEFAULT_RELAY_3_PIN = 27;
+static constexpr int DEFAULT_RELAY_4_PIN = 14;
+static constexpr float RELAY_VPD_HYSTERESIS_KPA = 0.05f;
+static constexpr unsigned long RELAY_MIN_SWITCH_MS = 8000UL;
+static constexpr unsigned long RELAY_FAILSAFE_OFF_MS = 600000UL; // 10 minutes safety fallback
 
 int pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
 int pinI2C_SCL = DEFAULT_I2C_SCL_PIN;
@@ -230,6 +237,14 @@ struct SensorHealth {
 struct SensorStall {
   float lastValue = NAN;
   unsigned long lastChange = 0;
+};
+
+struct RelayChannel {
+  int pin;
+  const char *role;
+  bool activeHigh = true;
+  bool state = false;
+  unsigned long lastSwitchMs = 0;
 };
 
 struct SensorSlot {
@@ -473,6 +488,12 @@ bool piBridgeDataStreaming = false;
 bool uiDisableRequested = false;
 bool uiDisableActive = false;
 uint64_t lastPiFailoverMs = 0;
+RelayChannel relayHumidifier{DEFAULT_RELAY_1_PIN, "humidifier", true, false, 0};
+RelayChannel relayExhaust{DEFAULT_RELAY_2_PIN, "exhaust", true, false, 0};
+RelayChannel relayLight{DEFAULT_RELAY_3_PIN, "light", true, false, 0};
+RelayChannel relayAux{DEFAULT_RELAY_4_PIN, "aux", true, false, 0};
+bool relaysReady = false;
+unsigned long lastVpdValidMs = 0;
 
 unsigned long lastDebugLogMs = 0;
 unsigned long lastLoopDurationMs = 0;
@@ -540,6 +561,9 @@ void handleNetworkScanStart();
 void handleIntegration();
 void processCloudDailyFetch();
 void processDailyHistoryFetch();
+void initRelays();
+void applyVpdRelays();
+bool setRelay(RelayChannel &relay, bool on, const char *reason);
 
 // Sensor toggles (persisted)
 bool enableLight = true;
@@ -1869,6 +1893,57 @@ bool validPin(int pin) { return pin >= PIN_MIN && pin <= PIN_MAX; }
 
 bool pinsValid(int sda, int scl, int co2Rx, int co2Tx) {
   return validPin(sda) && validPin(scl) && validPin(co2Rx) && validPin(co2Tx) && sda != scl && co2Rx != co2Tx;
+}
+
+bool setRelay(RelayChannel &relay, bool on, const char *reason) {
+  if (!relaysReady || !validPin(relay.pin)) return false;
+  unsigned long now = millis();
+  if (relay.state == on) return true;
+  if (relay.lastSwitchMs != 0 && now - relay.lastSwitchMs < RELAY_MIN_SWITCH_MS) return false;
+  relay.state = on;
+  relay.lastSwitchMs = now;
+  digitalWrite(relay.pin, relay.activeHigh ? (on ? HIGH : LOW) : (on ? LOW : HIGH));
+  logEvent(String("Relais ") + relay.role + (on ? " EIN" : " AUS") + " (" + reason + ")");
+  return true;
+}
+
+void initRelays() {
+  RelayChannel *all[] = {&relayHumidifier, &relayExhaust, &relayLight, &relayAux};
+  for (RelayChannel *r : all) {
+    if (!validPin(r->pin)) continue;
+    pinMode(r->pin, OUTPUT);
+    digitalWrite(r->pin, r->activeHigh ? LOW : HIGH); // default OFF
+    r->state = false;
+    r->lastSwitchMs = millis();
+  }
+  relaysReady = true;
+  logEvent("Relais initialisiert");
+}
+
+void applyVpdRelays() {
+  if (!relaysReady) return;
+  unsigned long now = millis();
+  if (lastVpdValidMs == 0 || now - lastVpdValidMs > RELAY_FAILSAFE_OFF_MS) {
+    setRelay(relayHumidifier, false, "failsafe");
+    setRelay(relayExhaust, false, "failsafe");
+    return;
+  }
+  if (!isfinite(latest.vpd) || !isfinite(latest.vpdTarget)) {
+    setRelay(relayHumidifier, false, "no_vpd");
+    setRelay(relayExhaust, false, "no_vpd");
+    return;
+  }
+  float delta = latest.vpd - latest.vpdTarget;
+  if (delta > RELAY_VPD_HYSTERESIS_KPA) {
+    setRelay(relayHumidifier, true, "vpd_high");
+    setRelay(relayExhaust, false, "vpd_high");
+  } else if (delta < -RELAY_VPD_HYSTERESIS_KPA) {
+    setRelay(relayHumidifier, false, "vpd_low");
+    setRelay(relayExhaust, true, "vpd_low");
+  } else {
+    setRelay(relayHumidifier, false, "vpd_ok");
+    setRelay(relayExhaust, false, "vpd_ok");
+  }
 }
 
 bool allowSensorSample(unsigned long now, unsigned long &lastTs) {
@@ -3803,6 +3878,7 @@ void readSensors() {
   if (leafFresh && leafAligned && !isnan(latest.humidity) && !isnan(latest.ambientTempC)) {
     float satVP = 0.6108f * expf((17.27f * latest.ambientTempC) / (latest.ambientTempC + 237.3f)); // kPa
     latest.vpd = (1.0f - (latest.humidity / 100.0f)) * satVP;
+    lastVpdValidMs = millis();
   } else {
     latest.vpd = NAN;
   }
@@ -5450,6 +5526,7 @@ void setup() {
   resetAllDaily(activeDayKey);
   loadPinsFromPrefs();
   loadSensorConfigs();
+  initRelays();
   initSensors();
   piSerial.begin(PI_BRIDGE_BAUD, SERIAL_8N1, DEFAULT_PI_BRIDGE_RX_PIN, DEFAULT_PI_BRIDGE_TX_PIN);
   connectToWiFi();
@@ -5486,5 +5563,6 @@ void loop() {
   if (millis() - lastSensorMillis >= SENSOR_INTERVAL) {
     lastSensorMillis = millis();
     readSensors();
+    applyVpdRelays();
   }
 }
