@@ -2,6 +2,7 @@
 
 **Current releases:**
 
+- **GrowSensor – v1.0.1-pro16m (ESP32 Pro 16MB)** – default build with OTA-ready `partitions_16MB.csv` and automatic flash-size safeguards.
 - **GrowSensor – v0.3.3 (Classic ESP32)** – legacy build for standard ESP32-DevKit boards.
 - **GrowSensor – v0.4.0 (ESP32 Pro 16MB)** – new optimized build for ESP32 modules with external antenna, 16MB flash, PSRAM.
 
@@ -22,6 +23,11 @@ You only need a USB cable, an ESP32, and a laptop/PC.
 10. Log in with `Admin` / `admin`, change the password, and configure Wi‑Fi/sensors.
 
 If anything fails: unplug/replug, try another USB cable/port, and rebuild/upload again.
+
+### Hotfix v1.0.1-pro16m (partition stability + auto-detect)
+- Added `partitions_16MB.csv` to the project root with dual OTA slots + SPIFFS for 16MB ESP32 Pro boards; `board_upload.flash_size = 16MB` is enforced.
+- Build hook auto-generates safe OTA partition maps for 8MB/4MB devices when the configured flash size is smaller, preventing CSV lookup errors and overlaps.
+- Firmware/version string bumped to `v1.0.1-pro16m` for the Pro target.
 
 ### Release v0.4.0 (ESP32 Pro, 16MB, PSRAM)
 - New PlatformIO target **esp32pro16m** (default) for 16MB ESP32 Pro boards with external antenna & PSRAM.
@@ -142,6 +148,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    ```sh
    pio device monitor -b 115200
    ```
+5. The Pro build (`env:esp32pro16m`) pins the 16MB partition table at `partitions_16MB.csv`; if you switch `board_upload.flash_size` to 8MB or 4MB the build hook will auto-create matching OTA partition CSVs and use them for you.
 
 ## v0.2.6 Changes
 - Dashboard tiles can now be collapsed or expanded via a small eye icon; collapsed tiles shrink to a header-only view (no values or hover charts) and clicks expand them without opening the detail modal. State is stored per tile in `localStorage` (`tile_visibility_v026`) and defaults to visible for all metrics.
