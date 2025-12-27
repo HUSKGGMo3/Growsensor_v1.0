@@ -254,11 +254,18 @@ struct SensorStall {
 };
 
 struct RelayChannel {
-  int pin;
-  const char *role;
-  bool activeHigh = true;
+  int pin = -1;
+  String name;
+  bool enabled = true;
   bool state = false;
+  int cooldownMs = 0;
+  bool activeHigh = true;
   unsigned long lastSwitchMs = 0;
+
+  RelayChannel() {}
+
+  RelayChannel(int p, const char *n, bool en, bool st, int cool)
+      : pin(p), name(n), enabled(en), state(st), cooldownMs(cool) {}
 };
 
 struct SensorSlot {
@@ -1921,7 +1928,7 @@ bool setRelay(RelayChannel &relay, bool on, const char *reason) {
   relay.state = on;
   relay.lastSwitchMs = now;
   digitalWrite(relay.pin, relay.activeHigh ? (on ? HIGH : LOW) : (on ? LOW : HIGH));
-  logEvent(String("Relais ") + relay.role + (on ? " EIN" : " AUS") + " (" + reason + ")");
+  logEvent(String("Relais ") + relay.name + (on ? " EIN" : " AUS") + " (" + reason + ")");
   return true;
 }
 
