@@ -38,7 +38,7 @@ static constexpr int DEFAULT_I2C_SCL_PIN = 22;
 static constexpr int DEFAULT_CO2_RX_PIN = 16; // ESP32 RX <- sensor TX
 static constexpr int DEFAULT_CO2_TX_PIN = 17; // ESP32 TX -> sensor RX
 static constexpr int PIN_MIN = 0;
-static constexpr int PIN_MAX = 39;
+static constexpr int PIN_MAX = 48;
 static constexpr int DEFAULT_RELAY_1_PIN = 32;
 static constexpr int DEFAULT_RELAY_2_PIN = 33;
 static constexpr int DEFAULT_RELAY_3_PIN = 27;
@@ -124,11 +124,11 @@ static constexpr unsigned long DEBUG_LOG_INTERVAL_MS = 5UL * 60UL * 1000UL;
 static constexpr unsigned long DEBUG_LOG_MAX_CACHE_MS = 5UL * 60UL * 1000UL;
 static constexpr size_t DEBUG_LOG_MAX_FILE_BYTES = 64000;
 #ifndef GS_FIRMWARE_VERSION
-#define GS_FIRMWARE_VERSION "GrowSensor – v1.0 (unspecified)"
+#define GS_FIRMWARE_VERSION "GrowSensor - v1.0 (unspecified)"
 #endif
 
 #ifndef GS_TARGET_BOARD
-#define GS_TARGET_BOARD "ESP32"
+#define GS_TARGET_BOARD "ESP32-S3"
 #endif
 
 #ifndef GS_FIRMWARE_CHANNEL
@@ -255,17 +255,17 @@ struct SensorStall {
 
 struct RelayChannel {
   int pin = -1;
-  String name;
-  bool enabled = true;
+  const char *name = nullptr;
+  bool enabled = false;
+  bool inverted = false;
+  int mode = 0;
   bool state = false;
-  int cooldownMs = 0;
-  bool activeHigh = true;
   unsigned long lastSwitchMs = 0;
 
-  RelayChannel() {}
+  RelayChannel(int pin, const char *name, bool enabled, bool inverted, int mode)
+      : pin(pin), name(name), enabled(enabled), inverted(inverted), mode(mode) {}
 
-  RelayChannel(int p, const char *n, bool en, bool st, int cool)
-      : pin(p), name(n), enabled(en), state(st), cooldownMs(cool) {}
+  RelayChannel() = default;
 };
 
 struct SensorSlot {
@@ -1927,7 +1927,7 @@ bool setRelay(RelayChannel &relay, bool on, const char *reason) {
   if (relay.lastSwitchMs != 0 && now - relay.lastSwitchMs < RELAY_MIN_SWITCH_MS) return false;
   relay.state = on;
   relay.lastSwitchMs = now;
-  digitalWrite(relay.pin, relay.activeHigh ? (on ? HIGH : LOW) : (on ? LOW : HIGH));
+  digitalWrite(relay.pin, relay.inverted ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
   logEvent(String("Relais ") + relay.name + (on ? " EIN" : " AUS") + " (" + reason + ")");
   return true;
 }
@@ -1937,7 +1937,7 @@ void initRelays() {
   for (RelayChannel *r : all) {
     if (!validPin(r->pin)) continue;
     pinMode(r->pin, OUTPUT);
-    digitalWrite(r->pin, r->activeHigh ? LOW : HIGH); // default OFF
+    digitalWrite(r->pin, r->inverted ? HIGH : LOW); // default OFF
     r->state = false;
     r->lastSwitchMs = millis();
   }
