@@ -22,8 +22,10 @@
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "esp32/spiram.h"
 #include "esp_heap_caps.h"
-#else
+#elif __has_include(<esp_psram.h>)
 #include "esp_psram.h"
+#include "esp_heap_caps.h"
+#else
 #include "esp_heap_caps.h"
 #endif
 
