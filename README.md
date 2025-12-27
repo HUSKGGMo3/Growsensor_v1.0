@@ -2,13 +2,13 @@
 
 **Current releases:**
 
-- **GrowSensor – v1.1.0-s3 (ESP32-S3, UM ProS3 16MB + 8MB PSRAM)** – default build in `/main` using `env:esp32s3_16r8` (Arduino, USB-CDC on boot, PSRAM enabled).
+- **GrowSensor – v1.1.0-s3 (ESP32-S3, UM ProS3 16MB + 8MB PSRAM)** – default build in the PlatformIO `src/` folder using `env:esp32s3_16r8` (Arduino, USB-CDC on boot, PSRAM enabled).
 - **GrowSensor – v1.0.1-pro16m (ESP32 Pro 16MB)** – archived in `/legacy_esp32` for older PSRAM DevKit-style boards.
 - **GrowSensor – v0.3.3 (Classic ESP32)** – archived in `/legacy_esp32` for standard ESP32-DevKit boards.
 
 **Project layout:**
 
-- `/main` – actively maintained ESP32-S3 firmware (UM ProS3, 16MB flash + 8MB PSRAM).
+- `/src` – actively maintained ESP32-S3 firmware (UM ProS3, 16MB flash + 8MB PSRAM).
 - `/legacy_esp32` – snapshot of the previous ESP32/ESP32-Pro firmware and PlatformIO configs.
 
 ## Beginner-Friendly Install (for Dummies)
@@ -134,7 +134,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 ## Supported Hardware
 - ESP32 (classic, Arduino framework)
 - Sensors: BH1750 (Lux), SHT31/SHT30 (Temp/Humidity), MLX90614 (Leaf Temp), MH-Z19/MH-Z14 series (CO₂).
-- I²C pins and CO₂ UART pins are configurable in `main/main.cpp` (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
+- I²C pins and CO₂ UART pins are configurable in `src/main.cpp` (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
 
 ## Security & Login
 - Default login: `Admin` / `admin`
@@ -144,7 +144,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 ## Build & Flash (PlatformIO)
 1. Install PlatformIO CLI or VS Code + PlatformIO extension.
 2. Connect the ESP32-S3 (UM ProS3) via USB.
-3. Build and flash the S3 firmware (`/main`):
+3. Build and flash the S3 firmware (`/src`):
    ```sh
    pio run -e esp32s3_16r8 -t upload
    ```
@@ -153,6 +153,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    pio device monitor -b 115200
    ```
 5. The S3 build pins the 16MB partition table at `partitions_16MB.csv`. The guard script validates offsets and auto-writes a matching CSV when the flash size changes, preventing missing/overlapping partition errors.
+   If you ever see `Preferences.begin(): nvs_open failed: NOT_FOUND`, the device was flashed with a mismatched/absent NVS partition—re-uploading with this partition map fixes the offset, and the firmware now re-initializes (and erases, if needed) NVS before touching Preferences while falling back to RAM-only settings plus a visible warning if storage stays unavailable.
 6. For classic ESP32 boards, use the archived project under `legacy_esp32/`:
    ```sh
    pio run -d legacy_esp32 -e esp32pro16m_legacy -t upload

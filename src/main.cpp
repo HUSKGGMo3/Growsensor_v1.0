@@ -22,6 +22,8 @@
 #include <esp_system.h>
 #include "esp_heap_caps.h"
 #include <esp_idf_version.h>
+#include <esp_err.h>
+#include <nvs_flash.h>
 
 #if __has_include(<esp_psram.h>) && __has_include(<esp32-hal-psram.h>)
 #include <esp32-hal-psram.h>
@@ -708,6 +710,11 @@ CloudStatus cloudStatus;
 PsramVector<CloudJob> cloudQueue;
 String recordingStartDay;
 Preferences prefsCloud;
+bool nvsReady = false;
+bool prefsAvailable = false;
+bool storageWarningActive = false;
+bool prefsErrorLogged = false;
+String storageWarningMessage;
 StorageMode storageMode = StorageMode::LOCAL_ONLY;
 unsigned long lastCloudPingMs = 0;
 unsigned long lastCloudOkMs = 0;
@@ -772,6 +779,52 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // ----------------------------
 // Helpers
 // ----------------------------
+void disablePersistence(const char *context, esp_err_t err = ESP_OK) {
+  prefsAvailable = false;
+  storageWarningActive = true;
+  if (storageWarningMessage.length() == 0) {
+    storageWarningMessage = "NVS unavailable, settings won't persist";
+  }
+  if (!prefsErrorLogged) {
+    if (err != ESP_OK) {
+      Serial.printf("[NVS] %s failed: %s (%d)\n", context, esp_err_to_name(err), err);
+    } else {
+      Serial.printf("[NVS] %s failed\n", context);
+    }
+    prefsErrorLogged = true;
+    logEvent(String("NVS unavailable: ") + storageWarningMessage, "warn");
+  }
+}
+
+bool initNvsStorage() {
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    Serial.printf("[NVS] init issue (%s), erasing and retrying\n", esp_err_to_name(err));
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  nvsReady = (err == ESP_OK);
+  prefsAvailable = nvsReady;
+  if (!nvsReady) {
+    disablePersistence("nvs_flash_init", err);
+    return false;
+  }
+  storageWarningActive = false;
+  storageWarningMessage = "";
+  prefsErrorLogged = false;
+  return true;
+}
+
+bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false) {
+  if (!prefsAvailable) return false;
+  bool ok = prefs.begin(ns, readOnly);
+  if (!ok) {
+    disablePersistence(ns);
+    return false;
+  }
+  return true;
+}
+
 void initPsram() {
 #if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM_SUPPORT)
   gs_psram_available = psramFound();
@@ -911,7 +964,7 @@ void applyPhasePreset(const PhasePreset &preset, bool persist) {
   vpdStageId = preset.profileId;
   ppfdScale = profile ? profile->ppfdScale : 1.0f;
   if (!persist) return;
-  prefsSystem.begin("system", false);
+  if (!beginPrefs(prefsSystem, "system", false)) return;
   prefsSystem.putString("phase", phaseId);
   prefsSystem.putString("channel", lightChannelName());
   prefsSystem.putString("vpd_stage", vpdStageId);
@@ -1179,7 +1232,10 @@ void attemptCloudReconnect() {
 
 void saveCloudConfig(const String &reason = "config save") {
   cloudConfig.baseUrl = normalizeCloudBaseUrl(cloudConfig.baseUrl);
-  prefsCloud.begin("cloud", false);
+  if (!beginPrefs(prefsCloud, "cloud", false)) {
+    refreshStorageMode(reason);
+    return;
+  }
   prefsCloud.putBool("persist", cloudConfig.persistCredentials);
   if (cloudConfig.persistCredentials) {
     prefsCloud.putString("base", cloudConfig.baseUrl);
@@ -1205,7 +1261,23 @@ void saveCloudConfig(const String &reason = "config save") {
 }
 
 void loadCloudConfig() {
-  prefsCloud.begin("cloud", true);
+  if (!beginPrefs(prefsCloud, "cloud", true)) {
+    cloudConfig.persistCredentials = false;
+    cloudConfig.baseUrl = "";
+    cloudConfig.username = "";
+    cloudConfig.password = "";
+    recordingStartDay = "";
+    cloudConfig.enabled = false;
+    cloudConfig.recording = false;
+    cloudConfig.retentionMonths = 1;
+    cloudConfig.protocol = 0;
+    cloudStatus.enabled = false;
+    cloudStatus.recording = false;
+    cloudStatus.lastStateReason = "storage unavailable";
+    cloudStatus.lastStateChangeMs = currentEpochMs();
+    refreshStorageMode("storage unavailable");
+    return;
+  }
   bool persist = prefsCloud.getBool("persist", true);
   cloudConfig.persistCredentials = persist;
   if (cloudConfig.persistCredentials) {
@@ -1257,7 +1329,7 @@ void setRecordingActive(bool active, const String &reason) {
 
 void saveRecordingStartDay(const String &dayKey) {
   recordingStartDay = dayKey;
-  prefsCloud.begin("cloud", false);
+  if (!beginPrefs(prefsCloud, "cloud", false)) return;
   prefsCloud.putString("record_start", recordingStartDay);
   prefsCloud.end();
 }
@@ -1267,7 +1339,7 @@ void clearRecordingStartDay() {
 }
 
 void persistDailyHistory() {
-  prefsCloud.begin("cloud", false);
+  if (!beginPrefs(prefsCloud, "cloud", false)) return;
   DynamicJsonDocument doc(16384);
   JsonArray arr = doc.to<JsonArray>();
   for (size_t i = 0; i < HISTORY_METRIC_COUNT; i++) {
@@ -1295,7 +1367,7 @@ void loadDailyHistory() {
     DAILY_HISTORY[i].clear();
     DAILY_AGG[i] = DailyAggregate();
   }
-  prefsCloud.begin("cloud", true);
+  if (!beginPrefs(prefsCloud, "cloud", true)) return;
   String raw = prefsCloud.getString("daily", "");
   prefsCloud.end();
   if (raw.length() == 0) return;
@@ -1971,7 +2043,7 @@ String jsonEscape(const String &value) {
 }
 
 void persistSensorFlags() {
-  prefsSensors.begin("sensors", false);
+  if (!beginPrefs(prefsSensors, "sensors", false)) return;
   prefsSensors.putBool("en_light", enableLight);
   prefsSensors.putBool("en_climate", enableClimate);
   prefsSensors.putBool("en_leaf", enableLeaf);
@@ -2045,12 +2117,18 @@ bool allowSensorSample(unsigned long now, unsigned long &lastTs) {
 }
 
 void loadPinsFromPrefs() {
-  prefsSystem.begin("system", true);
-  pinI2C_SDA = prefsSystem.getInt("i2c_sda", DEFAULT_I2C_SDA_PIN);
-  pinI2C_SCL = prefsSystem.getInt("i2c_scl", DEFAULT_I2C_SCL_PIN);
-  pinCO2_RX = prefsSystem.getInt("co2_rx", DEFAULT_CO2_RX_PIN);
-  pinCO2_TX = prefsSystem.getInt("co2_tx", DEFAULT_CO2_TX_PIN);
-  prefsSystem.end();
+  if (beginPrefs(prefsSystem, "system", true)) {
+    pinI2C_SDA = prefsSystem.getInt("i2c_sda", DEFAULT_I2C_SDA_PIN);
+    pinI2C_SCL = prefsSystem.getInt("i2c_scl", DEFAULT_I2C_SCL_PIN);
+    pinCO2_RX = prefsSystem.getInt("co2_rx", DEFAULT_CO2_RX_PIN);
+    pinCO2_TX = prefsSystem.getInt("co2_tx", DEFAULT_CO2_TX_PIN);
+    prefsSystem.end();
+  } else {
+    pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
+    pinI2C_SCL = DEFAULT_I2C_SCL_PIN;
+    pinCO2_RX = DEFAULT_CO2_RX_PIN;
+    pinCO2_TX = DEFAULT_CO2_TX_PIN;
+  }
 
   if (!pinsValid(pinI2C_SDA, pinI2C_SCL, pinCO2_RX, pinCO2_TX)) {
     pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
@@ -3201,7 +3279,7 @@ uint64_t currentEpochMs() {
 
 void loadPartners() {
   partners.clear();
-  prefsUi.begin("ui", true);
+  if (!beginPrefs(prefsUi, "ui", true)) return;
   String raw = prefsUi.getString("partners", "[]");
   prefsUi.end();
   DynamicJsonDocument doc(1024);
@@ -3273,7 +3351,7 @@ void saveSensorConfigs() {
   }
   String out;
   serializeJson(arr, out);
-  prefsSensors.begin("sensors", false);
+  if (!beginPrefs(prefsSensors, "sensors", false)) return;
   prefsSensors.putString("sensors_cfg", out);
   prefsSensors.end();
 }
@@ -3307,7 +3385,15 @@ void applyPinsFromConfig() {
 
 void loadSensorConfigs() {
   sensorConfigs.clear();
-  prefsSensors.begin("sensors", true);
+  if (!beginPrefs(prefsSensors, "sensors", true)) {
+    SensorConfig l; l.id="lux"; l.type="BH1750"; l.category="light"; l.name="BH1750"; l.interfaceType="i2c"; l.enabled=enableLight; l.sda=pinI2C_SDA; l.scl=pinI2C_SCL;
+    SensorConfig c; c.id="climate"; c.type=climateSensorName(climateType); c.category="climate"; c.name="Klima"; c.interfaceType="i2c"; c.enabled=enableClimate; c.sda=pinI2C_SDA; c.scl=pinI2C_SCL;
+    SensorConfig lf; lf.id="leaf"; lf.type="MLX90614"; lf.category="leaf"; lf.name="Leaf"; lf.interfaceType="i2c"; lf.enabled=enableLeaf; lf.sda=pinI2C_SDA; lf.scl=pinI2C_SCL;
+    SensorConfig co; co.id="co2"; co.type=co2SensorName(co2Type); co.category="co2"; co.name="CO₂"; co.interfaceType="uart"; co.enabled=enableCo2; co.rx=pinCO2_RX; co.tx=pinCO2_TX;
+    sensorConfigs.push_back(l); sensorConfigs.push_back(c); sensorConfigs.push_back(lf); sensorConfigs.push_back(co);
+    applyPinsFromConfig();
+    return;
+  }
   String raw = prefsSensors.getString("sensors_cfg", "");
   prefsSensors.end();
   if (raw.length() == 0) {
@@ -3405,24 +3491,33 @@ bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult
 }
 
 bool connectToWiFi() {
-  prefsWifi.begin("wifi", false);
-  savedSsid = prefsWifi.getString("ssid", "");
-  savedWifiPass = prefsWifi.getString("wifi_pass", "");
-  bool hasWifiPassKey = prefsWifi.isKey("wifi_pass");
-  bool hasLegacyPassKey = prefsWifi.isKey("pass");
-  String legacyPass = hasLegacyPassKey ? prefsWifi.getString("pass", "") : "";
-  prefsWifi.end();
-  prefsSystem.begin("system", false);
-  channel = lightChannelFromString(prefsSystem.getString("channel", "full_spectrum"));
-  climateType = climateFromString(prefsSystem.getString("climate_type", "sht31"));
-  co2Type = co2FromString(prefsSystem.getString("co2_type", "mhz19"));
-  timezoneName = prefsSystem.getString("timezone", timezoneName);
-  vpdStageId = prefsSystem.getString("vpd_stage", "seedling");
-  ppfdScale = prefsSystem.getFloat("ppfd_scale", 1.0f);
-  phaseId = prefsSystem.getString("phase", "");
-  integrationMode = static_cast<IntegrationMode>(prefsSystem.getUChar("integration_mode", 0));
-  uiDisableRequested = prefsSystem.getBool("ui_disable", false);
-  prefsSystem.end();
+  bool hasWifiPassKey = false;
+  bool hasLegacyPassKey = false;
+  String legacyPass;
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    savedSsid = prefsWifi.getString("ssid", "");
+    savedWifiPass = prefsWifi.getString("wifi_pass", "");
+    hasWifiPassKey = prefsWifi.isKey("wifi_pass");
+    hasLegacyPassKey = prefsWifi.isKey("pass");
+    legacyPass = hasLegacyPassKey ? prefsWifi.getString("pass", "") : "";
+    prefsWifi.end();
+  } else {
+    savedSsid = "";
+    savedWifiPass = "";
+    legacyPass = "";
+  }
+  if (beginPrefs(prefsSystem, "system", false)) {
+    channel = lightChannelFromString(prefsSystem.getString("channel", "full_spectrum"));
+    climateType = climateFromString(prefsSystem.getString("climate_type", "sht31"));
+    co2Type = co2FromString(prefsSystem.getString("co2_type", "mhz19"));
+    timezoneName = prefsSystem.getString("timezone", timezoneName);
+    vpdStageId = prefsSystem.getString("vpd_stage", "seedling");
+    ppfdScale = prefsSystem.getFloat("ppfd_scale", 1.0f);
+    phaseId = prefsSystem.getString("phase", "");
+    integrationMode = static_cast<IntegrationMode>(prefsSystem.getUChar("integration_mode", 0));
+    uiDisableRequested = prefsSystem.getBool("ui_disable", false);
+    prefsSystem.end();
+  }
   if (integrationMode != IntegrationMode::PI_BRIDGE) integrationMode = IntegrationMode::STANDALONE;
   applyIntegrationMode(integrationMode, false);
   if (phaseId.length() > 0 && phaseId != "custom") {
@@ -3435,24 +3530,37 @@ bool connectToWiFi() {
   } else {
     phaseId = phaseFromState();
   }
-  prefsWifi.begin("wifi", false);
-  staticIpEnabled = prefsWifi.getBool("static", false);
-  staticIp.fromString(prefsWifi.getString("ip", ""));
-  staticGateway.fromString(prefsWifi.getString("gw", ""));
-  staticSubnet.fromString(prefsWifi.getString("sn", ""));
-  prefsWifi.end();
-  prefsSensors.begin("sensors", false);
-  enableLight = prefsSensors.getBool("en_light", true);
-  enableClimate = prefsSensors.getBool("en_climate", true);
-  enableLeaf = prefsSensors.getBool("en_leaf", true);
-  enableCo2 = prefsSensors.getBool("en_co2", true);
-  prefsSensors.end();
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    staticIpEnabled = prefsWifi.getBool("static", false);
+    staticIp.fromString(prefsWifi.getString("ip", ""));
+    staticGateway.fromString(prefsWifi.getString("gw", ""));
+    staticSubnet.fromString(prefsWifi.getString("sn", ""));
+    prefsWifi.end();
+  } else {
+    staticIpEnabled = false;
+    staticIp = IPAddress();
+    staticGateway = IPAddress();
+    staticSubnet = IPAddress();
+  }
+  if (beginPrefs(prefsSensors, "sensors", false)) {
+    enableLight = prefsSensors.getBool("en_light", true);
+    enableClimate = prefsSensors.getBool("en_climate", true);
+    enableLeaf = prefsSensors.getBool("en_leaf", true);
+    enableCo2 = prefsSensors.getBool("en_co2", true);
+    prefsSensors.end();
+  } else {
+    enableLight = true;
+    enableClimate = true;
+    enableLeaf = true;
+    enableCo2 = true;
+  }
   bool migrateLegacyWifiPass = !hasWifiPassKey && hasLegacyPassKey && savedWifiPass.isEmpty() && !legacyPass.isEmpty() && !savedSsid.isEmpty();
   if (migrateLegacyWifiPass) {
     savedWifiPass = legacyPass;
-    prefsWifi.begin("wifi", false);
-    prefsWifi.putString("wifi_pass", savedWifiPass);
-    prefsWifi.end();
+    if (beginPrefs(prefsWifi, "wifi", false)) {
+      prefsWifi.putString("wifi_pass", savedWifiPass);
+      prefsWifi.end();
+    }
   }
   applyTimezoneEnv();
   loadPartners();
@@ -3481,10 +3589,11 @@ bool connectToWiFi() {
 }
 
 void saveWifiCredentials(const String &ssid, const String &pass) {
-  prefsWifi.begin("wifi", false);
-  prefsWifi.putString("ssid", ssid);
-  prefsWifi.putString("wifi_pass", pass);
-  prefsWifi.end();
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    prefsWifi.putString("ssid", ssid);
+    prefsWifi.putString("wifi_pass", pass);
+    prefsWifi.end();
+  }
   savedSsid = ssid;
   savedWifiPass = pass;
 }
@@ -3669,7 +3778,7 @@ void applyIntegrationMode(IntegrationMode mode, bool persist) {
     uiDisableActive = false;
   }
   if (!persist) return;
-  prefsSystem.begin("system", false);
+  if (!beginPrefs(prefsSystem, "system", false)) return;
   prefsSystem.putUChar("integration_mode", static_cast<uint8_t>(integrationMode));
   prefsSystem.end();
 }
@@ -3769,18 +3878,22 @@ void updateUiDisableState() {
 }
 
 void clearPreferences() {
-  prefsWifi.begin("wifi", false);
-  prefsWifi.clear();
-  prefsWifi.end();
-  prefsSensors.begin("sensors", false);
-  prefsSensors.clear();
-  prefsSensors.end();
-  prefsSystem.begin("system", false);
-  prefsSystem.clear();
-  prefsSystem.end();
-  prefsUi.begin("ui", false);
-  prefsUi.clear();
-  prefsUi.end();
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    prefsWifi.clear();
+    prefsWifi.end();
+  }
+  if (beginPrefs(prefsSensors, "sensors", false)) {
+    prefsSensors.clear();
+    prefsSensors.end();
+  }
+  if (beginPrefs(prefsSystem, "system", false)) {
+    prefsSystem.clear();
+    prefsSystem.end();
+  }
+  if (beginPrefs(prefsUi, "ui", false)) {
+    prefsUi.clear();
+    prefsUi.end();
+  }
   logEvent("Preferences cleared");
 }
 
@@ -3798,7 +3911,7 @@ void savePartners() {
   }
   String out;
   serializeJson(arr, out);
-  prefsUi.begin("ui", false);
+  if (!beginPrefs(prefsUi, "ui", false)) return;
   prefsUi.putString("partners", out);
   prefsUi.end();
 }
@@ -4236,6 +4349,11 @@ void handleStatus() {
   json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
   json += "\"target\":\"" + String(FIRMWARE_TARGET) + "\",";
   json += "\"channel\":\"" + String(FIRMWARE_CHANNEL) + "\"";
+  json += ",\"storage_ok\":" + String(prefsAvailable ? 1 : 0);
+  if (storageWarningActive) {
+    String warn = storageWarningMessage.length() > 0 ? storageWarningMessage : String("NVS unavailable, settings won't persist");
+    json += ",\"storage_warning\":\"" + jsonEscape(warn) + "\"";
+  }
   json += "}";
   statusCachePayload = json;
   statusCacheAtMs = now;
@@ -4786,7 +4904,10 @@ void handlePins() {
     return;
   }
 
-  prefsSystem.begin("system", false);
+  if (!beginPrefs(prefsSystem, "system", false)) {
+    server.send(503, "text/plain", "storage unavailable");
+    return;
+  }
   prefsSystem.putInt("i2c_sda", sda);
   prefsSystem.putInt("i2c_scl", scl);
   prefsSystem.putInt("co2_rx", rx);
@@ -4871,7 +4992,10 @@ void handleFactors() {
   }
 
   phaseId = phaseFromState();
-  prefsSystem.begin("system", false);
+  if (!beginPrefs(prefsSystem, "system", false)) {
+    sendJsonError(503, "storage_unavailable");
+    return;
+  }
   prefsSystem.putString("channel", lightChannelName());
   prefsSystem.putString("vpd_stage", vpdStageId);
   prefsSystem.putFloat("ppfd_scale", ppfdScale);
@@ -4963,6 +5087,11 @@ void handleSettings() {
     json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";
     json += "\"gw\":\"" + (staticIpEnabled ? staticGateway.toString() : WiFi.gatewayIP().toString()) + "\",";
     json += "\"sn\":\"" + (staticIpEnabled ? staticSubnet.toString() : WiFi.subnetMask().toString()) + "\"";
+    json += ",\"storage_ok\":" + String(prefsAvailable ? 1 : 0);
+    if (storageWarningActive) {
+      String warn = storageWarningMessage.length() > 0 ? storageWarningMessage : String("NVS unavailable, settings won't persist");
+      json += ",\"storage_warning\":\"" + jsonEscape(warn) + "\"";
+    }
     json += "}";
     server.send(200, "application/json", json);
     return;
@@ -5031,7 +5160,10 @@ void handleSettings() {
     startNtpSync();
   }
   phaseId = phaseFromState();
-  prefsSystem.begin("system", false);
+  if (!beginPrefs(prefsSystem, "system", false)) {
+    sendJsonError(503, "storage_unavailable");
+    return;
+  }
   if (hasChannel) prefsSystem.putString("channel", lightChannelName());
   if (hasVpdStage) prefsSystem.putString("vpd_stage", vpdStageId);
   if (hasVpdStage) prefsSystem.putFloat("ppfd_scale", ppfdScale);
@@ -5108,7 +5240,10 @@ void handleIntegration() {
   }
   if (hasUiDisable) {
     uiDisableRequested = nextUiDisable;
-    prefsSystem.begin("system", false);
+    if (!beginPrefs(prefsSystem, "system", false)) {
+      sendJsonError(503, "storage_unavailable");
+      return;
+    }
     prefsSystem.putBool("ui_disable", uiDisableRequested);
     prefsSystem.end();
     appendPiLog(uiDisableRequested ? "ESP-WebGUI Deaktivierung angefordert" : "ESP-WebGUI Deaktivierung aufgehoben");
@@ -5134,12 +5269,13 @@ void handleWifiSave() {
   }
 
   saveWifiCredentials(ssid, pass);
-  prefsWifi.begin("wifi", false);
-  prefsWifi.putBool("static", staticFlag);
-  prefsWifi.putString("ip", ip.toString());
-  prefsWifi.putString("gw", gw.toString());
-  prefsWifi.putString("sn", sn.toString());
-  prefsWifi.end();
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    prefsWifi.putBool("static", staticFlag);
+    prefsWifi.putString("ip", ip.toString());
+    prefsWifi.putString("gw", gw.toString());
+    prefsWifi.putString("sn", sn.toString());
+    prefsWifi.end();
+  }
   staticIpEnabled = staticFlag;
   staticIp = ip;
   staticGateway = gw;
@@ -5302,7 +5438,10 @@ void handleSensorsApi() {
     }
     if (id == "climate_type" && server.hasArg("value")) {
       climateType = climateFromString(server.arg("value"));
-      prefsSystem.begin("system", false);
+      if (!beginPrefs(prefsSystem, "system", false)) {
+        server.send(503, "text/plain", "storage unavailable");
+        return;
+      }
       prefsSystem.putString("climate_type", climateSensorName(climateType));
       prefsSystem.end();
       reinitClimateSensor();
@@ -5312,7 +5451,10 @@ void handleSensorsApi() {
     }
     if (id == "co2_type" && server.hasArg("value")) {
       co2Type = co2FromString(server.arg("value"));
-      prefsSystem.begin("system", false);
+      if (!beginPrefs(prefsSystem, "system", false)) {
+        server.send(503, "text/plain", "storage unavailable");
+        return;
+      }
       prefsSystem.putString("co2_type", co2SensorName(co2Type));
       prefsSystem.end();
       reinitCo2Sensor();
@@ -5614,6 +5756,12 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 #endif
+
+  // Ensure the NVS partition is present and usable before any Preferences calls.
+  // A missing/mismatched partition manifests as "nvs_open failed: NOT_FOUND".
+  if (!initNvsStorage()) {
+    Serial.println("[NVS] Persistence disabled, using RAM defaults only");
+  }
 
   initPsram();
   loadCloudConfig();
