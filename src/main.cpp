@@ -23,13 +23,17 @@
 #include "esp_heap_caps.h"
 #include <esp_idf_version.h>
 #include <esp_err.h>
+#include <esp_partition.h>
 #include <nvs_flash.h>
 
-#if __has_include(<esp_psram.h>) && __has_include(<esp32-hal-psram.h>)
+#if __has_include(<esp32-hal-psram.h>)
 #include <esp32-hal-psram.h>
-#else
-#warning "PSRAM support headers not found; PSRAM features disabled."
-inline void *ps_malloc(size_t) { return nullptr; }
+#elif __has_include(<esp_psram.h>)
+#include <esp_psram.h>
+#endif
+
+#ifndef ps_malloc
+inline void *ps_malloc(size_t size) { return heap_caps_malloc(size, MALLOC_CAP_SPIRAM); }
 #endif
 
 #ifndef EXT_RAM_ATTR
@@ -189,6 +193,7 @@ static const char *FIRMWARE_VERSION = GS_FIRMWARE_VERSION;
 static const char *FIRMWARE_TARGET = GS_TARGET_BOARD;
 static const char *FIRMWARE_CHANNEL = GS_FIRMWARE_CHANNEL;
 static const char *CLOUD_ROOT_FOLDER = "GrowSensor";
+static constexpr const char *PREFERENCES_PARTITION = "nvs";
 
 static const char *NTP_SERVER_1 = "pool.ntp.org";
 static const char *NTP_SERVER_2 = "time.nist.gov";
@@ -713,6 +718,7 @@ Preferences prefsCloud;
 Preferences prefsGuard;
 bool nvsReady = false;
 bool prefsOk = false;
+String prefsPartitionLabel = PREFERENCES_PARTITION;
 bool storageWarningActive = false;
 bool prefsErrorLogged = false;
 String storageWarningMessage;
@@ -780,6 +786,8 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // ----------------------------
 // Helpers
 // ----------------------------
+const char *currentPrefsPartitionLabel() { return prefsPartitionLabel.c_str(); }
+
 void disablePersistence(const char *context, esp_err_t err = ESP_OK) {
   prefsOk = false;
   nvsReady = false;
@@ -798,19 +806,81 @@ void disablePersistence(const char *context, esp_err_t err = ESP_OK) {
   }
 }
 
+const esp_partition_t *findNvsPartition() {
+  const esp_partition_t *nvsPartition =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, nullptr);
+  if (!nvsPartition) {
+    Serial.println("[NVS] NVS partition not found");
+    return nullptr;
+  }
+  Serial.printf("[NVS] Found partition '%s' (type=%d, subtype=%d) at 0x%06lx size=0x%06lx\n",
+                nvsPartition->label ? nvsPartition->label : "(null)", nvsPartition->type,
+                nvsPartition->subtype, static_cast<unsigned long>(nvsPartition->address),
+                static_cast<unsigned long>(nvsPartition->size));
+  if (strcmp(nvsPartition->label, PREFERENCES_PARTITION) != 0) {
+    Serial.printf("[NVS] Partition label '%s' differs from expected '%s'\n", nvsPartition->label,
+                  PREFERENCES_PARTITION);
+  }
+  return nvsPartition;
+}
+
+bool ensureNamespaceExists(const char *ns, const char *partitionLabel) {
+  Preferences creator;
+  bool created = creator.begin(ns, false, partitionLabel);
+  if (!created) return false;
+  creator.end();
+  return true;
+}
+
+void logPrefsBegin(const char *ns, bool readOnly, const char *partitionLabel) {
+  static std::vector<String> loggedAttempts;
+  String key = String(ns) + "|" + (readOnly ? "ro" : "rw") + "|" + partitionLabel;
+  if (std::find(loggedAttempts.begin(), loggedAttempts.end(), key) == loggedAttempts.end()) {
+    loggedAttempts.push_back(key);
+    Serial.printf("[NVS] Preferences.begin ns='%s' ro=%s partition='%s'\n", ns,
+                  readOnly ? "true" : "false", partitionLabel);
+  }
+}
+
 bool initNvsStorage() {
+  const esp_partition_t *nvsPartition = findNvsPartition();
+  if (!nvsPartition) {
+    disablePersistence("nvs_partition_lookup", ESP_ERR_NOT_FOUND);
+    return false;
+  }
+  prefsPartitionLabel = nvsPartition->label ? nvsPartition->label : PREFERENCES_PARTITION;
+
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     Serial.printf("[NVS] init issue (%s), erasing and retrying\n", esp_err_to_name(err));
-    nvs_flash_erase();
+    esp_err_t eraseErr = nvs_flash_erase_partition(currentPrefsPartitionLabel());
+    if (eraseErr != ESP_OK) {
+      disablePersistence("nvs_flash_erase", eraseErr);
+      return false;
+    }
     err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("[NVS] default init failed (%s), retrying explicit partition '%s'\n",
+                  esp_err_to_name(err), currentPrefsPartitionLabel());
+    err = nvs_flash_init_partition(currentPrefsPartitionLabel());
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      Serial.printf("[NVS] explicit init issue (%s), erasing and retrying\n", esp_err_to_name(err));
+      esp_err_t eraseErr = nvs_flash_erase_partition(currentPrefsPartitionLabel());
+      if (eraseErr != ESP_OK) {
+        disablePersistence("nvs_flash_erase_partition", eraseErr);
+        return false;
+      }
+      err = nvs_flash_init_partition(currentPrefsPartitionLabel());
+    }
   }
   nvsReady = (err == ESP_OK);
   if (!nvsReady) {
     disablePersistence("nvs_flash_init", err);
     return false;
   }
-  prefsOk = prefsGuard.begin("cfg", false);
+  logPrefsBegin("cfg", false, currentPrefsPartitionLabel());
+  prefsOk = prefsGuard.begin("cfg", false, currentPrefsPartitionLabel());
   if (!prefsOk) {
     disablePersistence("Preferences.begin(cfg)");
     return false;
@@ -822,9 +892,23 @@ bool initNvsStorage() {
   return true;
 }
 
-bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false) {
+bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false, const char *partitionLabel = nullptr) {
   if (!prefsOk) return false;
-  bool ok = prefs.begin(ns, readOnly);
+  const char *label = partitionLabel ? partitionLabel : currentPrefsPartitionLabel();
+  if (readOnly) {
+    static std::vector<String> ensuredNamespaces;
+    String key = String(ns) + "|" + label;
+    bool alreadyEnsured = std::find(ensuredNamespaces.begin(), ensuredNamespaces.end(), key) != ensuredNamespaces.end();
+    if (!alreadyEnsured) {
+      if (!ensureNamespaceExists(ns, label)) {
+        disablePersistence(ns);
+        return false;
+      }
+      ensuredNamespaces.push_back(key);
+    }
+  }
+  logPrefsBegin(ns, readOnly, label);
+  bool ok = prefs.begin(ns, readOnly, label);
   if (!ok) {
     disablePersistence(ns);
     return false;
@@ -840,6 +924,7 @@ void initPsram() {
 #endif
 
   Serial.printf("[PSRAM] status: %s\n", gs_psram_available ? "AVAILABLE" : "NOT AVAILABLE");
+  Serial.printf("PSRAM: %s\n", gs_psram_available ? "enabled" : "disabled");
 
   psramBytesTotal = gs_psram_available ? ESP.getPsramSize() : 0;
   psramBytesFreeAtBoot = gs_psram_available ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM) : 0;
