@@ -22,11 +22,6 @@
 
 #if __has_include(<esp32-hal-psram.h>)
 #include <esp32-hal-psram.h>
-#elif __has_include(<esp_psram.h>)
-#include <esp_psram.h>
-#include <esp_err.h>
-inline bool psramFound() { return esp_psram_is_initialized(); }
-inline bool psramInit() { return esp_psram_init() == ESP_OK; }
 #else
 #warning "PSRAM support headers not found; PSRAM features disabled."
 inline bool psramFound() { return false; }
@@ -773,30 +768,25 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // Helpers
 // ----------------------------
 void initPsram() {
-#if defined(CONFIG_SPIRAM_SUPPORT) || defined(BOARD_HAS_PSRAM)
-#if CONFIG_IDF_TARGET_ESP32S3
-  bool hasPsram = psramInit();
-#else
-  bool hasPsram = psramFound();
+  bool hasPsram = false;
+
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_SPIRAM
+  hasPsram = psramInit();
 #endif
-  psramReady = hasPsram;
+
+  psramReady = hasPsram && psramFound();
   if (psramReady) {
     Serial.println("[PSRAM] OK and initialized");
   } else {
-    Serial.println("[PSRAM] NOT FOUND, running fallback mode");
+    Serial.println("[PSRAM] NOT FOUND – running fallback mode, but firmware keeps working");
   }
+
   psramBytesTotal = psramReady ? ESP.getPsramSize() : 0;
   psramBytesFreeAtBoot = psramReady ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM) : 0;
   String summary = psramReady ? String("PSRAM ready: ") + (psramBytesTotal / (1024 * 1024)) + " MB (" +
                                   (psramBytesFreeAtBoot / 1024) + " KB free)"
                               : "PSRAM not detected, running fallback mode";
-#else
-  psramReady = false;
-  psramBytesTotal = 0;
-  psramBytesFreeAtBoot = 0;
-  Serial.println("[PSRAM] SUPPORT DISABLED IN BUILD");
-  String summary = "PSRAM support disabled at build time";
-#endif
+
   logEvent(summary, psramReady ? "info" : "warn");
 }
 
