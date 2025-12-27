@@ -916,6 +916,54 @@ bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false, const
   return true;
 }
 
+String getStringOrDefault(Preferences &prefs, const char *key, const String &defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putString(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getString(key, defaultValue);
+}
+
+bool getBoolOrDefault(Preferences &prefs, const char *key, bool defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putBool(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getBool(key, defaultValue);
+}
+
+int getIntOrDefault(Preferences &prefs, const char *key, int defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putInt(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getInt(key, defaultValue);
+}
+
+uint32_t getUIntOrDefault(Preferences &prefs, const char *key, uint32_t defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putUInt(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getUInt(key, defaultValue);
+}
+
+uint8_t getUCharOrDefault(Preferences &prefs, const char *key, uint8_t defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putUChar(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getUChar(key, defaultValue);
+}
+
+float getFloatOrDefault(Preferences &prefs, const char *key, float defaultValue, bool persistMissing = false) {
+  if (!prefs.isKey(key)) {
+    if (persistMissing) prefs.putFloat(key, defaultValue);
+    return defaultValue;
+  }
+  return prefs.getFloat(key, defaultValue);
+}
+
 void initPsram() {
 #if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM_SUPPORT)
   gs_psram_available = psramFound();
@@ -1122,6 +1170,92 @@ Co2SensorType co2FromString(const String &v) {
   if (lower == "scd40") return Co2SensorType::SCD40;
   if (lower == "scd41") return Co2SensorType::SCD41;
   return Co2SensorType::MHZ19;
+}
+
+void initializePreferencesIfNeeded() {
+  if (!prefsOk) return;
+  Preferences cfg;
+  if (!cfg.begin("cfg", false, currentPrefsPartitionLabel())) {
+    disablePersistence("Preferences.begin(cfg_init)");
+    return;
+  }
+  bool alreadyInited = cfg.isKey("cfg_inited") && cfg.getBool("cfg_inited", false);
+  uint8_t cfgVer = cfg.isKey("cfg_ver") ? cfg.getUChar("cfg_ver", 0) : 0;
+  if (alreadyInited && cfgVer >= 1) {
+    cfg.end();
+    return;
+  }
+
+  bool ok = true;
+
+  if (beginPrefs(prefsWifi, "wifi", false)) {
+    getStringOrDefault(prefsWifi, "ssid", "", true);
+    getStringOrDefault(prefsWifi, "wifi_pass", "", true);
+    getStringOrDefault(prefsWifi, "pass", "", true); // legacy key
+    getBoolOrDefault(prefsWifi, "static", false, true);
+    getStringOrDefault(prefsWifi, "ip", "", true);
+    getStringOrDefault(prefsWifi, "gw", "", true);
+    getStringOrDefault(prefsWifi, "sn", "", true);
+    prefsWifi.end();
+  } else {
+    ok = false;
+  }
+
+  if (beginPrefs(prefsCloud, "cloud", false)) {
+    getBoolOrDefault(prefsCloud, "persist", true, true);
+    getStringOrDefault(prefsCloud, "base", "", true);
+    getStringOrDefault(prefsCloud, "user", "", true);
+    getStringOrDefault(prefsCloud, "pass", "", true);
+    getBoolOrDefault(prefsCloud, "enabled", false, true);
+    getBoolOrDefault(prefsCloud, "recording", false, true);
+    getUCharOrDefault(prefsCloud, "retention", 1, true);
+    getUCharOrDefault(prefsCloud, "protocol", 0, true);
+    getStringOrDefault(prefsCloud, "record_start", "", true);
+    getStringOrDefault(prefsCloud, "daily", "", true);
+    prefsCloud.end();
+  } else {
+    ok = false;
+  }
+
+  if (beginPrefs(prefsSystem, "system", false)) {
+    getStringOrDefault(prefsSystem, "channel", lightChannelName(), true);
+    getStringOrDefault(prefsSystem, "climate_type", climateSensorName(climateType), true);
+    getStringOrDefault(prefsSystem, "co2_type", co2SensorName(co2Type), true);
+    getStringOrDefault(prefsSystem, "timezone", timezoneName, true);
+    getStringOrDefault(prefsSystem, "vpd_stage", vpdStageId, true);
+    getFloatOrDefault(prefsSystem, "ppfd_scale", ppfdScale, true);
+    getStringOrDefault(prefsSystem, "phase", phaseId, true);
+    getUCharOrDefault(prefsSystem, "integration_mode", static_cast<uint8_t>(integrationMode), true);
+    getBoolOrDefault(prefsSystem, "ui_disable", false, true);
+    prefsSystem.end();
+  } else {
+    ok = false;
+  }
+
+  if (beginPrefs(prefsSensors, "sensors", false)) {
+    getBoolOrDefault(prefsSensors, "en_light", true, true);
+    getBoolOrDefault(prefsSensors, "en_climate", true, true);
+    getBoolOrDefault(prefsSensors, "en_leaf", true, true);
+    getBoolOrDefault(prefsSensors, "en_co2", true, true);
+    getStringOrDefault(prefsSensors, "sensors_cfg", "", true);
+    prefsSensors.end();
+  } else {
+    ok = false;
+  }
+
+  if (beginPrefs(prefsUi, "ui", false)) {
+    getStringOrDefault(prefsUi, "partners", "[]", true);
+    prefsUi.end();
+  }
+
+  if (ok) {
+    cfg.putUChar("cfg_ver", 1);
+    cfg.putBool("cfg_inited", true);
+    Serial.println("[NVS] Config initialized");
+  } else {
+    Serial.println("[NVS] Config initialization incomplete (storage unavailable)");
+  }
+  cfg.end();
 }
 
 MetricDef *historyById(const String &id) {
@@ -1353,7 +1487,7 @@ void saveCloudConfig(const String &reason = "config save") {
 }
 
 void loadCloudConfig() {
-  if (!beginPrefs(prefsCloud, "cloud", true)) {
+  if (!beginPrefs(prefsCloud, "cloud", false)) {
     cloudConfig.persistCredentials = false;
     cloudConfig.baseUrl = "";
     cloudConfig.username = "";
@@ -1370,22 +1504,22 @@ void loadCloudConfig() {
     refreshStorageMode("storage unavailable");
     return;
   }
-  bool persist = prefsCloud.getBool("persist", true);
+  bool persist = getBoolOrDefault(prefsCloud, "persist", true, true);
   cloudConfig.persistCredentials = persist;
   if (cloudConfig.persistCredentials) {
-    cloudConfig.baseUrl = prefsCloud.getString("base", "");
-    cloudConfig.username = prefsCloud.getString("user", "");
-    cloudConfig.password = prefsCloud.getString("pass", "");
+    cloudConfig.baseUrl = getStringOrDefault(prefsCloud, "base", "", true);
+    cloudConfig.username = getStringOrDefault(prefsCloud, "user", "", true);
+    cloudConfig.password = getStringOrDefault(prefsCloud, "pass", "", true);
   } else {
     cloudConfig.baseUrl = "";
     cloudConfig.username = "";
     cloudConfig.password = "";
   }
-  recordingStartDay = prefsCloud.getString("record_start", "");
-  cloudConfig.enabled = prefsCloud.getBool("enabled", false);
-  cloudConfig.recording = prefsCloud.getBool("recording", false);
-  cloudConfig.retentionMonths = prefsCloud.getUChar("retention", 1);
-  cloudConfig.protocol = prefsCloud.getUChar("protocol", 0);
+  recordingStartDay = getStringOrDefault(prefsCloud, "record_start", "", true);
+  cloudConfig.enabled = getBoolOrDefault(prefsCloud, "enabled", false, true);
+  cloudConfig.recording = getBoolOrDefault(prefsCloud, "recording", false, true);
+  cloudConfig.retentionMonths = getUCharOrDefault(prefsCloud, "retention", 1, true);
+  cloudConfig.protocol = getUCharOrDefault(prefsCloud, "protocol", 0, true);
   if (cloudConfig.retentionMonths < 1) cloudConfig.retentionMonths = 1;
   if (cloudConfig.retentionMonths > 6) cloudConfig.retentionMonths = 6;
   if (cloudConfig.protocol > 1) cloudConfig.protocol = 0;
@@ -1459,8 +1593,8 @@ void loadDailyHistory() {
     DAILY_HISTORY[i].clear();
     DAILY_AGG[i] = DailyAggregate();
   }
-  if (!beginPrefs(prefsCloud, "cloud", true)) return;
-  String raw = prefsCloud.getString("daily", "");
+  if (!beginPrefs(prefsCloud, "cloud", false)) return;
+  String raw = getStringOrDefault(prefsCloud, "daily", "", true);
   prefsCloud.end();
   if (raw.length() == 0) return;
   DynamicJsonDocument doc(16384);
@@ -2210,10 +2344,10 @@ bool allowSensorSample(unsigned long now, unsigned long &lastTs) {
 
 void loadPinsFromPrefs() {
   if (beginPrefs(prefsSystem, "system", true)) {
-    pinI2C_SDA = prefsSystem.getInt("i2c_sda", DEFAULT_I2C_SDA_PIN);
-    pinI2C_SCL = prefsSystem.getInt("i2c_scl", DEFAULT_I2C_SCL_PIN);
-    pinCO2_RX = prefsSystem.getInt("co2_rx", DEFAULT_CO2_RX_PIN);
-    pinCO2_TX = prefsSystem.getInt("co2_tx", DEFAULT_CO2_TX_PIN);
+    pinI2C_SDA = getIntOrDefault(prefsSystem, "i2c_sda", DEFAULT_I2C_SDA_PIN);
+    pinI2C_SCL = getIntOrDefault(prefsSystem, "i2c_scl", DEFAULT_I2C_SCL_PIN);
+    pinCO2_RX = getIntOrDefault(prefsSystem, "co2_rx", DEFAULT_CO2_RX_PIN);
+    pinCO2_TX = getIntOrDefault(prefsSystem, "co2_tx", DEFAULT_CO2_TX_PIN);
     prefsSystem.end();
   } else {
     pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
@@ -3372,7 +3506,7 @@ uint64_t currentEpochMs() {
 void loadPartners() {
   partners.clear();
   if (!beginPrefs(prefsUi, "ui", true)) return;
-  String raw = prefsUi.getString("partners", "[]");
+  String raw = getStringOrDefault(prefsUi, "partners", "[]");
   prefsUi.end();
   DynamicJsonDocument doc(1024);
   if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
@@ -3486,7 +3620,7 @@ void loadSensorConfigs() {
     applyPinsFromConfig();
     return;
   }
-  String raw = prefsSensors.getString("sensors_cfg", "");
+  String raw = getStringOrDefault(prefsSensors, "sensors_cfg", "");
   prefsSensors.end();
   if (raw.length() == 0) {
     SensorConfig l; l.id="lux"; l.type="BH1750"; l.category="light"; l.name="BH1750"; l.interfaceType="i2c"; l.enabled=enableLight; l.sda=pinI2C_SDA; l.scl=pinI2C_SCL;
@@ -3566,6 +3700,7 @@ bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult
 
   while (WiFi.status() != WL_CONNECTED && millis() - wifiConnectStarted < WIFI_TIMEOUT) {
     delay(250);
+    yield();
     Serial.print('.');
   }
   Serial.println();
@@ -3587,11 +3722,11 @@ bool connectToWiFi() {
   bool hasLegacyPassKey = false;
   String legacyPass;
   if (beginPrefs(prefsWifi, "wifi", false)) {
-    savedSsid = prefsWifi.getString("ssid", "");
-    savedWifiPass = prefsWifi.getString("wifi_pass", "");
+    savedSsid = getStringOrDefault(prefsWifi, "ssid", "", true);
+    savedWifiPass = getStringOrDefault(prefsWifi, "wifi_pass", "", true);
     hasWifiPassKey = prefsWifi.isKey("wifi_pass");
     hasLegacyPassKey = prefsWifi.isKey("pass");
-    legacyPass = hasLegacyPassKey ? prefsWifi.getString("pass", "") : "";
+    legacyPass = hasLegacyPassKey ? getStringOrDefault(prefsWifi, "pass", "", true) : "";
     prefsWifi.end();
   } else {
     savedSsid = "";
@@ -3599,15 +3734,15 @@ bool connectToWiFi() {
     legacyPass = "";
   }
   if (beginPrefs(prefsSystem, "system", false)) {
-    channel = lightChannelFromString(prefsSystem.getString("channel", "full_spectrum"));
-    climateType = climateFromString(prefsSystem.getString("climate_type", "sht31"));
-    co2Type = co2FromString(prefsSystem.getString("co2_type", "mhz19"));
-    timezoneName = prefsSystem.getString("timezone", timezoneName);
-    vpdStageId = prefsSystem.getString("vpd_stage", "seedling");
-    ppfdScale = prefsSystem.getFloat("ppfd_scale", 1.0f);
-    phaseId = prefsSystem.getString("phase", "");
-    integrationMode = static_cast<IntegrationMode>(prefsSystem.getUChar("integration_mode", 0));
-    uiDisableRequested = prefsSystem.getBool("ui_disable", false);
+    channel = lightChannelFromString(getStringOrDefault(prefsSystem, "channel", "full_spectrum", true));
+    climateType = climateFromString(getStringOrDefault(prefsSystem, "climate_type", "sht31", true));
+    co2Type = co2FromString(getStringOrDefault(prefsSystem, "co2_type", "mhz19", true));
+    timezoneName = getStringOrDefault(prefsSystem, "timezone", timezoneName, true);
+    vpdStageId = getStringOrDefault(prefsSystem, "vpd_stage", "seedling", true);
+    ppfdScale = getFloatOrDefault(prefsSystem, "ppfd_scale", 1.0f, true);
+    phaseId = getStringOrDefault(prefsSystem, "phase", "", true);
+    integrationMode = static_cast<IntegrationMode>(getUCharOrDefault(prefsSystem, "integration_mode", 0, true));
+    uiDisableRequested = getBoolOrDefault(prefsSystem, "ui_disable", false, true);
     prefsSystem.end();
   }
   if (integrationMode != IntegrationMode::PI_BRIDGE) integrationMode = IntegrationMode::STANDALONE;
@@ -3623,10 +3758,10 @@ bool connectToWiFi() {
     phaseId = phaseFromState();
   }
   if (beginPrefs(prefsWifi, "wifi", false)) {
-    staticIpEnabled = prefsWifi.getBool("static", false);
-    staticIp.fromString(prefsWifi.getString("ip", ""));
-    staticGateway.fromString(prefsWifi.getString("gw", ""));
-    staticSubnet.fromString(prefsWifi.getString("sn", ""));
+    staticIpEnabled = getBoolOrDefault(prefsWifi, "static", false, true);
+    staticIp.fromString(getStringOrDefault(prefsWifi, "ip", "", true));
+    staticGateway.fromString(getStringOrDefault(prefsWifi, "gw", "", true));
+    staticSubnet.fromString(getStringOrDefault(prefsWifi, "sn", "", true));
     prefsWifi.end();
   } else {
     staticIpEnabled = false;
@@ -3635,10 +3770,10 @@ bool connectToWiFi() {
     staticSubnet = IPAddress();
   }
   if (beginPrefs(prefsSensors, "sensors", false)) {
-    enableLight = prefsSensors.getBool("en_light", true);
-    enableClimate = prefsSensors.getBool("en_climate", true);
-    enableLeaf = prefsSensors.getBool("en_leaf", true);
-    enableCo2 = prefsSensors.getBool("en_co2", true);
+    enableLight = getBoolOrDefault(prefsSensors, "en_light", true, true);
+    enableClimate = getBoolOrDefault(prefsSensors, "en_climate", true, true);
+    enableLeaf = getBoolOrDefault(prefsSensors, "en_leaf", true, true);
+    enableCo2 = getBoolOrDefault(prefsSensors, "en_co2", true, true);
     prefsSensors.end();
   } else {
     enableLight = true;
@@ -5851,8 +5986,11 @@ void setup() {
 
   // Ensure the NVS partition is present and usable before any Preferences calls.
   // A missing/mismatched partition manifests as "nvs_open failed: NOT_FOUND".
-  if (!initNvsStorage()) {
+  bool nvsOk = initNvsStorage();
+  if (!nvsOk) {
     Serial.println("[NVS] Persistence disabled, using RAM defaults only");
+  } else {
+    initializePreferencesIfNeeded();
   }
 
   initPsram();
