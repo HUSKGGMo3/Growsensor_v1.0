@@ -1,3 +1,4 @@
+#include "compat_psram.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -22,11 +23,10 @@
 #include "esp_heap_caps.h"
 #include <esp_idf_version.h>
 
-#if __has_include(<esp32-hal-psram.h>)
+#if __has_include(<esp_psram.h>) && __has_include(<esp32-hal-psram.h>)
 #include <esp32-hal-psram.h>
 #else
 #warning "PSRAM support headers not found; PSRAM features disabled."
-inline bool psramFound() { return false; }
 inline void *ps_malloc(size_t) { return nullptr; }
 #endif
 
@@ -773,17 +773,13 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // Helpers
 // ----------------------------
 void initPsram() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S2)
+#if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM_SUPPORT)
   gs_psram_available = psramFound();
 #else
   gs_psram_available = false;
 #endif
 
-  if (gs_psram_available) {
-    Serial.println("[PSRAM] Detected and active");
-  } else {
-    Serial.println("[PSRAM] Not available → fallback mode");
-  }
+  Serial.printf("[PSRAM] status: %s\n", gs_psram_available ? "AVAILABLE" : "NOT AVAILABLE");
 
   psramBytesTotal = gs_psram_available ? ESP.getPsramSize() : 0;
   psramBytesFreeAtBoot = gs_psram_available ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM) : 0;
