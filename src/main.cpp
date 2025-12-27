@@ -208,6 +208,8 @@ static const char *NTP_SERVER_2 = "time.nist.gov";
 static const char *NTP_SERVER_3 = "time.google.com";
 
 RTC_DATA_ATTR uint32_t rtcBootCount = 0;
+RTC_DATA_ATTR uint32_t rtcLastResetReason = 0;
+RTC_DATA_ATTR bool rtcLastResetWasWdt = false;
 bool safeModeActive = false;
 bool bootMarkedHealthy = false;
 unsigned long bootStartMs = 0;
@@ -810,8 +812,41 @@ void bootFeed(const char *stage = nullptr) {
   yield();
 }
 
-void recordBootAttempt() {
+const char *resetReasonLabel(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power-on reset";
+    case ESP_RST_EXT:
+      return "external reset";
+    case ESP_RST_SW:
+      return "software reset";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:
+      return "task watchdog";
+    case ESP_RST_WDT:
+      return "other watchdog";
+    case ESP_RST_DEEPSLEEP:
+      return "deep sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    default:
+      return "unknown";
+  }
+}
+
+bool isWatchdogReset(esp_reset_reason_t reason) {
+  return reason == ESP_RST_INT_WDT || reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT;
+}
+
+void recordBootAttempt(esp_reset_reason_t reason) {
   bootStartMs = millis();
+  rtcLastResetReason = static_cast<uint32_t>(reason);
+  rtcLastResetWasWdt = isWatchdogReset(reason);
   if (rtcBootCount < 0xFFFFFFFF) {
     rtcBootCount++;
   }
@@ -6068,8 +6103,10 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   Serial.println();
-  recordBootAttempt();
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  recordBootAttempt(resetReason);
   Serial.printf("GrowSensor booting... (attempt %lu)\n", static_cast<unsigned long>(rtcBootCount));
+  Serial.printf("Reset reason: %s (%u)\n", resetReasonLabel(resetReason), static_cast<unsigned>(resetReason));
   Serial.printf("Version: %s | Target: %s | Channel: %s | Build: %s %s\n", FIRMWARE_VERSION, FIRMWARE_TARGET,
                 FIRMWARE_CHANNEL, __DATE__, __TIME__);
   bootFeed("serial-ready");
@@ -6079,7 +6116,10 @@ void setup() {
 #endif
 
   if (rtcBootCount >= SAFE_MODE_BOOT_THRESHOLD) {
-    enterSafeMode("boot loop detected (RTC)");
+    String reason = "boot loop detected (";
+    reason += resetReasonLabel(resetReason);
+    reason += ")";
+    enterSafeMode(reason.c_str());
     return;
   }
 
