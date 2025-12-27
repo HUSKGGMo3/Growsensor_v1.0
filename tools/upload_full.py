@@ -155,7 +155,21 @@ def _full_flash_action(target, source, env):  # pylint: disable=unused-argument
     # Mirror PlatformIO's esptool invocation but force a full image write that includes
     # the bootloader, partition table, boot_app0, and the application image.
     env.AutodetectUploadPort()
+    missing = [
+        path
+        for path in (bootloader_bin, partitions_bin, boot_app0_bin, firmware_bin)
+        if not path.exists()
+    ]
+    if missing:
+        missing_list = "\n".join(f"- {path}" for path in missing)
+        env.Exit(
+            "Missing required flash images. Ensure the project is built before upload and the "
+            "full-flash assets exist:\n"
+            f"{missing_list}"
+        )
+
     cmd = env.subst(full_flash_cmd)
+    print(f"Full flash command: {cmd}")
     return env.Execute(cmd)
 
 

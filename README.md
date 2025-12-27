@@ -19,8 +19,9 @@ You only need a USB cable, an ESP32-S3 (UM ProS3), and a laptop/PC.
 3. Connect the ESP32-S3 via USB (use a data cable, not charge-only).
 4. In PlatformIO, select the correct **Serial Port** for your ESP32-S3.
 5. Build and flash the S3 target: `pio run -e esp32s3_16r8 -t upload`
-   - The upload target flashes **bootloader + partition table + boot_app0 + app** (see `scripts/upload_full.py`).
+   - The upload target flashes **bootloader + partition table + boot_app0 + app** (see `tools/upload_full.py`).
    - **How to flash:** `pio run -e esp32s3_16r8 -t upload` (full image by default).
+   - The uploader prints the exact esptool command/offsets and fails fast if any flash image is missing.
    - If you changed the partition layout (any `partitions*.csv` edits), run a full erase first:
      `pio run -e esp32s3_16r8 -t erase` then re-run the upload.
 6. Open the **Serial Monitor** at **115200 baud** to see logs.
