@@ -135,11 +135,14 @@ def _ensure_boot_app0(build_dir: Path) -> Path:
 
 
 def _full_flash_command(
-    bootloader_bin: Path, partitions_bin: Path, boot_app0_bin: Path, firmware_bin: Path
+    bootloader_bin: Path,
+    partitions_bin: Path,
+    boot_app0_bin: Path,
+    firmware_bin: Path,
+    bootloader_offset: str,
+    partition_offset: str,
+    boot_app0_offset: str,
 ) -> str:
-    bootloader_offset = _offset_or_default("ESP32_BOOTLOADER_OFFSET", "0x1000")
-    partition_offset = _offset_or_default("ESP32_PARTITION_TABLE_OFFSET", "0x8000")
-    boot_app0_offset = _offset_or_default("ESP32_BOOT_APP0_OFFSET", "0xE000")
     return (
         "$PYTHONEXE $ESPTOOLPY $ESPTOOLPYFLAGS "
         "--port $UPLOAD_PORT --baud $UPLOAD_SPEED "
@@ -154,6 +157,11 @@ def _full_flash_command(
 def _full_flash_action(target, source, env):  # pylint: disable=unused-argument
     # Mirror PlatformIO's esptool invocation but force a full image write that includes
     # the bootloader, partition table, boot_app0, and the application image.
+    if partition_offset != "0x8000" or boot_app0_offset != "0xE000":
+        env.Exit(
+            "Refusing to upload without flashing partitions at 0x8000 and boot_app0 at 0xE000. "
+            "Check ESP32_PARTITION_TABLE_OFFSET/ESP32_BOOT_APP0_OFFSET overrides."
+        )
     env.AutodetectUploadPort()
     missing = [
         path
@@ -181,7 +189,19 @@ firmware_bin = build_dir / f"{env.subst('${PROGNAME}')}.bin"
 partitions_bin = build_dir / "partitions.bin"
 bootloader_bin = build_dir / "bootloader.bin"
 
-full_flash_cmd = _full_flash_command(bootloader_bin, partitions_bin, boot_app0_bin, firmware_bin)
+bootloader_offset = _offset_or_default("ESP32_BOOTLOADER_OFFSET", "0x1000")
+partition_offset = _offset_or_default("ESP32_PARTITION_TABLE_OFFSET", "0x8000")
+boot_app0_offset = _offset_or_default("ESP32_BOOT_APP0_OFFSET", "0xE000")
+
+full_flash_cmd = _full_flash_command(
+    bootloader_bin,
+    partitions_bin,
+    boot_app0_bin,
+    firmware_bin,
+    bootloader_offset,
+    partition_offset,
+    boot_app0_offset,
+)
 
 full_flash_action = env.Action(_full_flash_action, "Flashing full image (bootloader + partitions + app)")
 env.Replace(UPLOADCMD=full_flash_action)
