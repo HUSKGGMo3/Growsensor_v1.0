@@ -156,7 +156,7 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
    ```sh
    pio device monitor -b 115200
    ```
-5. The S3 build pins the 16MB partition table at `partitions.csv` (NVS + OTA data + dual app slots + SPIFFS). The guard script validates offsets and auto-writes a matching CSV when the flash size changes, preventing missing/overlapping partition errors.
+5. The S3 build pins the 16MB partition table at `partitions.csv` (labelled `nvs` + `otadata` + dual OTA app slots + SPIFFS for the remaining space). The guard script validates offsets and auto-writes a matching CSV when the flash size changes, preventing missing/overlapping partition errors and keeping `Preferences.begin()` aligned with the `nvs` partition on UM ProS3 (16MB flash, 8MB PSRAM). Core dumps to flash are disabled to avoid warnings when no dedicated coredump slot exists.
    If you ever see `Preferences.begin(): nvs_open failed: NOT_FOUND`, the device was flashed with a mismatched/absent NVS partition—re-uploading with the commands above realigns the offsets, and the firmware now probes/repairs NVS at boot (erase + re-init on version/space errors) before touching Preferences while falling back to RAM-only settings plus a single warning if storage stays unavailable.
 6. For classic ESP32 boards, use the archived project under `legacy_esp32/`:
    ```sh

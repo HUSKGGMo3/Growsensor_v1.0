@@ -14,9 +14,9 @@ PARTITIONS: Dict[str, dict] = {
         "content": """# Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x5000
 otadata,  data, ota,     0xE000,   0x2000
-app0,     app,  ota_0,   0x10000,  0x700000
-app1,     app,  ota_1,   0x710000, 0x700000
-spiffs,   data, spiffs,  0xE10000, 0x1F0000
+app0,     app,  ota_0,   0x10000,  0x600000
+app1,     app,  ota_1,   0x610000, 0x600000
+spiffs,   data, spiffs,  0xC10000, 0x3F0000
 """,
     },
     "8MB": {

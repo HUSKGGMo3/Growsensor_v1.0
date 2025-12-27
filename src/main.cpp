@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <new>
 #include <esp_system.h>
+#include <esp_chip_info.h>
 #include "esp_heap_caps.h"
 #include <esp_idf_version.h>
 #include <esp_err.h>
@@ -797,13 +798,40 @@ ApiCacheEntry dailyHistoryCache[DAILY_HISTORY_CACHE_SIZE];
 size_t dailyHistoryCacheCursor = 0;
 DailyHistoryFetchJob dailyHistoryFetch;
 
+const char *resetReasonLabel(esp_reset_reason_t reason) {
+  switch (reason) {
+  case ESP_RST_POWERON:
+    return "POWERON";
+  case ESP_RST_EXT:
+    return "EXT";
+  case ESP_RST_SW:
+    return "SW";
+  case ESP_RST_PANIC:
+    return "PANIC";
+  case ESP_RST_INT_WDT:
+    return "INT_WDT";
+  case ESP_RST_TASK_WDT:
+    return "TASK_WDT";
+  case ESP_RST_WDT:
+    return "WDT";
+  case ESP_RST_DEEPSLEEP:
+    return "DEEPSLEEP";
+  case ESP_RST_BROWNOUT:
+    return "BROWNOUT";
+  case ESP_RST_SDIO:
+    return "SDIO";
+  default:
+    return "UNKNOWN";
+  }
+}
+
 // ----------------------------
 // Helpers
 // ----------------------------
 void bootFeed(const char *stage = nullptr) {
   unsigned long now = millis();
-  if (stage && now - lastBootFeedMs >= SAFE_MODE_FEED_INTERVAL_MS) {
-    Serial.printf("[BOOT] %s\n", stage);
+  if (stage && (lastBootFeedMs == 0 || now - lastBootFeedMs >= SAFE_MODE_FEED_INTERVAL_MS)) {
+    Serial.printf("[BOOT] Stage: %s\n", stage);
     lastBootFeedMs = now;
   }
   delay(1);
@@ -6068,6 +6096,22 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   Serial.println();
+  esp_reset_reason_t reason = esp_reset_reason();
+  esp_chip_info_t info;
+  esp_chip_info(&info);
+  uint32_t flashMb = ESP.getFlashChipSize() / (1024 * 1024);
+  uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
+  uint32_t minHeapKb = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT) / 1024;
+  bool psramPresent = psramFound();
+  Serial.printf("[BOOT] Reset reason: %s (%d)\n", resetReasonLabel(reason), reason);
+  Serial.printf("[BOOT] SDK: %s | IDF: %d.%d.%d\n", ESP.getSdkVersion(), ESP_IDF_VERSION_MAJOR,
+                ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH);
+  Serial.printf("[BOOT] Chip: ESP32-S3 rev%d, cores=%d, features: %s%s%s\n", info.revision, info.cores,
+                (info.features & CHIP_FEATURE_WIFI_BGN) ? "WIFI " : "",
+                (info.features & CHIP_FEATURE_BLE) ? "BLE " : "",
+                (info.features & CHIP_FEATURE_EMB_FLASH) ? "FLASH" : "");
+  Serial.printf("[BOOT] Flash: %uMB | PSRAM: %s | Heap free: %u KB (min %u KB)\n", flashMb,
+                psramPresent ? "yes" : "no", freeHeapKb, minHeapKb);
   recordBootAttempt();
   Serial.printf("GrowSensor booting... (attempt %lu)\n", static_cast<unsigned long>(rtcBootCount));
   Serial.printf("Version: %s | Target: %s | Channel: %s | Build: %s %s\n", FIRMWARE_VERSION, FIRMWARE_TARGET,
