@@ -10,7 +10,7 @@ FLASH_SIZES = {"4MB": 4 * 1024 * 1024, "8MB": 8 * 1024 * 1024, "16MB": 16 * 1024
 
 PARTITIONS: Dict[str, dict] = {
     "16MB": {
-        "filename": "partitions_16MB.csv",
+        "filename": "partitions.csv",
         "content": """# Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x5000
 otadata,  data, ota,     0xE000,   0x2000

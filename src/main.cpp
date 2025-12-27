@@ -710,8 +710,9 @@ CloudStatus cloudStatus;
 PsramVector<CloudJob> cloudQueue;
 String recordingStartDay;
 Preferences prefsCloud;
+Preferences prefsGuard;
 bool nvsReady = false;
-bool prefsAvailable = false;
+bool prefsOk = false;
 bool storageWarningActive = false;
 bool prefsErrorLogged = false;
 String storageWarningMessage;
@@ -780,7 +781,8 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // Helpers
 // ----------------------------
 void disablePersistence(const char *context, esp_err_t err = ESP_OK) {
-  prefsAvailable = false;
+  prefsOk = false;
+  nvsReady = false;
   storageWarningActive = true;
   if (storageWarningMessage.length() == 0) {
     storageWarningMessage = "NVS unavailable, settings won't persist";
@@ -804,11 +806,16 @@ bool initNvsStorage() {
     err = nvs_flash_init();
   }
   nvsReady = (err == ESP_OK);
-  prefsAvailable = nvsReady;
   if (!nvsReady) {
     disablePersistence("nvs_flash_init", err);
     return false;
   }
+  prefsOk = prefsGuard.begin("cfg", false);
+  if (!prefsOk) {
+    disablePersistence("Preferences.begin(cfg)");
+    return false;
+  }
+  prefsGuard.end();
   storageWarningActive = false;
   storageWarningMessage = "";
   prefsErrorLogged = false;
@@ -816,7 +823,7 @@ bool initNvsStorage() {
 }
 
 bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false) {
-  if (!prefsAvailable) return false;
+  if (!prefsOk) return false;
   bool ok = prefs.begin(ns, readOnly);
   if (!ok) {
     disablePersistence(ns);
@@ -4349,7 +4356,7 @@ void handleStatus() {
   json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
   json += "\"target\":\"" + String(FIRMWARE_TARGET) + "\",";
   json += "\"channel\":\"" + String(FIRMWARE_CHANNEL) + "\"";
-  json += ",\"storage_ok\":" + String(prefsAvailable ? 1 : 0);
+  json += ",\"storage_ok\":" + String(prefsOk ? 1 : 0);
   if (storageWarningActive) {
     String warn = storageWarningMessage.length() > 0 ? storageWarningMessage : String("NVS unavailable, settings won't persist");
     json += ",\"storage_warning\":\"" + jsonEscape(warn) + "\"";
@@ -5087,7 +5094,7 @@ void handleSettings() {
     json += "\"ip\":\"" + (staticIpEnabled ? staticIp.toString() : WiFi.localIP().toString()) + "\",";
     json += "\"gw\":\"" + (staticIpEnabled ? staticGateway.toString() : WiFi.gatewayIP().toString()) + "\",";
     json += "\"sn\":\"" + (staticIpEnabled ? staticSubnet.toString() : WiFi.subnetMask().toString()) + "\"";
-    json += ",\"storage_ok\":" + String(prefsAvailable ? 1 : 0);
+    json += ",\"storage_ok\":" + String(prefsOk ? 1 : 0);
     if (storageWarningActive) {
       String warn = storageWarningMessage.length() > 0 ? storageWarningMessage : String("NVS unavailable, settings won't persist");
       json += ",\"storage_warning\":\"" + jsonEscape(warn) + "\"";

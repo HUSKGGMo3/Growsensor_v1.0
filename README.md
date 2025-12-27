@@ -29,7 +29,7 @@ Legacy boards (ESP32 classic / ESP32 Pro 16MB) remain available under `legacy_es
 If anything fails: unplug/replug, try another USB cable/port, and rebuild/upload again.
 
 ### Hotfix v1.0.1-pro16m (partition stability + auto-detect)
-- Added `partitions_16MB.csv` to the project root with dual OTA slots + SPIFFS for 16MB ESP32 Pro boards; `board_upload.flash_size = 16MB` is enforced.
+- Added `partitions.csv` (previously `partitions_16MB.csv`) to the project root with dual OTA slots + SPIFFS for 16MB ESP32 Pro boards; `board_upload.flash_size = 16MB` is enforced.
 - Build hook auto-generates safe OTA partition maps for 8MB/4MB devices when the configured flash size is smaller, preventing CSV lookup errors and overlaps.
 - Firmware/version string bumped to `v1.0.1-pro16m` for the Pro target.
 
@@ -144,16 +144,20 @@ Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It rea
 ## Build & Flash (PlatformIO)
 1. Install PlatformIO CLI or VS Code + PlatformIO extension.
 2. Connect the ESP32-S3 (UM ProS3) via USB.
-3. Build and flash the S3 firmware (`/src`):
+3. Build and flash the S3 firmware (`/src`) with esptool (bootloader + partitions + boot_app0 + app):
    ```sh
    pio run -e esp32s3_16r8 -t upload
+   ```
+   For a forced full rewrite of every image (handy after a bad flash), use:
+   ```sh
+   pio run -e esp32s3_16r8 -t uploadfull
    ```
 4. Serial monitor (115200 baud):
    ```sh
    pio device monitor -b 115200
    ```
-5. The S3 build pins the 16MB partition table at `partitions_16MB.csv`. The guard script validates offsets and auto-writes a matching CSV when the flash size changes, preventing missing/overlapping partition errors.
-   If you ever see `Preferences.begin(): nvs_open failed: NOT_FOUND`, the device was flashed with a mismatched/absent NVS partition—re-uploading with this partition map fixes the offset, and the firmware now re-initializes (and erases, if needed) NVS before touching Preferences while falling back to RAM-only settings plus a visible warning if storage stays unavailable.
+5. The S3 build pins the 16MB partition table at `partitions.csv` (NVS + OTA data + dual app slots + SPIFFS). The guard script validates offsets and auto-writes a matching CSV when the flash size changes, preventing missing/overlapping partition errors.
+   If you ever see `Preferences.begin(): nvs_open failed: NOT_FOUND`, the device was flashed with a mismatched/absent NVS partition—re-uploading with the commands above realigns the offsets, and the firmware now probes/repairs NVS at boot (erase + re-init on version/space errors) before touching Preferences while falling back to RAM-only settings plus a single warning if storage stays unavailable.
 6. For classic ESP32 boards, use the archived project under `legacy_esp32/`:
    ```sh
    pio run -d legacy_esp32 -e esp32pro16m_legacy -t upload
