@@ -73,6 +73,13 @@ def _app_offset() -> str:
     return resolved
 
 
+def _offset_or_default(var_name: str, default: str) -> str:
+    resolved = env.subst(f"${var_name}")
+    if not resolved or var_name in resolved:
+        return default
+    return resolved
+
+
 def _resolved_path(value: str | None) -> Path | None:
     if not value:
         return None
@@ -130,13 +137,16 @@ def _ensure_boot_app0(build_dir: Path) -> Path:
 def _full_flash_command(
     bootloader_bin: Path, partitions_bin: Path, boot_app0_bin: Path, firmware_bin: Path
 ) -> str:
+    bootloader_offset = _offset_or_default("ESP32_BOOTLOADER_OFFSET", "0x1000")
+    partition_offset = _offset_or_default("ESP32_PARTITION_TABLE_OFFSET", "0x8000")
+    boot_app0_offset = _offset_or_default("ESP32_BOOT_APP0_OFFSET", "0xE000")
     return (
         "$PYTHONEXE $ESPTOOLPY $ESPTOOLPYFLAGS "
         "--port $UPLOAD_PORT --baud $UPLOAD_SPEED "
         "write_flash $ESPTOOLPYFLASHMODE $ESPTOOLPYFLASHFREQ $ESPTOOLPYFLASHSIZE "
-        f"0x0 {bootloader_bin} "
-        f"0x8000 {partitions_bin} "
-        f"0xe000 {boot_app0_bin} "
+        f"{bootloader_offset} {bootloader_bin} "
+        f"{partition_offset} {partitions_bin} "
+        f"{boot_app0_offset} {boot_app0_bin} "
         f"{_app_offset()} {firmware_bin}"
     )
 
