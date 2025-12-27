@@ -105,14 +105,22 @@ int pinI2C_SDA = DEFAULT_I2C_SDA_PIN;
 int pinI2C_SCL = DEFAULT_I2C_SCL_PIN;
 int pinCO2_RX = DEFAULT_CO2_RX_PIN;
 int pinCO2_TX = DEFAULT_CO2_TX_PIN;
+bool i2cBusReady = false;
 
 // Access point settings
 static const char *AP_SSID = "GrowSensor-Setup";
 static const char *AP_PASSWORD = "growcontrol"; // keep non-empty for stability
+static const char *SAFE_MODE_SSID = "GrowSensor-SAFE";
 static constexpr byte DNS_PORT = 53;
 
 // Wi-Fi connect timeout (ms)
 static constexpr unsigned long WIFI_TIMEOUT = 15000;
+static constexpr unsigned long WIFI_CONNECT_STEP_DELAY_MS = 250;
+
+// Safe mode / boot loop guard
+static constexpr uint8_t SAFE_MODE_BOOT_THRESHOLD = 3;
+static constexpr unsigned long SAFE_MODE_STABLE_MS = 10000;
+static constexpr unsigned long SAFE_MODE_FEED_INTERVAL_MS = 250;
 
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
@@ -198,6 +206,12 @@ static constexpr const char *PREFERENCES_PARTITION = "nvs";
 static const char *NTP_SERVER_1 = "pool.ntp.org";
 static const char *NTP_SERVER_2 = "time.nist.gov";
 static const char *NTP_SERVER_3 = "time.google.com";
+
+RTC_DATA_ATTR uint32_t rtcBootCount = 0;
+bool safeModeActive = false;
+bool bootMarkedHealthy = false;
+unsigned long bootStartMs = 0;
+unsigned long lastBootFeedMs = 0;
 
 String timezoneName = "Europe/Berlin";
 bool timeSynced = false;
@@ -786,6 +800,66 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // ----------------------------
 // Helpers
 // ----------------------------
+void bootFeed(const char *stage = nullptr) {
+  unsigned long now = millis();
+  if (stage && now - lastBootFeedMs >= SAFE_MODE_FEED_INTERVAL_MS) {
+    Serial.printf("[BOOT] %s\n", stage);
+    lastBootFeedMs = now;
+  }
+  delay(1);
+  yield();
+}
+
+void recordBootAttempt() {
+  bootStartMs = millis();
+  if (rtcBootCount < 0xFFFFFFFF) {
+    rtcBootCount++;
+  }
+}
+
+void markBootStableIfNeeded() {
+  if (!bootMarkedHealthy && !safeModeActive && millis() - bootStartMs >= SAFE_MODE_STABLE_MS) {
+    rtcBootCount = 0;
+    bootMarkedHealthy = true;
+    Serial.println("[BOOT] Stable for 10s, boot counter reset");
+  }
+}
+
+void startSafeModeAccessPoint(const char *reason) {
+  apMode = true;
+  wifiConnectInProgress = false;
+  wifiFallbackAt = 0;
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(SAFE_MODE_SSID, AP_PASSWORD);
+  IPAddress apIp = WiFi.softAPIP();
+  Serial.printf("[SAFE MODE] AP %s started (%s)\n", SAFE_MODE_SSID, apIp.toString().c_str());
+  server.on("/", [reason]() {
+    String page = "<!doctype html><html><head><meta charset='utf-8'/>"
+                  "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+                  "<title>GrowSensor Safe Mode</title>"
+                  "<style>body{font-family:system-ui,Arial,sans-serif;background:#0b1220;color:#e2e8f0;padding:24px;}"
+                  ".card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:16px;max-width:640px;}"
+                  "h1{margin:0 0 8px;}p{margin:6px 0;color:#cbd5e1;}</style></head><body>";
+    page += "<div class='card'><h1>Safe Mode</h1>";
+    page += "<p>Firmware: " + String(FIRMWARE_VERSION) + "</p>";
+    page += "<p>Target: " + String(FIRMWARE_TARGET) + " (" + String(FIRMWARE_CHANNEL) + ")</p>";
+    page += "<p>Reason: " + String(reason ? reason : "boot loop detected") + "</p>";
+    page += "<p>Boot attempts (RTC): " + String(rtcBootCount) + "</p>";
+    page += "<p>The device limited initialization to avoid further resets. Reboot after fixing wiring or Wi-Fi settings.</p>";
+    page += "</div></body></html>";
+    server.send(200, "text/html", page);
+  });
+  server.begin();
+}
+
+void enterSafeMode(const char *reason) {
+  safeModeActive = true;
+  Serial.printf("[SAFE MODE] %s\n", reason ? reason : "Boot loop detected");
+  logEvent(String("Safe mode: ") + (reason ? reason : "boot loop"), "warn");
+  startSafeModeAccessPoint(reason);
+}
+
 const char *currentPrefsPartitionLabel() { return prefsPartitionLabel.c_str(); }
 
 void disablePersistence(const char *context, esp_err_t err = ESP_OK) {
@@ -3699,8 +3773,8 @@ bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult
   if (!waitForResult) return false;
 
   while (WiFi.status() != WL_CONNECTED && millis() - wifiConnectStarted < WIFI_TIMEOUT) {
-    delay(250);
-    yield();
+    delay(WIFI_CONNECT_STEP_DELAY_MS);
+    bootFeed("wifi-connecting");
     Serial.print('.');
   }
   Serial.println();
@@ -3718,6 +3792,7 @@ bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult
 }
 
 bool connectToWiFi() {
+  if (safeModeActive) return false;
   bool hasWifiPassKey = false;
   bool hasLegacyPassKey = false;
   String legacyPass;
@@ -4180,7 +4255,16 @@ void reinitCo2Sensor() {
 }
 
 void initSensors() {
-  Wire.begin(pinI2C_SDA, pinI2C_SCL);
+  i2cBusReady = Wire.begin(pinI2C_SDA, pinI2C_SCL, 400000);
+  Wire.setTimeout(1000);
+
+  if (!i2cBusReady) {
+    Serial.printf("[I2C] Init failed on SDA=%d SCL=%d, skipping I2C sensors\n", pinI2C_SDA, pinI2C_SCL);
+    logEvent("I2C bus init failed, skipping BH1750/SHT31/MLX90614", "warn");
+    reinitCo2Sensor();
+    Serial.println(co2Health.present ? "[Sensor] CO2 initialized" : "[Sensor] CO2 not detected");
+    return;
+  }
 
   reinitLightSensor();
   Serial.println(lightHealth.present ? "[Sensor] BH1750 initialized" : "[Sensor] BH1750 not detected");
@@ -4195,6 +4279,11 @@ void initSensors() {
 }
 
 void readSensors() {
+  if (!i2cBusReady) {
+    lightHealth.present = false;
+    climateHealth.present = false;
+    leafHealth.present = false;
+  }
   if (!enableLight) {
     lightHealth.healthy = false;
     lightHealth.enabled = false;
@@ -5977,12 +6066,22 @@ void setupServer() {
 // ----------------------------
 void setup() {
   Serial.begin(115200);
-  delay(200);
-  Serial.println("\nGrowSensor booting...");
+  delay(50);
+  Serial.println();
+  recordBootAttempt();
+  Serial.printf("GrowSensor booting... (attempt %lu)\n", static_cast<unsigned long>(rtcBootCount));
+  Serial.printf("Version: %s | Target: %s | Channel: %s | Build: %s %s\n", FIRMWARE_VERSION, FIRMWARE_TARGET,
+                FIRMWARE_CHANNEL, __DATE__, __TIME__);
+  bootFeed("serial-ready");
 #if defined(LED_BUILTIN)
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 #endif
+
+  if (rtcBootCount >= SAFE_MODE_BOOT_THRESHOLD) {
+    enterSafeMode("boot loop detected (RTC)");
+    return;
+  }
 
   // Ensure the NVS partition is present and usable before any Preferences calls.
   // A missing/mismatched partition manifests as "nvs_open failed: NOT_FOUND".
@@ -5992,20 +6091,29 @@ void setup() {
   } else {
     initializePreferencesIfNeeded();
   }
+  bootFeed("nvs-ready");
 
   initPsram();
+  bootFeed("psram");
   loadCloudConfig();
   loadDailyHistory();
   activeDayKey = currentDayKey();
   resetAllDaily(activeDayKey);
   loadPinsFromPrefs();
   loadSensorConfigs();
+  bootFeed("configs-loaded");
   initRelays();
+  bootFeed("relays");
   initSensors();
+  bootFeed("sensors");
   piSerial.begin(PI_BRIDGE_BAUD, SERIAL_8N1, DEFAULT_PI_BRIDGE_RX_PIN, DEFAULT_PI_BRIDGE_TX_PIN);
   connectToWiFi();
+  bootFeed("wifi");
   setupServer();
+  bootFeed("server");
   startCloudWorkerTask();
+  bootFeed("cloud-task");
+  Serial.println("[BOOT] Init complete");
 }
 
 // TEST: WiFi-Scan starten -> UI bleibt responsive, ESP friert nicht ein.
@@ -6013,6 +6121,15 @@ void setup() {
 // TEST: Mobile (kleines Viewport) -> Header OK, VPD-Kachel zeigt Chart, kein blaues Vollfeld.
 // TEST: Cloud offline -> UI bleibt performant, Toast + Status-LED rot.
 void loop() {
+  if (safeModeActive) {
+    server.handleClient();
+    markBootStableIfNeeded();
+    delay(10);
+    return;
+  }
+
+  markBootStableIfNeeded();
+
   static uint32_t lastLoopMicros = 0;
   uint32_t loopNow = micros();
   if (lastLoopMicros != 0) {
@@ -6039,4 +6156,6 @@ void loop() {
     readSensors();
     applyVpdRelays();
   }
+
+  delay(1);
 }
