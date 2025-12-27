@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from SCons.Script import DefaultEnvironment
@@ -72,6 +73,60 @@ def _app_offset() -> str:
     return resolved
 
 
+def _resolved_path(value: str | None) -> Path | None:
+    if not value:
+        return None
+    expanded = env.subst(str(value))
+    if not expanded or "$" in expanded:
+        return None
+    candidate = Path(expanded)
+    return candidate if candidate.exists() else None
+
+
+def _find_boot_app0_source() -> Path | None:
+    for option in ("BOOT_APP_BIN", "ESP32_BOOT_APP_BIN"):
+        candidate = _resolved_path(env.get(option))
+        if candidate:
+            return candidate
+        candidate = _resolved_path(f"${option}")
+        if candidate:
+            return candidate
+
+    framework_dir = env.PioPlatform().get_package_dir("framework-arduinoespressif32")
+    if framework_dir:
+        mcu = env.BoardConfig().get("build.mcu", "esp32")
+        sdk_bin_dir = Path(framework_dir) / "tools" / "sdk"
+        for path in (
+            sdk_bin_dir / mcu / "bin" / "boot_app0.bin",
+            sdk_bin_dir / "esp32" / "bin" / "boot_app0.bin",
+        ):
+            if path.exists():
+                return path
+
+        # Fallback: search the framework package for boot_app0.bin.
+        matches = list(Path(framework_dir).rglob("boot_app0.bin"))
+        if matches:
+            return matches[0]
+
+    return None
+
+
+def _ensure_boot_app0(build_dir: Path) -> Path:
+    target = build_dir / "boot_app0.bin"
+    if target.exists():
+        return target
+
+    source = _find_boot_app0_source()
+    if source and source.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return target
+
+    env.Exit(
+        "boot_app0.bin not found. Ensure the Arduino ESP32 framework is installed or set BOOT_APP_BIN/ESP32_BOOT_APP_BIN."
+    )
+
+
 def _full_flash_command(
     bootloader_bin: Path, partitions_bin: Path, boot_app0_bin: Path, firmware_bin: Path
 ) -> str:
@@ -97,10 +152,10 @@ def _full_flash_action(target, source, env):  # pylint: disable=unused-argument
 _ensure_esptool_defaults()
 
 build_dir = Path(env.subst("$BUILD_DIR"))
+boot_app0_bin = _ensure_boot_app0(build_dir)
 firmware_bin = build_dir / f"{env.subst('${PROGNAME}')}.bin"
 partitions_bin = build_dir / "partitions.bin"
 bootloader_bin = build_dir / "bootloader.bin"
-boot_app0_bin = build_dir / "boot_app0.bin"
 
 full_flash_cmd = _full_flash_command(bootloader_bin, partitions_bin, boot_app0_bin, firmware_bin)
 
