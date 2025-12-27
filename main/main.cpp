@@ -19,7 +19,12 @@
 #include <new>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <esp32-hal-psram.h>
+#if __has_include("esp32/spiram.h")
+#include "esp32/spiram.h"
+#elif __has_include("esp_psram.h")
 #include <esp_psram.h>
+#endif
 
 #ifndef CLOUD_DIAG
 #define CLOUD_DIAG 0
@@ -761,12 +766,29 @@ DailyHistoryFetchJob dailyHistoryFetch;
 // Helpers
 // ----------------------------
 void initPsram() {
-  psramReady = psramInit() && psramFound();
+#if defined(CONFIG_SPIRAM_SUPPORT) || defined(BOARD_HAS_PSRAM)
+  bool initOk = psramInit();
+  bool detected = psramFound();
+  psramReady = initOk && detected;
+  if (psramReady) {
+    Serial.println("[PSRAM] OK");
+  } else if (!initOk) {
+    Serial.println("[PSRAM] INIT FAILED");
+  } else {
+    Serial.println("[PSRAM] NOT FOUND");
+  }
   psramBytesTotal = psramReady ? ESP.getPsramSize() : 0;
   psramBytesFreeAtBoot = psramReady ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM) : 0;
   String summary = psramReady ? String("PSRAM ready: ") + (psramBytesTotal / (1024 * 1024)) + " MB (" +
                                   (psramBytesFreeAtBoot / 1024) + " KB free)"
-                              : "PSRAM not detected";
+                              : (!initOk ? "PSRAM init failed" : "PSRAM not detected");
+#else
+  psramReady = false;
+  psramBytesTotal = 0;
+  psramBytesFreeAtBoot = 0;
+  Serial.println("[PSRAM] SUPPORT DISABLED IN BUILD");
+  String summary = "PSRAM support disabled at build time";
+#endif
   logEvent(summary, psramReady ? "info" : "warn");
 }
 
