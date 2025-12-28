@@ -1,56 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from SCons.Script import DefaultEnvironment
 
 PROJECT_DIR = Path(DefaultEnvironment()["PROJECT_DIR"])
-FLASH_SIZES = {"4MB": 4 * 1024 * 1024, "8MB": 8 * 1024 * 1024, "16MB": 16 * 1024 * 1024}
+FLASH_SIZES = {"16MB": 16 * 1024 * 1024}
 ALIGNMENT = 0x1000
-
-PARTITIONS: Dict[str, dict] = {
-    "16MB": {
-        "filename": "partitions.csv",
-        "content": """# Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x5000
-otadata,  data, ota,     0xE000,   0x2000
-app0,     app,  ota_0,   0x10000,  0x700000
-app1,     app,  ota_1,   0x710000, 0x700000
-coredump, data, coredump,0xE10000, 0x10000
-spiffs,   data, spiffs,  0xE20000, 0x1E0000
-""",
-    },
-    "8MB": {
-        "filename": "partitions_8MB.csv",
-        "content": """# Auto-generated for 8MB flash (dual OTA + SPIFFS)
-# Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x5000
-otadata,  data, ota,     0xE000,   0x2000
-app0,     app,  ota_0,   0x10000,  0x280000
-app1,     app,  ota_1,   0x290000, 0x280000
-coredump, data, coredump,0x510000, 0x10000
-spiffs,   data, spiffs,  0x520000, 0x2E0000
-""",
-    },
-    "4MB": {
-        "filename": "partitions_4MB.csv",
-        "content": """# Auto-generated for 4MB flash (dual OTA + SPIFFS)
-# Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x5000
-otadata,  data, ota,     0xE000,   0x2000
-app0,     app,  ota_0,   0x10000,  0x140000
-app1,     app,  ota_1,   0x150000, 0x140000
-coredump, data, coredump,0x290000, 0x10000
-spiffs,   data, spiffs,  0x2A0000, 0x160000
-""",
-    },
-}
+DEFAULT_FLASH_SIZE = "16MB"
+DEFAULT_PARTITIONS = "partitions/growsensor_16mb.csv"
 
 
 def _normalize_flash_size(raw_size: str | None) -> str:
     if not raw_size:
-        return "16MB"
+        return DEFAULT_FLASH_SIZE
     normalized = str(raw_size).strip().upper().replace(" ", "")
     if not normalized.endswith("MB"):
         normalized = f"{normalized}MB"
@@ -64,11 +28,44 @@ def _parse_number(raw: str) -> int:
     return int(value, 0)
 
 
+def _get_project_option(env, name: str) -> str | None:
+    try:
+        return env.GetProjectOption(name)
+    except Exception:
+        return None
+
+
 def _resolve_env_offset(env, var_name: str, default: str) -> int:
     resolved = env.subst(f"${var_name}")
     if not resolved or var_name in resolved:
         resolved = default
     return _parse_number(resolved)
+
+
+def _resolve_flash_size(env) -> str:
+    candidates = [
+        _get_project_option(env, "board_build.flash_size"),
+        _get_project_option(env, "upload.flash_size"),
+    ]
+    board = env.BoardConfig()
+    candidates.extend(
+        [
+            board.get("build.flash_size"),
+            board.get("upload.flash_size"),
+        ]
+    )
+    for value in candidates:
+        if value:
+            return _normalize_flash_size(value)
+    return DEFAULT_FLASH_SIZE
+
+
+def _resolve_partitions(env) -> Path:
+    configured = _get_project_option(env, "board_build.partitions")
+    if not configured:
+        configured = DEFAULT_PARTITIONS
+    path = PROJECT_DIR / configured
+    return path
 
 
 def _validate_partition_map(csv_path: Path, flash_bytes: int, app_offset: int) -> None:
@@ -117,29 +114,20 @@ def _validate_partition_map(csv_path: Path, flash_bytes: int, app_offset: int) -
         )
 
 
-def _write_partition_file(target_size: str) -> Path:
-    layout = PARTITIONS[target_size]
-    path = PROJECT_DIR / layout["filename"]
-    desired_content = layout["content"].strip() + "\n"
-    if not path.exists() or path.read_text() != desired_content:
-        path.write_text(desired_content)
-    return path
-
-
 def ensure_partition(target, source, env):  # pylint: disable=unused-argument
-    configured_flash = (
-        env.GetProjectOption("board_upload.flash_size")
-        if hasattr(env, "GetProjectOption")
-        else None
-    )
-    if not configured_flash:
-        configured_flash = env.BoardConfig().get("upload.flash_size")
+    flash_size = _resolve_flash_size(env)
+    if flash_size not in FLASH_SIZES:
+        print(
+            f"[partition_guard] Unsupported flash size '{flash_size}', defaulting to {DEFAULT_FLASH_SIZE}"
+        )
+        flash_size = DEFAULT_FLASH_SIZE
 
-    configured_flash = _normalize_flash_size(configured_flash)
+    csv_path = _resolve_partitions(env)
+    if not csv_path.exists():
+        print(f"[partition_guard] Missing partition file: {csv_path}")
+        env.Exit(1)
 
-    partition_key = configured_flash if configured_flash in PARTITIONS else "16MB"
-    csv_path = _write_partition_file(partition_key)
-    flash_bytes = FLASH_SIZES.get(partition_key, FLASH_SIZES["16MB"])
+    flash_bytes = FLASH_SIZES[flash_size]
     app_offset = _resolve_env_offset(env, "ESP32_APP_OFFSET", "0x10000")
     partition_offset = _resolve_env_offset(env, "ESP32_PARTITION_TABLE_OFFSET", "0x8000")
 
@@ -155,7 +143,7 @@ def ensure_partition(target, source, env):  # pylint: disable=unused-argument
 
     env.Replace(BOARD_BUILD_PARTITIONS=str(csv_path.relative_to(PROJECT_DIR)))
     print(
-        f"[partition_guard] Using {partition_key} partition table: {csv_path.name}"
+        f"[partition_guard] Using {flash_size} partition table: {csv_path.relative_to(PROJECT_DIR)}"
     )
 
 

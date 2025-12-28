@@ -117,6 +117,8 @@ static constexpr byte DNS_PORT = 53;
 // Wi-Fi connect timeout (ms)
 static constexpr unsigned long WIFI_TIMEOUT = 15000;
 static constexpr unsigned long WIFI_CONNECT_STEP_DELAY_MS = 250;
+static constexpr unsigned long BOOT_STAGE_DEFAULT_TIMEOUT_MS = 5000;
+static constexpr unsigned long BOOT_WIFI_TIMEOUT_MS = WIFI_TIMEOUT + 5000;
 
 // Safe mode / boot loop guard
 static constexpr uint8_t SAFE_MODE_BOOT_THRESHOLD = 3;
@@ -813,6 +815,21 @@ void bootFeed(const char *stage = nullptr) {
   yield();
 }
 
+template <typename Func>
+void runBootStage(uint8_t stageId, const char *label, unsigned long timeoutMs, Func fn) {
+  Serial.printf("[BOOT:stage=%u] start %s\n", stageId, label);
+  unsigned long start = millis();
+  fn();
+  unsigned long elapsed = millis() - start;
+  if (elapsed > timeoutMs) {
+    Serial.printf("[BOOT:stage=%u] timeout %s (%lu ms)\n", stageId, label, elapsed);
+    logEvent(String("Boot stage timeout: ") + label + " (" + elapsed + "ms)", "warn", "boot");
+  } else {
+    Serial.printf("[BOOT:stage=%u] done %s (%lu ms)\n", stageId, label, elapsed);
+  }
+  bootFeed(label);
+}
+
 const char *resetReasonLabel(esp_reset_reason_t reason) {
   switch (reason) {
     case ESP_RST_POWERON:
@@ -1080,6 +1097,10 @@ void initPsram() {
 #else
   gs_psram_available = false;
 #endif
+
+  if (gs_psram_available && ESP.getPsramSize() == 0) {
+    gs_psram_available = false;
+  }
 
   Serial.printf("[PSRAM] status: %s\n", gs_psram_available ? "AVAILABLE" : "NOT AVAILABLE");
   Serial.printf("PSRAM: %s\n", gs_psram_available ? "enabled" : "disabled");
@@ -1709,12 +1730,15 @@ void loadDailyHistory() {
   if (raw.length() == 0) return;
   DynamicJsonDocument doc(16384);
   if (deserializeJson(doc, raw) != DeserializationError::Ok) return;
+  size_t feedCounter = 0;
   for (JsonObject obj : doc.as<JsonArray>()) {
+    if ((feedCounter++ % 8) == 0) bootFeed("daily-history");
     String id = obj["id"] | "";
     int idx = metricIndex(id);
     if (idx < 0) continue;
     JsonArray series = obj["days"].as<JsonArray>();
     for (JsonObject d : series) {
+      if ((feedCounter++ % 16) == 0) bootFeed("daily-history");
       DailyPoint p;
       p.dayKey = d["day"] | "";
       p.avg = d["avg"] | NAN;
@@ -4232,6 +4256,15 @@ void clearPreferences() {
     prefsUi.clear();
     prefsUi.end();
   }
+  if (beginPrefs(prefsCloud, "cloud", false)) {
+    prefsCloud.clear();
+    prefsCloud.end();
+  }
+  Preferences cfg;
+  if (cfg.begin("cfg", false, currentPrefsPartitionLabel())) {
+    cfg.clear();
+    cfg.end();
+  }
   logEvent("Preferences cleared");
 }
 
@@ -6124,36 +6157,31 @@ void appSetup() {
     return;
   }
 
-  // Ensure the NVS partition is present and usable before any Preferences calls.
-  // A missing/mismatched partition manifests as "nvs_open failed: NOT_FOUND".
-  bool nvsOk = initNvsStorage();
-  if (!nvsOk) {
-    Serial.println("[NVS] Persistence disabled, using RAM defaults only");
-  } else {
-    initializePreferencesIfNeeded();
-  }
-  bootFeed("nvs-ready");
+  uint8_t stage = 1;
+  runBootStage(stage++, "nvs", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() {
+    // Ensure the NVS partition is present and usable before any Preferences calls.
+    // A missing/mismatched partition manifests as "nvs_open failed: NOT_FOUND".
+    bool nvsOk = initNvsStorage();
+    if (!nvsOk) {
+      Serial.println("[NVS] Persistence disabled, using RAM defaults only");
+    } else {
+      initializePreferencesIfNeeded();
+    }
+  });
 
-  initPsram();
-  bootFeed("psram");
-  loadCloudConfig();
-  loadDailyHistory();
+  runBootStage(stage++, "psram", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { initPsram(); });
+  runBootStage(stage++, "cloud-config", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { loadCloudConfig(); });
+  runBootStage(stage++, "daily-history", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { loadDailyHistory(); });
   activeDayKey = currentDayKey();
   resetAllDaily(activeDayKey);
-  loadPinsFromPrefs();
-  loadSensorConfigs();
-  bootFeed("configs-loaded");
-  initRelays();
-  bootFeed("relays");
-  initSensors();
-  bootFeed("sensors");
+  runBootStage(stage++, "pins", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { loadPinsFromPrefs(); });
+  runBootStage(stage++, "sensors-config", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { loadSensorConfigs(); });
+  runBootStage(stage++, "relays", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { initRelays(); });
+  runBootStage(stage++, "sensors", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { initSensors(); });
   piSerial.begin(PI_BRIDGE_BAUD, SERIAL_8N1, DEFAULT_PI_BRIDGE_RX_PIN, DEFAULT_PI_BRIDGE_TX_PIN);
-  connectToWiFi();
-  bootFeed("wifi");
-  setupServer();
-  bootFeed("server");
-  startCloudWorkerTask();
-  bootFeed("cloud-task");
+  runBootStage(stage++, "wifi", BOOT_WIFI_TIMEOUT_MS, []() { connectToWiFi(); });
+  runBootStage(stage++, "server", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { setupServer(); });
+  runBootStage(stage++, "cloud-task", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { startCloudWorkerTask(); });
   Serial.println("[BOOT] Init complete");
 }
 
