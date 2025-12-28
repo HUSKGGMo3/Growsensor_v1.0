@@ -1,25 +1,35 @@
 # GrowSensor (ESP32-S3, 16MB)
 
-Dieses Repository enthält ausschließlich die aktuelle ESP32-S3 Firmware (16MB Flash). Alte ESP32/4MB Artefakte wurden entfernt.
+Dieses Repository enthält ausschließlich die aktuelle ESP32‑S3 Firmware (16MB Flash). Alte ESP32/4MB Artefakte wurden entfernt.
 
-## Projektstruktur
+This repository contains only the current ESP32‑S3 firmware (16MB flash). Legacy ESP32/4MB artifacts have been removed.
+
+## Projektstruktur / Project structure
 - `src/` – Firmware (Arduino)
-- `scripts/` – PlatformIO Helper (Partition Guard)
-- `tools/` – optionale Tools (aktuell leer, siehe README im Ordner)
-- `docs/` – zusätzliche Dokumentation
+- `scripts/` – PlatformIO helper (partition guard)
+- `partitions/` – Partition tables
 
 ## Hardware / PSRAM
-- Ziel: ESP32-S3 mit **16MB Flash**.
+- Ziel: ESP32‑S3 mit **16MB Flash**.
 - PSRAM ist **optional**. Wähle den passenden Build:
-  - **OPI**: z. B. ESP32-S3-WROOM-1 N16R8, UM ProS3 (Octal PSRAM)
-  - **QSPI**: Boards mit Quad PSRAM (häufig ältere/seltene Varianten)
+  - **OPI**: z. B. ESP32‑S3‑WROOM‑1 N16R8, UM ProS3 (Octal PSRAM)
+  - **QSPI**: Boards mit Quad PSRAM (ältere/seltene Varianten)
   - **No PSRAM**: Boards ohne PSRAM oder zum Debuggen
 
-Wenn der PSRAM-Modus nicht passt, bootet die Firmware trotzdem und nutzt Internal RAM.
+Target: ESP32‑S3 with **16MB flash**.
+PSRAM is optional. Choose the matching build:
+- **OPI**: e.g. ESP32‑S3‑WROOM‑1 N16R8, UM ProS3 (Octal PSRAM)
+- **QSPI**: boards with Quad PSRAM (older/rare variants)
+- **No PSRAM**: boards without PSRAM or for debugging
 
 ## PlatformIO Environments
 Diese drei Environments sind gültig (und nur diese):
 - `esp32s3_no_psram` **(Default / stabil)**
+- `esp32s3_psram_opi`
+- `esp32s3_psram_qspi`
+
+These are the only valid environments:
+- `esp32s3_no_psram` **(default / stable)**
 - `esp32s3_psram_opi`
 - `esp32s3_psram_qspi`
 
@@ -29,49 +39,46 @@ pio run -e esp32s3_no_psram
 pio run -e esp32s3_no_psram -t upload
 ```
 
-PSRAM-Varianten:
+PSRAM-Varianten / PSRAM variants:
 ```sh
 pio run -e esp32s3_psram_opi -t upload
 pio run -e esp32s3_psram_qspi -t upload
 ```
 
-Serieller Monitor:
-```sh
-pio device monitor -e esp32s3_no_psram -b 115200 --filter direct
-```
+## Serial Monitor / Serieller Monitor
+**USB‑CDC (App‑Logs, empfohlen):**
+- Erscheint als eigener Port (z. B. `COM5` unter Windows, `/dev/ttyACM0` unter Linux).
+- Zeigt die App‑Logs ("GrowSensor booting...").
 
-## Flash komplett löschen (Windows PowerShell kompatibel)
-Verwende **PlatformIO’s tool-esptoolpy** (kein `python -m esptool` nötig):
+**UART0 (ROM‑Logs/Bootloader):**
+- Externer USB‑UART an RX0/TX0 erforderlich.
+- Zeigt ROM‑Logs und Bootloader‑Ausgaben.
+
+Monitor‑Beispiel (USB‑CDC):
+```sh
+pio device monitor -e esp32s3_no_psram -p COMx -b 115200 --filter direct
+```
+> Ersetze `COMx` durch den tatsächlichen Port (oder z. B. `/dev/ttyACM0`).
+
+## Flash komplett löschen / Erase flash
+Verwende **PlatformIO’s tool-esptoolpy**:
 ```sh
 pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COMx erase_flash
 ```
-
-> Ersetze `COMx` durch den korrekten Port (z. B. `COM5`).
-
-## Factory Reset (Daten löschen)
-Per API (z. B. Postman/Browser):
-```
-POST /api/factory-reset?confirm=RESET
-```
-Löscht Wi‑Fi, Sensoren, System, UI und Cloud‑Config in NVS und startet neu.
-
-## Troubleshooting
-- **`invalid header 0xffffffff`**
-  - Ursache: falsches Flash-Layout oder unvollständiger Flash.
-  - Lösung: `erase_flash` ausführen und danach erneut mit dem korrekten Environment flashen.
-
-- **`PSRAM ID read error` / `wrong PSRAM line mode`**
-  - Ursache: falscher PSRAM-Modus.
-  - Lösung: `esp32s3_psram_opi` ↔ `esp32s3_psram_qspi` wechseln oder `esp32s3_no_psram` nutzen.
-
-- **USB/COM Port nicht sichtbar**
-  - Prüfe USB‑Kabel (Datenkabel), setze Board in Boot‑Modus und wähle den richtigen Port.
-  - Bei USB‑CDC: erst nach Reset erscheint der Port.
+> Port wie oben auswählen.
 
 ## Partitions / 16MB
 Die Partitionstabelle liegt unter `partitions/growsensor_16mb.csv` und ist auf 16MB (NVS + OTA + SPIFFS) ausgelegt.
 
-## Reproduzierbares Flashen
-1. Optional: `erase_flash` ausführen.
-2. Mit dem gewünschten Environment bauen und flashen (`pio run -e ... -t upload`).
-3. Im Boot-Log erscheinen `BOOT:stage=...` Marker, inkl. Timeouts.
+## Troubleshooting
+- **`invalid header 0xffffffff`**
+  - Ursache: falsches Flash‑Layout oder leeres Flash nach falschem Upload‑Offset/Environment.
+  - Lösung: `erase_flash` ausführen, dann mit dem korrekten Environment flashen.
+
+- **`PSRAM ID read error` / `wrong PSRAM line mode`**
+  - Ursache: falscher PSRAM‑Modus.
+  - Lösung: `esp32s3_psram_opi` ↔ `esp32s3_psram_qspi` wechseln oder `esp32s3_no_psram` nutzen.
+
+- **USB/COM‑Port nicht sichtbar**
+  - Prüfe USB‑Kabel (Datenkabel), setze Board in Boot‑Modus und wähle den richtigen Port.
+  - Bei USB‑CDC: der Port erscheint nach Reset.
