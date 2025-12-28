@@ -59,7 +59,7 @@ pio run -e esp32s3_no_psram -t upload
    ```
 5. Serial monitor:
    ```powershell
-   pio device monitor -b 115200
+   pio device monitor -b 115200 --filter esp32_exception_decoder
    ```
 ```
 
@@ -75,6 +75,10 @@ pio run -e esp32s3_no_psram -t upload
 Monitor‑Beispiel (USB‑CDC):
 ```sh
 pio device monitor -e esp32s3_psram_opi -p COMx -b 115200 --filter direct
+```
+Decoder‑Beispiel (Backtrace):
+```sh
+pio device monitor -b 115200 --filter esp32_exception_decoder
 ```
 > Ersetze `COMx` durch den tatsächlichen Port (oder z. B. `/dev/ttyACM0`).
 

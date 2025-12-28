@@ -125,6 +125,10 @@ static constexpr unsigned long BOOT_WIFI_TIMEOUT_MS = WIFI_TIMEOUT + 5000;
 static constexpr uint8_t SAFE_MODE_BOOT_THRESHOLD = 3;
 static constexpr unsigned long SAFE_MODE_STABLE_MS = 10000;
 static constexpr unsigned long SAFE_MODE_FEED_INTERVAL_MS = 250;
+static const char *BOOT_PREFS_NS = "system";
+static const char *BOOT_PREFS_COUNT_KEY = "boot_count";
+static const char *BOOT_PREFS_WDT_COUNT_KEY = "boot_wdt_count";
+static const char *BOOT_PREFS_LAST_REASON_KEY = "boot_last_reason";
 
 // Sensor refresh interval (ms)
 static constexpr unsigned long SENSOR_INTERVAL = 2000;
@@ -216,6 +220,10 @@ RTC_DATA_ATTR uint32_t rtcLastResetReason = 0;
 RTC_DATA_ATTR bool rtcLastResetWasWdt = false;
 bool safeModeActive = false;
 bool bootMarkedHealthy = false;
+bool bootNvsMarkedHealthy = false;
+uint32_t nvsBootCount = 0;
+uint32_t nvsWdtCount = 0;
+uint32_t nvsLastResetReason = 0;
 unsigned long bootStartMs = 0;
 unsigned long lastBootFeedMs = 0;
 
@@ -229,6 +237,8 @@ bool isTimeSynced();
 void onTimeSynchronized(uint64_t epochNowMs, uint32_t monotonicNowMs);
 uint64_t mapTimestampToEpochMs(uint32_t monotonicTs);
 uint64_t currentEpochMs();
+bool beginPrefs(Preferences &prefs, const char *ns, bool readOnly = false, const char *partitionLabel = nullptr);
+uint32_t getUIntOrDefault(Preferences &prefs, const char *key, uint32_t defaultValue, bool persistMissing = false);
 String cloudRootPath();
 String normalizeCloudBaseUrl(String url);
 String buildWebDavBaseUrl();
@@ -811,23 +821,50 @@ void bootFeed(const char *stage = nullptr) {
   if (stage && now - lastBootFeedMs >= SAFE_MODE_FEED_INTERVAL_MS) {
     Serial.printf("[BOOT] %s\n", stage);
     lastBootFeedMs = now;
+    Serial.flush();
   }
   delay(1);
   yield();
 }
 
+void logBootMetrics(const char *label) {
+  uint32_t heap = ESP.getFreeHeap();
+  uint32_t minHeap = ESP.getMinFreeHeap();
+  uint32_t psram = ESP.getFreePsram();
+  Serial.printf("[BOOT:metrics] %s heap=%lu min=%lu psram=%lu\n", label,
+                static_cast<unsigned long>(heap), static_cast<unsigned long>(minHeap),
+                static_cast<unsigned long>(psram));
+  Serial.flush();
+}
+
+void logBootStepStart(const char *step) {
+  Serial.printf("[BOOT:step] start %s\n", step);
+  Serial.flush();
+}
+
+void logBootStepDone(const char *step, unsigned long elapsed) {
+  Serial.printf("[BOOT:step] done %s (%lu ms)\n", step, elapsed);
+  Serial.flush();
+}
+
 template <typename Func>
 void runBootStage(uint8_t stageId, const char *label, unsigned long timeoutMs, Func fn) {
   Serial.printf("[BOOT:stage=%u] start %s\n", stageId, label);
+  Serial.flush();
+  String preLabel = String("pre-") + label;
+  logBootMetrics(preLabel.c_str());
   unsigned long start = millis();
   fn();
   unsigned long elapsed = millis() - start;
+  String postLabel = String("post-") + label;
+  logBootMetrics(postLabel.c_str());
   if (elapsed > timeoutMs) {
     Serial.printf("[BOOT:stage=%u] timeout %s (%lu ms)\n", stageId, label, elapsed);
     logEvent(String("Boot stage timeout: ") + label + " (" + elapsed + "ms)", "warn", "boot");
   } else {
     Serial.printf("[BOOT:stage=%u] done %s (%lu ms)\n", stageId, label, elapsed);
   }
+  Serial.flush();
   bootFeed(label);
 }
 
@@ -871,11 +908,40 @@ void recordBootAttempt(esp_reset_reason_t reason) {
   }
 }
 
+bool updateBootHistoryNvs(esp_reset_reason_t reason) {
+  if (!beginPrefs(prefsSystem, BOOT_PREFS_NS, false)) return false;
+  nvsBootCount = getUIntOrDefault(prefsSystem, BOOT_PREFS_COUNT_KEY, 0, true);
+  nvsWdtCount = getUIntOrDefault(prefsSystem, BOOT_PREFS_WDT_COUNT_KEY, 0, true);
+  nvsLastResetReason = getUIntOrDefault(prefsSystem, BOOT_PREFS_LAST_REASON_KEY, 0, true);
+  nvsBootCount++;
+  if (isWatchdogReset(reason)) {
+    nvsWdtCount++;
+  } else {
+    nvsWdtCount = 0;
+  }
+  nvsLastResetReason = static_cast<uint32_t>(reason);
+  prefsSystem.putUInt(BOOT_PREFS_COUNT_KEY, nvsBootCount);
+  prefsSystem.putUInt(BOOT_PREFS_WDT_COUNT_KEY, nvsWdtCount);
+  prefsSystem.putUInt(BOOT_PREFS_LAST_REASON_KEY, nvsLastResetReason);
+  prefsSystem.end();
+  return true;
+}
+
+void clearWatchdogBootCounterNvs() {
+  if (bootNvsMarkedHealthy) return;
+  if (!beginPrefs(prefsSystem, BOOT_PREFS_NS, false)) return;
+  prefsSystem.putUInt(BOOT_PREFS_WDT_COUNT_KEY, 0);
+  prefsSystem.end();
+  bootNvsMarkedHealthy = true;
+  nvsWdtCount = 0;
+}
+
 void markBootStableIfNeeded() {
   if (!bootMarkedHealthy && !safeModeActive && millis() - bootStartMs >= SAFE_MODE_STABLE_MS) {
     rtcBootCount = 0;
     bootMarkedHealthy = true;
     Serial.println("[BOOT] Stable for 10s, boot counter reset");
+    clearWatchdogBootCounterNvs();
   }
 }
 
@@ -900,6 +966,8 @@ void startSafeModeAccessPoint(const char *reason) {
     page += "<p>Target: " + String(FIRMWARE_TARGET) + " (" + String(FIRMWARE_CHANNEL) + ")</p>";
     page += "<p>Reason: " + String(reason ? reason : "boot loop detected") + "</p>";
     page += "<p>Boot attempts (RTC): " + String(rtcBootCount) + "</p>";
+    page += "<p>Boot attempts (NVS): " + String(nvsBootCount) + "</p>";
+    page += "<p>Last reset reason (NVS): " + String(resetReasonLabel(static_cast<esp_reset_reason_t>(nvsLastResetReason))) + "</p>";
     page += "<p>The device limited initialization to avoid further resets. Reboot after fixing wiring or Wi-Fi settings.</p>";
     page += "</div></body></html>";
     server.send(200, "text/html", page);
@@ -2432,13 +2500,21 @@ bool setRelay(RelayChannel &relay, bool on, const char *reason) {
 
 void initRelays() {
   RelayChannel *all[] = {&relayHumidifier, &relayExhaust, &relayLight, &relayAux};
+  logBootStepStart("relays.pins");
+  unsigned long stepStart = millis();
   for (RelayChannel *r : all) {
     if (!validPin(r->pin)) continue;
+    Serial.printf("[BOOT:step] relay %s pin=%d\n", r->name, r->pin);
+    Serial.flush();
     pinMode(r->pin, OUTPUT);
     digitalWrite(r->pin, r->inverted ? HIGH : LOW); // default OFF
     r->state = false;
     r->lastSwitchMs = millis();
+    delay(1);
+    yield();
   }
+  logBootStepDone("relays.pins", millis() - stepStart);
+  bootFeed("relays.pins");
   relaysReady = true;
   logEvent("Relais initialisiert");
 }
@@ -3854,6 +3930,8 @@ bool beginWifiConnect(const String &ssid, const String &pass, bool waitForResult
 
 bool connectToWiFi() {
   if (safeModeActive) return false;
+  logBootStepStart("wifi.load-prefs");
+  unsigned long stepStart = millis();
   bool hasWifiPassKey = false;
   bool hasLegacyPassKey = false;
   String legacyPass;
@@ -3869,6 +3947,10 @@ bool connectToWiFi() {
     savedWifiPass = "";
     legacyPass = "";
   }
+  logBootStepDone("wifi.load-prefs", millis() - stepStart);
+  bootFeed("wifi.load-prefs");
+  logBootStepStart("wifi.load-system");
+  stepStart = millis();
   if (beginPrefs(prefsSystem, "system", false)) {
     channel = lightChannelFromString(getStringOrDefault(prefsSystem, "channel", "full_spectrum", true));
     climateType = climateFromString(getStringOrDefault(prefsSystem, "climate_type", "sht31", true));
@@ -3881,8 +3963,14 @@ bool connectToWiFi() {
     uiDisableRequested = getBoolOrDefault(prefsSystem, "ui_disable", false, true);
     prefsSystem.end();
   }
+  logBootStepDone("wifi.load-system", millis() - stepStart);
+  bootFeed("wifi.load-system");
   if (integrationMode != IntegrationMode::PI_BRIDGE) integrationMode = IntegrationMode::STANDALONE;
+  logBootStepStart("wifi.apply-integration");
+  stepStart = millis();
   applyIntegrationMode(integrationMode, false);
+  logBootStepDone("wifi.apply-integration", millis() - stepStart);
+  bootFeed("wifi.apply-integration");
   if (phaseId.length() > 0 && phaseId != "custom") {
     const PhasePreset *preset = phasePresetById(phaseId);
     if (preset) {
@@ -3893,6 +3981,8 @@ bool connectToWiFi() {
   } else {
     phaseId = phaseFromState();
   }
+  logBootStepStart("wifi.load-static-ip");
+  stepStart = millis();
   if (beginPrefs(prefsWifi, "wifi", false)) {
     staticIpEnabled = getBoolOrDefault(prefsWifi, "static", false, true);
     staticIp.fromString(getStringOrDefault(prefsWifi, "ip", "", true));
@@ -3905,6 +3995,10 @@ bool connectToWiFi() {
     staticGateway = IPAddress();
     staticSubnet = IPAddress();
   }
+  logBootStepDone("wifi.load-static-ip", millis() - stepStart);
+  bootFeed("wifi.load-static-ip");
+  logBootStepStart("wifi.load-sensor-flags");
+  stepStart = millis();
   if (beginPrefs(prefsSensors, "sensors", false)) {
     enableLight = getBoolOrDefault(prefsSensors, "en_light", true, true);
     enableClimate = getBoolOrDefault(prefsSensors, "en_climate", true, true);
@@ -3917,6 +4011,8 @@ bool connectToWiFi() {
     enableLeaf = true;
     enableCo2 = true;
   }
+  logBootStepDone("wifi.load-sensor-flags", millis() - stepStart);
+  bootFeed("wifi.load-sensor-flags");
   bool migrateLegacyWifiPass = !hasWifiPassKey && hasLegacyPassKey && savedWifiPass.isEmpty() && !legacyPass.isEmpty() && !savedSsid.isEmpty();
   if (migrateLegacyWifiPass) {
     savedWifiPass = legacyPass;
@@ -3925,18 +4021,24 @@ bool connectToWiFi() {
       prefsWifi.end();
     }
   }
+  logBootStepStart("wifi.load-extras");
+  stepStart = millis();
   applyTimezoneEnv();
   loadPartners();
   loadSensorConfigs();
   rebuildSensorList();
+  logBootStepDone("wifi.load-extras", millis() - stepStart);
+  bootFeed("wifi.load-extras");
 
   if (savedSsid.isEmpty()) {
     Serial.println("[WiFi] No stored credentials, starting AP");
+    Serial.flush();
     startAccessPoint();
     return false;
   }
 
   Serial.printf("[WiFi] Connecting to %s ...\n", savedSsid.c_str());
+  Serial.flush();
   bool ok = beginWifiConnect(savedSsid, savedWifiPass, true);
 
   if (ok) {
@@ -4325,27 +4427,55 @@ void reinitCo2Sensor() {
 }
 
 void initSensors() {
+  logBootStepStart("sensors.i2c.begin");
+  unsigned long stepStart = millis();
   i2cBusReady = Wire.begin(pinI2C_SDA, pinI2C_SCL, 400000);
   Wire.setTimeout(1000);
+  logBootStepDone("sensors.i2c.begin", millis() - stepStart);
+  bootFeed("sensors.i2c.begin");
 
   if (!i2cBusReady) {
     Serial.printf("[I2C] Init failed on SDA=%d SCL=%d, skipping I2C sensors\n", pinI2C_SDA, pinI2C_SCL);
     logEvent("I2C bus init failed, skipping BH1750/SHT31/MLX90614", "warn");
+    logBootStepStart("sensors.co2.begin");
+    stepStart = millis();
     reinitCo2Sensor();
+    logBootStepDone("sensors.co2.begin", millis() - stepStart);
+    bootFeed("sensors.co2.begin");
     Serial.println(co2Health.present ? "[Sensor] CO2 initialized" : "[Sensor] CO2 not detected");
     return;
   }
 
+  logBootStepStart("sensors.light.begin");
+  stepStart = millis();
   reinitLightSensor();
+  logBootStepDone("sensors.light.begin", millis() - stepStart);
+  bootFeed("sensors.light.begin");
   Serial.println(lightHealth.present ? "[Sensor] BH1750 initialized" : "[Sensor] BH1750 not detected");
+  logBootStepStart("sensors.climate.begin");
+  stepStart = millis();
   reinitClimateSensor();
+  logBootStepDone("sensors.climate.begin", millis() - stepStart);
+  bootFeed("sensors.climate.begin");
   Serial.println(climateHealth.present ? "[Sensor] Climate initialized" : "[Sensor] Climate not detected");
+  logBootStepStart("sensors.leaf.begin");
+  stepStart = millis();
   reinitLeafSensor();
+  logBootStepDone("sensors.leaf.begin", millis() - stepStart);
+  bootFeed("sensors.leaf.begin");
   Serial.println(leafHealth.present ? "[Sensor] MLX90614 initialized" : "[Sensor] MLX90614 not detected");
+  logBootStepStart("sensors.co2.begin");
+  stepStart = millis();
   reinitCo2Sensor();
+  logBootStepDone("sensors.co2.begin", millis() - stepStart);
+  bootFeed("sensors.co2.begin");
   Serial.println(co2Health.present ? "[Sensor] CO2 initialized" : "[Sensor] CO2 not detected");
 
+  logBootStepStart("sensors.rebuild");
+  stepStart = millis();
   rebuildSensorList();
+  logBootStepDone("sensors.rebuild", millis() - stepStart);
+  bootFeed("sensors.rebuild");
 }
 
 void readSensors() {
@@ -6150,14 +6280,6 @@ void appSetup() {
   digitalWrite(LED_BUILTIN, LOW);
 #endif
 
-  if (rtcBootCount >= SAFE_MODE_BOOT_THRESHOLD) {
-    String reason = "boot loop detected (";
-    reason += resetReasonLabel(resetReason);
-    reason += ")";
-    enterSafeMode(reason.c_str());
-    return;
-  }
-
   uint8_t stage = 1;
   runBootStage(stage++, "nvs", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() {
     // Ensure the NVS partition is present and usable before any Preferences calls.
@@ -6167,8 +6289,23 @@ void appSetup() {
       Serial.println("[NVS] Persistence disabled, using RAM defaults only");
     } else {
       initializePreferencesIfNeeded();
+      updateBootHistoryNvs(static_cast<esp_reset_reason_t>(rtcLastResetReason));
+      Serial.printf("[BOOT] NVS boot_count=%lu wdt_count=%lu last_reason=%lu\n",
+                    static_cast<unsigned long>(nvsBootCount),
+                    static_cast<unsigned long>(nvsWdtCount),
+                    static_cast<unsigned long>(nvsLastResetReason));
+      Serial.flush();
     }
   });
+
+  if ((nvsWdtCount >= SAFE_MODE_BOOT_THRESHOLD) ||
+      (!nvsReady && rtcLastResetWasWdt && rtcBootCount >= SAFE_MODE_BOOT_THRESHOLD)) {
+    String reason = "consecutive watchdog resets (";
+    reason += String(nvsWdtCount > 0 ? nvsWdtCount : rtcBootCount);
+    reason += ")";
+    enterSafeMode(reason.c_str());
+    return;
+  }
 
   runBootStage(stage++, "psram", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { initPsram(); });
   runBootStage(stage++, "cloud-config", BOOT_STAGE_DEFAULT_TIMEOUT_MS, []() { loadCloudConfig(); });
@@ -6191,6 +6328,7 @@ void appSetup() {
 // TEST: Mobile (kleines Viewport) -> Header OK, VPD-Kachel zeigt Chart, kein blaues Vollfeld.
 // TEST: Cloud offline -> UI bleibt performant, Toast + Status-LED rot.
 void appLoop() {
+  static bool loopAliveLogged = false;
   if (safeModeActive) {
     server.handleClient();
     markBootStableIfNeeded();
@@ -6199,6 +6337,11 @@ void appLoop() {
   }
 
   markBootStableIfNeeded();
+  if (!loopAliveLogged && millis() - bootStartMs > 2000) {
+    Serial.println("[BOOT] System ready / loop alive");
+    Serial.flush();
+    loopAliveLogged = true;
+  }
 
   static uint32_t lastLoopMicros = 0;
   uint32_t loopNow = micros();
