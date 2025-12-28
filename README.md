@@ -24,25 +24,43 @@ PSRAM is optional. Choose the matching build:
 
 ## PlatformIO Environments
 Diese drei Environments sind gültig (und nur diese):
-- `esp32s3_no_psram` **(Default / stabil)**
-- `esp32s3_psram_opi`
+- `esp32s3_psram_opi` **(Default / empfohlen für ProS3)**
 - `esp32s3_psram_qspi`
+- `esp32s3_no_psram`
 
 These are the only valid environments:
-- `esp32s3_no_psram` **(default / stable)**
-- `esp32s3_psram_opi`
+- `esp32s3_psram_opi` **(default / recommended for ProS3)**
 - `esp32s3_psram_qspi`
+- `esp32s3_no_psram`
 
 ## Build & Upload
 ```sh
-pio run -e esp32s3_no_psram
-pio run -e esp32s3_no_psram -t upload
+pio run -e esp32s3_psram_opi
+pio run -e esp32s3_psram_opi -t upload
 ```
 
 PSRAM-Varianten / PSRAM variants:
 ```sh
 pio run -e esp32s3_psram_opi -t upload
 pio run -e esp32s3_psram_qspi -t upload
+pio run -e esp32s3_no_psram -t upload
+```
+
+## Windows Quick Start
+1. Install Visual Studio Code + PlatformIO extension.
+2. Open this repository folder.
+3. Build + upload (standard):
+   ```powershell
+   pio run -e esp32s3_psram_opi -t upload
+   ```
+4. Full flash (bootloader + partitions + app):
+   ```powershell
+   pio run -e esp32s3_psram_opi -t uploadfull
+   ```
+5. Serial monitor:
+   ```powershell
+   pio device monitor -b 115200
+   ```
 ```
 
 ## Serial Monitor / Serieller Monitor
@@ -56,7 +74,7 @@ pio run -e esp32s3_psram_qspi -t upload
 
 Monitor‑Beispiel (USB‑CDC):
 ```sh
-pio device monitor -e esp32s3_no_psram -p COMx -b 115200 --filter direct
+pio device monitor -e esp32s3_psram_opi -p COMx -b 115200 --filter direct
 ```
 > Ersetze `COMx` durch den tatsächlichen Port (oder z. B. `/dev/ttyACM0`).
 

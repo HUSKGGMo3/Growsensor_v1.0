@@ -1,6 +1,7 @@
 #include "compat_psram.h"
 #include "app/app.h"
 #include <Arduino.h>
+#include "build_info.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
