@@ -1,106 +1,141 @@
-# GrowSensor (ESP32-S3, 16MB)
+# Growsensor – ESP32 Monitoring Node
 
-Dieses Repository enthält ausschließlich die aktuelle ESP32‑S3 Firmware (16MB Flash). Alte ESP32/4MB Artefakte wurden entfernt.
+**Stable target:** ESP32 (esp32dev / ESP32-D0WD-V3, 4MB Flash). No ESP32-S3/PSRAM targets in this branch.
 
-This repository contains only the current ESP32‑S3 firmware (16MB flash). Legacy ESP32/4MB artifacts have been removed.
+**Current release: v0.3.3 (experimental / untested)**
 
-## Projektstruktur / Project structure
-- `src/` – Firmware (Arduino)
-- `scripts/` – PlatformIO helper (partition guard)
-- `partitions/` – Partition tables
+### Patch v0.3.3 (experimental, Cloud-first storage + cloud-gated long charts)
+- Cloud UI now exposes connected/enabled/recording states, last upload/error timestamps, and collapses credentials behind an Edit toggle once connected. Optional “Login-Daten dauerhaft speichern” keeps base URL/user/app password across reboots; “Forget credentials” clears only cloud keys.
+- Cloud-first storage mode: when `cloudStorageActive` (enabled + connected + recording) the device keeps only RAM buffers and cloud upload queues, while offline fallback retains local 24h history.
+- Long-range charts (1–4 months) are cloud-gated in both UI and API; `/api/cloud/daily` proxies daily aggregates with short RAM caching and returns 403 when cloud is inactive.
+- Cloud logs are streamed to `/GrowSensor/<deviceId>/logs/chunks/` as timestamped chunk files (ISO | level | source | message), avoiding WebDAV append limitations.
+- Daily aggregates remain JSON per day (`/GrowSensor/<deviceId>/daily/YYYY-MM/YYYY-MM-DD.json`) with avg/min/max/last/samples for each metric, and long charts request them via `/api/cloud/daily?sensor=...&from=YYYY-MM-DD&to=YYYY-MM-DD`.
+- HTTP-only builds disable TLS to save flash; Nextcloud WebDAV uses plain `http://` URLs in trusted LANs. Low-flash builds may disable mDNS (use the device IP).
 
-## Hardware / PSRAM
-- Ziel: ESP32‑S3 mit **16MB Flash**.
-- PSRAM ist **optional**. Wähle den passenden Build:
-  - **OPI**: z. B. ESP32‑S3‑WROOM‑1 N16R8, UM ProS3 (Octal PSRAM)
-  - **QSPI**: Boards mit Quad PSRAM (ältere/seltene Varianten)
-  - **No PSRAM**: Boards ohne PSRAM oder zum Debuggen
+### Patch v0.3.2 (experimental, Cloud Primary mode)
+- Storage modes (`LOCAL_ONLY`, `CLOUD_PRIMARY`, `LOCAL_FALLBACK`) gate persistence: when the cloud is online the ESP keeps only RAM ring buffers (live/6h/24h) and blocks local history writes, while 15-minute checkpoints upload the active day and daily rollovers queue JSON for the cloud.
+- WebDAV uploads target `/GrowSensor/<deviceId>/daily/YYYY-MM/YYYY-MM-DD.json` (HTTP basic auth, LAN-only) with date/timezone/firmware metadata, per-metric aggregates (avg/min/max/samples/last), and optional hourly bins; folders are auto-created via MKCOL and uploads are retried with a bounded, upserting queue.
+- Cloud health pings every ~30s to define connectivity; the UI shows status/last sync, hides 1M/3M/4M ranges unless `cloudEnabled && cloudConnected`, surfaces an offline notice + retry button, and long-range charts pull daily JSONs directly from the cloud while offline falling back to the 24h local buffer.
+- Hardened cloud state & runtime flags: `/api/cloud` now distinguishes persisted vs. runtime enablement, recording, queue size, last upload/test path/time, reasons, and failure counters. The worker ticks ~1.5s with tiered retry backoff (5s/15s/60s, max 5 attempts), enqueues a recording-start event immediately, and pushes per-minute recording snapshots under `/GrowSensor/<deviceId>/samples/...`.
+- New `/api/cloud/test` endpoint and “Sende Test” UI button create `TestCloud_<deviceId>_<timestamp>.txt` via MKCOL/PUT under `/GrowSensor/<deviceId>/` (LAN WebDAV), returning HTTP code/path/bytes for end-to-end verification.
+- Nextcloud WebDAV uses plain HTTP in trusted LANs; upload root remains `/GrowSensor/<deviceId>/` and the UI keeps the config persisted across reboots.
+- Hotfix v0.3.2: fixed missing declarations/helpers in the cloud recording pipeline; restored successful build.
+- Hotfix v0.3.2a: fixed ArduinoJson null assignments and removed duplicate default arguments to restore builds.
 
-Target: ESP32‑S3 with **16MB flash**.
-PSRAM is optional. Choose the matching build:
-- **OPI**: e.g. ESP32‑S3‑WROOM‑1 N16R8, UM ProS3 (Octal PSRAM)
-- **QSPI**: boards with Quad PSRAM (older/rare variants)
-- **No PSRAM**: boards without PSRAM or for debugging
+### Patch v0.3.1 (experimental, HTTP-only LAN cloud)
+- New **Cloud** tab (visible for all users) to configure LAN-only Nextcloud WebDAV logging over HTTP. Stores credentials in a dedicated `cloud` namespace, never wipes Wi‑Fi/settings, and warns when using HTTP (plaintext). Includes Test/Start/Stop controls, queue/failure counters, and a retention selector (1–4 months).
+- Daily aggregates per metric (avg/min/max/last/count) are kept locally (ring buffer, persisted) and uploaded once per day as JSON to `/GrowSensor/<device>/daily/YYYY/MM/DD.json`. Upload queue is bounded and retried with backoff; directories are created via idempotent MKCOL. UI long-range charts (1M/3M/4M) read local aggregates, appear only when cloud is enabled/connected, and keep the app offline-capable.
+- Header KPI bar centered; trend arrows sit inline with values and use hardened trend detection with thresholds/hysteresis. Temp/Humidity/CO₂ show green (strong) / yellow (soft) trends; VPD arrows show direction while color indicates “toward target” (green), “away” (red), or neutral.
+- Sensor reads stay rate-limited to max 2/min (cooldowns already enforced), and version banner bumped to v0.3.1.
 
-## PlatformIO Environments
-Diese drei Environments sind gültig (und nur diese):
-- `esp32s3_psram_opi` **(Default / empfohlen für ProS3)**
-- `esp32s3_psram_qspi`
-- `esp32s3_no_psram`
+### Patch v0.3 (untested)
+- Chart hover now snaps to the nearest timestamp with a series-colored tooltip, vertical cursor line, and marker dot on all charts (detail modal, 24h main chart, and mini hover charts). Tooltips stay next to the cursor and use client-side data only.
+- Sticky header KPI bar shows Temp / Humidity / CO₂ / VPD with trend arrows (debounced thresholds) and VPD target proximity coloring (toward target = green, away = red).
+- Tile status indicators now pulse based on state (fast for healthy green, slower for yellow/stale, idle for offline); respects `prefers-reduced-motion`.
+- Version banner bumped to v0.3 (untested).
 
-These are the only valid environments:
-- `esp32s3_psram_opi` **(default / recommended for ProS3)**
-- `esp32s3_psram_qspi`
-- `esp32s3_no_psram`
+### Hotfix v0.2.6
+- Adds NTP-backed real-time clocks with timezone selection in the header and a visible “Zeit nicht synchron” badge until sync succeeds.
+- History/telemetry now return epoch millisecond timestamps so all charts render wall-clock time (including hover + detail views) with local-time axis labels; hover overlays now show full axes with start/mid/end labels instead of cropped canvases.
+- Persistent timezone preference (NVS) with SNTP retries (pool.ntp.org, time.nist.gov, time.google.com) and graceful fallback to relative time until synced.
+- New bucketed charting: Live/6h views aggregate into 5-minute buckets, 24h charts aggregate into 15-minute buckets (stored on-device to avoid RAM spikes). The dashboard’s large chart is now a 24h/15m view with a metric dropdown.
+- Hotfix v0.2.6 (untested): Charts 6h/24h fixed, axes label collision avoidance, hover charts now full-tile.
+- Hotfix v0.2.6 (untested): Time-axis tick strategy with more (auto-skipped) labels, padded Y-axes so single values are visible, full-height hover charts, and per-device color dropdowns (persisted in `localStorage`) with legends showing the device ID.
+- Hotfix v0.2.6 (untested): MH-Z14 (CO₂) added to the sensor templates (UART, mapped to the MH-Z19 driver path).
+- Hotfix v0.2.6 (untested): VPD heatmap fully re-renders when VPD factors/targets change so the green target zone and heatmap overlay stay in sync.
 
-## Build & Upload
-```sh
-pio run -e esp32s3_psram_opi
-pio run -e esp32s3_psram_opi -t upload
-```
+### Patch: Wi-Fi reconnect & stability (post v0.2.6)
+- Wi-Fi change no longer requires Dev mode: `/api/wifi` saves credentials instantly and reconnects asynchronously with mDNS (`growsensor.local` by default). The UI shows a reconnect panel, polls `growsensor.local/api/ping` every ~1.5s for up to 60s, and offers a fallback hint to the setup AP if mDNS fails; `/api/status` now exposes SSID/IP/RSSI/hostname/connecting for the UI and recovery flows.
+- Soft restart is now `/api/restart` (pure `ESP.restart()` with a “NO ERASE” log). Destructive operations are isolated in `/api/factory-reset` with `RESET` confirmation; preferences are split into wifi/sensors/system/ui namespaces to avoid accidental global clears.
+- Sensor cooldowns: Lux/PPFD, climate, leaf, and CO₂ sensors are rate-limited to two reads per minute. Skipped polls no longer push history points, easing I²C/UART load while keeping health tracking intact.
+- Charts/UX: mini-charts are always visible behind values with dimmed overlays; X-axis ticks scale with chart width to avoid label collisions; the “all metrics” mixed graph is removed. Metrics without real data stay hidden from selectors/legends, live charts require recent samples, and telemetry now carries `*_last`/`*_ever` timestamps to drop ghost series.
+- Anti-lockout: failed Wi-Fi connects fall back to the setup AP after a short timeout, while mDNS starts automatically on every successful STA connection.
 
-PSRAM-Varianten / PSRAM variants:
-```sh
-pio run -e esp32s3_psram_opi -t upload
-pio run -e esp32s3_psram_qspi -t upload
-pio run -e esp32s3_no_psram -t upload
-```
+Lightweight ESP32 monitoring firmware with a WebUI for grow environments. It reads multiple sensors, estimates PPFD, computes VPD per growth stage, and surfaces everything in a browser UI with Wi‑Fi setup and partner/supporter info. It does **not** drive actuators.
 
-## Windows Quick Start
-1. Install Visual Studio Code + PlatformIO extension.
-2. Open this repository folder.
-3. Build + upload (standard):
-   ```powershell
-   pio run -e esp32s3_psram_opi -t upload
+## What this project is / is not
+- Monitoring only: reads sensors, computes PPFD/VPD, shows dashboards and logs.
+- No actuator control yet: no relays or automation are driven by this firmware.
+
+## Features (as of v0.2.x)
+- Sensor monitoring: Temp, Humidity, CO₂, Lux → PPFD, Leaf Temp.
+- VPD calculation with growth stages (seedling/veg/bloom/late bloom) and status (under / in / over target).
+- Web-based UI with captive portal setup, live dashboard, 24h chart, averages, and logs.
+- Time-aware charts with SNTP-based epoch timestamps; timezone-aware axes (Europe/Berlin, UTC, America/New_York, Asia/Tokyo, more) and a header clock badge that indicates sync state.
+- Until the clock syncs, telemetry/cloud uploads keep monotonic timestamps and daily aggregation is labeled as `unsynced` to avoid fake day boundaries.
+- Authentication with forced password change on first login.
+- Partner / Supporter module stored locally and shown in the UI.
+
+## UI/UX refresh (v0.2.x dashboard update)
+- Two in-app views: **Dashboard** (default) and **Sensoren** (sensor management) with client-side switching.
+- Metric tiles are fully clickable; a detail modal opens with live and 6h charts for Lux, PPFD, CO₂, Temp, Humidity, Leaf, and VPD, with click-logging to debug overlay blockers.
+- Sensor tiles show per-metric status LEDs (green = valid data, yellow = stale/invalid, gray = disabled/not present) driven by telemetry flags.
+- VPD tile uses a full-background gradient “chart look” with target band highlight and value marker (0.0–2.0 kPa scale, marker hidden when no valid data).
+- Dedicated **Sensoren** page with active/available sensor tiles and a “+ Sensor hinzufügen” wizard (category/type selection, default pins locked until advanced override, restart hint).
+- Wi-Fi card collapses to a pulsing “connected” status with IP info; an advanced toggle reveals the setup form and static-IP fields only when enabled.
+- Telemetry JSON exposes sensor presence/enabled/ok/age fields plus Wi-Fi details (`ip`, `gw`, `sn`, `ap_mode`) for UI state.
+
+## Supported Hardware
+- ESP32 (classic, Arduino framework)
+- Sensors: BH1750 (Lux), SHT31/SHT30 (Temp/Humidity), MLX90614 (Leaf Temp), MH-Z19/MH-Z14 series (CO₂).
+- I²C pins and CO₂ UART pins are configurable in `src/main.cpp` (`I2C_SDA_PIN`, `I2C_SCL_PIN`, `CO2_RX_PIN`, `CO2_TX_PIN`).
+
+## Security & Login
+- Default login: `Admin` / `admin`
+- Password change is required on first login before Wi-Fi changes are allowed.
+- A master password exists for recovery; set your own at build time if needed.
+
+## Build & Flash (PlatformIO)
+1. Install PlatformIO CLI or VS Code + PlatformIO extension.
+2. Connect the ESP32 via USB.
+3. Build and flash:
+   ```sh
+   pio run -t upload
    ```
-4. Full flash (bootloader + partitions + app):
-   ```powershell
-   pio run -e esp32s3_psram_opi -t uploadfull
+4. Serial monitor (115200 baud):
+   ```sh
+   pio device monitor -b 115200
    ```
-5. Serial monitor:
-   ```powershell
-   pio device monitor -b 115200 --filter esp32_exception_decoder
-   ```
-```
 
-## Serial Monitor / Serieller Monitor
-**USB‑CDC (App‑Logs, empfohlen):**
-- Erscheint als eigener Port (z. B. `COM5` unter Windows, `/dev/ttyACM0` unter Linux).
-- Zeigt die App‑Logs ("GrowSensor booting...").
+## v0.2.6 Changes
+- Dashboard tiles can now be collapsed or expanded via a small eye icon; collapsed tiles shrink to a header-only view (no values or hover charts) and clicks expand them without opening the detail modal. State is stored per tile in `localStorage` (`tile_visibility_v026`) and defaults to visible for all metrics.
+- Hotfix: restored broken UI interactions (dashboard navigation, dev mode modal, hover/detail charts) and Wi‑Fi information (connected state, SSID/IP, RSSI bars, static-IP toggle).
+- NTP sync (pool.ntp.org, time.nist.gov, time.google.com) after Wi‑Fi connect with periodic refresh and a persisted timezone (Preferences/NVS).
+- `/api/telemetry` and `/api/history` return epoch millis; the UI renders local time axes (or relative mm:ss when unsynced) in main, hover, and detail charts. Hover mini-charts now draw full-size canvases with X/Y axes and time labels.
+- Chart ranges are bucketed to save memory: Live/6h use 5-minute buckets, 24h uses 15-minute buckets. The detail modal gains a 24h tab, and the dashboard’s big chart now shows a selectable metric over the last 24h (15m resolution).
+- Header timezone dropdown with persistent selection and live clock.
+- Chart UX polish: more X-axis ticks with collision avoidance, padded Y-axes, per-metric color palette with device-ID legend in the large 24h chart and detail modal (colors are stored per device in `localStorage`).
+- Sensor templates expanded with MH-Z14 (CO₂) mapped to the existing UART driver.
+  (v0.2.6 remains untested – please use with care.)
 
-**UART0 (ROM‑Logs/Bootloader):**
-- Externer USB‑UART an RX0/TX0 erforderlich.
-- Zeigt ROM‑Logs und Bootloader‑Ausgaben.
+## v0.3.2a Changes
+- Fix: ArduinoJson null handling in recording payload; removed duplicate default args to restore compilation.
 
-Monitor‑Beispiel (USB‑CDC):
-```sh
-pio device monitor -e esp32s3_psram_opi -p COMx -b 115200 --filter direct
-```
-Decoder‑Beispiel (Backtrace):
-```sh
-pio device monitor -b 115200 --filter esp32_exception_decoder
-```
-> Ersetze `COMx` durch den tatsächlichen Port (oder z. B. `/dev/ttyACM0`).
+## v0.2.5 Changes
+- VPD korrekt: Targets statt Skalierung + Apply Button für Stages.
+- VPD Heatmap klein/groß konsistent mit rotem Live-Punkt.
+- Popup Graphs mit Live/6h per `/api/history` und Achsen/Labels.
+- Sensor Add: gefiltert nach Kategorie + Advanced Pin Config Warnung.
+- WiFi Panel: RSSI Balken, IP Ansicht und stabiler „Wi-Fi ändern“-Toggle.
+- Header Hover Particle Animation („grün sprühen“).
 
-## Flash komplett löschen / Erase flash
-Verwende **PlatformIO’s tool-esptoolpy**:
-```sh
-pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COMx erase_flash
-```
-> Port wie oben auswählen.
+## Changelog v0.2.2
+- Fix: Charts in der Popup-Ansicht erhalten wieder Live- und 6h-Daten für alle Sensoren.
+- Neu: VPD-Heatmap-Chart im Stil gängiger VPD-Tabellen (kleine Kachel + großes Modal).
+- Verbesserung: Popup-Chart-UX mit klarerer Skalierung und optionalem Dev-Debug.
 
-## Partitions / 16MB
-Die Partitionstabelle liegt unter `partitions/growsensor_16mb.csv` und ist auf 16MB (NVS + OTA + SPIFFS) ausgelegt.
+## Stability notice
+- v0.2.6 is untested and provided as a community preview. Use at your own risk.
 
-## Troubleshooting
-- **`invalid header 0xffffffff`**
-  - Ursache: falsches Flash‑Layout oder leeres Flash nach falschem Upload‑Offset/Environment.
-  - Lösung: `erase_flash` ausführen, dann mit dem korrekten Environment flashen.
+## ESPHome option
+- You can also flash the ESP32 with ESPHome to use the sensors directly in ESPHome. See ESPHome documentation and configure the sensors accordingly.
 
-- **`PSRAM ID read error` / `wrong PSRAM line mode`**
-  - Ursache: falscher PSRAM‑Modus.
-  - Lösung: `esp32s3_psram_opi` ↔ `esp32s3_psram_qspi` wechseln oder `esp32s3_no_psram` nutzen.
+## License
+- Non-commercial open source license (see `LICENSE`). You may view, use, and modify the code and contribute via pull requests.
+- Commercial use (including selling devices or services, or paid products) requires explicit permission.
+- Contributions are welcome; modified versions must keep the same license and attribution.
+- German version: see `README.de.md` for a full summary in German.
 
-- **USB/COM‑Port nicht sichtbar**
-  - Prüfe USB‑Kabel (Datenkabel), setze Board in Boot‑Modus und wähle den richtigen Port.
-  - Bei USB‑CDC: der Port erscheint nach Reset.
+## Contributing
+- Contributions via pull requests are welcome (see `CONTRIBUTING.md`). Please respect the non-commercial license.
+- Experimental hardware/software: see `DISCLAIMER.md` before deploying.
